@@ -364,7 +364,7 @@
           <div><label class="lbl" for="rmode">Режим</label>
             <select id="rmode"><option value="ai" selected>ИИ-моменты (сценки×серии)</option><option value="seq">Всё по порядку (части 40–55с)</option></select></div>
           <div><label class="lbl" for="lens">Длина серии</label>
-            <select id="lens"><option value="15-30">Короткие · 15–30</option><option value="20-60" selected>Стандарт · 20–60</option><option value="40-75">Длинные · 40–75</option></select></div>
+            <select id="lens"><option value="15-30">Короткие · 15–30</option><option value="20-60" selected>Стандарт · 20–60</option><option value="40-75">Длинные · 40–75</option><option value="150-179">Макси · 150–179</option></select></div>
         </div>
         <div class="ai-grid" id="seRow">
           <div><label class="lbl" for="stories">Сценок (историй)</label>
@@ -441,7 +441,7 @@
         </div>
         <div class="ai-grid">
           <div><label class="lbl" for="sLens">Длина по умолчанию</label>
-            <select id="sLens"><option value="15-30">15–30</option><option value="20-60">20–60</option><option value="40-75">40–75</option></select></div>
+            <select id="sLens"><option value="15-30">15–30</option><option value="20-60">20–60</option><option value="40-75">40–75</option><option value="150-179">150–179</option></select></div>
           <div><label class="lbl" for="sLimit">Анализ по умолчанию</label>
             <select id="sLimit"><option value="0">Всё</option><option value="10">10 мин</option><option value="20">20 мин</option><option value="40">40 мин</option><option value="60">Час</option></select></div>
         </div>
@@ -880,7 +880,7 @@ function applyDefaults(){
   $('stories').value=String(SETTINGS.stories||3);
   $('eps').value=String(SETTINGS.episodes||2);
   const lens=SETTINGS.lens||'20-60';
-  $('lens').value=['15-30','20-60','40-75'].includes(lens)?lens:'20-60';
+  $('lens').value=['15-30','20-60','40-75','150-179'].includes(lens)?lens:'20-60';
   $('limit').value=String(SETTINGS.limit_min ?? 0);
   $('mode').value=SETTINGS.vmode||'split';
   $('asd').value=SETTINGS.asr_model||'base';

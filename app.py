@@ -282,7 +282,10 @@ def run_job(job_id: str, url: str, opts: dict):
                        for k, m in enumerate(stamps[:20])]
         elif opts.get("rmode") == "seq":
             prog(82, "режу по порядку…")
-            moments, scorer = ac.pick_sequential(segs)
+            _mx = int(opts.get("max_len", 60) or 60)
+            _mn = int(opts.get("min_len", 20) or 20)
+            _lo, _hi = (_mn, _mx) if _mx > 75 else (40, 55)
+            moments, scorer = ac.pick_sequential(segs, lo=_lo, hi=_hi)
         else:
             prog(82, "оценка моментов…")
             moments, scorer = ac.pick_series(
