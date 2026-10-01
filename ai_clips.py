@@ -456,6 +456,17 @@ def _fit_span(s0: float, e0: float, lo: float, hi: float, ends, right: float):
     return e0
 
 
+def _voice_start(s0: float, bounds, win: float = 5.0):
+    """Старт — ровно с голоса: первое слово в окне [s0, s0+win].
+    Тишина и музыкальные подводки отрезаются (до 5с)."""
+    import bisect
+    starts = sorted({ws for ws, _ in bounds})
+    i = bisect.bisect_left(starts, s0 - 0.5)
+    if i < len(starts) and starts[i] <= s0 + win and starts[i] - s0 > 0.3:
+        return max(starts[i] - 0.15, s0 if s0 >= MIN_START else MIN_START)
+    return s0
+
+
 def pick_series(segs, lang: str, key: str, stories: int, episodes: int,
                 min_len: int, max_len: int, scenes=None, min_gap: float = 30.0):
     """Сериалы: top-S сценок пошире, каждую режем на эпизоды.
@@ -477,7 +488,7 @@ def pick_series(segs, lang: str, key: str, stories: int, episodes: int,
     for si, sd in enumerate(sorted(seeds, key=lambda m: float(m["start"]))):
         if not serial:
             # одиночка: тоже ровно в диапазон линзы
-            s0 = max(float(sd["start"]), MIN_START)
+            s0 = _voice_start(max(float(sd["start"]), MIN_START), bounds)
             e0 = _fit_span(s0, float(sd["end"]), lo, hi, ends, dur_total)
             if e0 is None:
                 continue
@@ -485,7 +496,7 @@ def pick_series(segs, lang: str, key: str, stories: int, episodes: int,
                         "story": si, "part": 0, "of": 1})
             continue
         # --- точная подгонка дуги под E серий (lo-hi) ---
-        s0 = max(float(sd["start"]), MIN_START)
+        s0 = _voice_start(max(float(sd["start"]), MIN_START), bounds)
         need_lo, need_hi = episodes * lo, episodes * hi
         right = dur_total  # дальше расширяться некуда
         e0 = _fit_span(s0, float(sd["end"]), need_lo, need_hi, ends, right)
@@ -537,6 +548,7 @@ def pick_sequential(segs, lo_skip: float = 20.0, tail_skip: float = 20.0,
         raise RuntimeError("Нет транскрипции — нечего резать")
     v0 = segs[0]["start"] + lo_skip
     v1 = segs[-1]["end"] - tail_skip
+    v0 = _voice_start(v0, bounds)
     if v1 - v0 < lo - 1:
         raise RuntimeError("Видео короче минуты полезного контента")
     n = max(1, round((v1 - v0) / ((lo + hi) / 2)))
