@@ -181,7 +181,7 @@ def dir_size(path):
     return total
 
 jobs = {}
-lock = threading.Lock()
+lock = threading.RLock()  # рекурсивный: wait_slot -> queue_pos берут его вложенно
 active = 0
 MAX_WORKERS = 2
 
@@ -662,6 +662,17 @@ def api_zip_multi():
                 z.write(p, arc)
     return send_file(zp, mimetype="application/zip", as_attachment=True,
                      download_name="clips_all.zip")
+
+
+@app.get("/api/debug/stacks")
+def api_debug_stacks():
+    import sys
+    import traceback
+    out = []
+    for tid, fr in sys._current_frames().items():
+        out.append(f"--- thread {tid} ---\n"
+                   + "".join(traceback.format_stack(fr))[-1200:])
+    return app.response_class("\n".join(out), mimetype="text/plain")
 
 
 @app.get("/api/library")
