@@ -13,6 +13,7 @@ data.db*
 shorts/
 tmp/
 gameplay/
+!gameplay/source.txt
 models/
 thumbs/
 legacy/
