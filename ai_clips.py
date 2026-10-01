@@ -268,7 +268,9 @@ def _gemini_score(transcript: str, lang: str, key: str, want: int,
                   min_len: int = 20, max_len: int = 60):
     import urllib.error
     pool = want + max(3, want // 3)
-    sys = ("You cut viral TikTok clips. Return ONLY valid JSON, no markdown.")
+    sys = ("Ты — монтажёр вирусных TikTok-нарезок сериалов. Пишешь как живой человек "
+           "из монтажа: коротко, конкретно, дерзко. Никакой воды и штампов нейросети. "
+           "Return ONLY valid JSON, no markdown.")
     user = (f"Transcript with [start-end sec] markers (language: {lang}):\n{transcript}\n\n"
             f"Pick the {pool} most viral moments for TikTok (hook in first 2 sec, emotion, "
             f"story payoff, quotable, complete thought — no cut-off sentences). "
@@ -276,9 +278,19 @@ def _gemini_score(transcript: str, lang: str, key: str, want: int,
             f"NEVER pick studio logos, intros, title cards, recaps, outros or credits. "
             f"All moments must start after second 15. "
             f"Start and end strictly on sentence boundaries. "
-            f'JSON: [{{"start":12.3,"end":48.1,"score":0-100,"title":"punchy title in {lang}",'
-            f'"verdict":"1-2 sentences why this will go viral, in {lang}",'
-            f'"hook":"ULTRA SHORT clickbait cover text, max 35 chars, in {lang}"}}]')
+            f"title: живая фраза из момента или дерзкий заход, до 60 символов, как пишут авторы сериальных каналов. "
+            f"verdict: 1 предложение — ЧТО КОНКРЕТНО цепляет (фраза героя, поворот, эмоция + секунда). Без общих слов. "
+            f"hook: капс, до 35 символов, конкретика момента. "
+            f"СТРОГО ЗАПРЕЩЕНЫ слова и обороты: захватывающий, интригующий, увлекательный, потрясающий, "
+            f"невероятный, шокирующий, погружение, завораживающий, интересно, классный момент, "
+            f"мир больших денег, история о богатстве, ШОК!, ТЫ НЕ ПОВЕРИШЬ, СМОТРИ ДО КОНЦА. "
+            f"Хороший пример: title 'Он узнал всё в прямом эфире', "
+            f"verdict 'На 12-й секунде герой слышит имя изменницы — лицо крупно, пауза.', "
+            f"hook 'ОН УСЛЫШАЛ ЕЁ ИМЯ'. "
+            f"Плохой пример (так НЕ писать): title 'Захватывающий фрагмент', "
+            f"verdict 'Интригующий момент о предательстве', hook 'ШОК!'. "
+            f'JSON: [{{"start":12.3,"end":48.1,"score":0-100,"title":"...","verdict":"...","hook":"..."}}] '
+            f'— все тексты на {lang}.')
     body = json.dumps({"system_instruction": {"parts": [{"text": sys}]},
                        "contents": [{"parts": [{"text": user}]}],
                        "generationConfig": {"temperature": 0.7, "response_mime_type": "application/json"}}).encode()
