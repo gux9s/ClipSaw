@@ -260,6 +260,10 @@ def run_job(job_id: str, url: str, opts: dict):
 
     wait_slot(job_id)
     try:
+        import shutil
+        free_gb = shutil.disk_usage(BASE).free / 1e9
+        if free_gb < 1.5:
+            raise RuntimeError(f"Нет места на диске ({free_gb:.1f} ГБ) — почисти Библиотеку")
         with lock:
             jobs[job_id].update(status="work", stage="качаю видео…", pct=1)
         src, title = fetch_source(
