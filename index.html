@@ -359,24 +359,28 @@
         <textarea id="urls" placeholder="по одной ссылке на строку — до 10 за раз, на ночь хватит"></textarea>
         <label class="lbl" for="key">DREX API-ключ <span style="text-transform:none;letter-spacing:0">(<a href="https://drex.nace.ai" target="_blank">nace.ai</a> — без него не запустится)</span></label>
         <input id="key" type="password" placeholder="nace_sk… (можно сохранить в настройках)">
-        <div class="step"><b>02</b><span>Сценки и серии</span></div>
+        <div class="step"><b>02</b><span>Что нарезать</span></div>
         <div class="ai-grid">
+          <div><label class="lbl" for="rmode">Режим</label>
+            <select id="rmode"><option value="ai" selected>ИИ-моменты (сценки×серии)</option><option value="seq">Всё по порядку (части 40–55с)</option></select></div>
+          <div><label class="lbl" for="lens">Длина серии</label>
+            <select id="lens"><option value="15-30">Короткие · 15–30</option><option value="20-60" selected>Стандарт · 20–60</option><option value="40-75">Длинные · 40–75</option></select></div>
+        </div>
+        <div class="ai-grid" id="seRow">
           <div><label class="lbl" for="stories">Сценок (историй)</label>
             <select id="stories"><option>1</option><option>2</option><option selected>3</option><option>5</option><option>8</option></select></div>
           <div><label class="lbl" for="eps">Серий в сценке</label>
             <select id="eps"><option>1</option><option selected>2</option><option>3</option><option>4</option></select></div>
         </div>
-        <div class="ai-grid">
-          <div><label class="lbl" for="lens">Длина серии</label>
-            <select id="lens"><option value="15-30">Короткие · 15–30</option><option value="20-60" selected>Стандарт · 20–60</option><option value="40-75">Длинные · 40–75</option></select></div>
           <div><label class="lbl" for="limit">Анализ</label>
             <select id="limit"><option value="0" selected>Всё видео</option><option value="10">Первые 10 мин</option><option value="20">Первые 20 мин</option><option value="40">Первые 40 мин</option><option value="60">Первый час</option></select></div>
-        </div>
-        <div class="ai-grid">
           <div><label class="lbl" for="mode">Формат</label>
             <select id="mode"><option value="split" selected>Сплит + Subway</option><option value="blur">Размытый фон</option><option value="face">Трек лица</option><option value="fast">Только нарезка</option></select></div>
+        </div>
+        <div class="ai-grid">
           <div><label class="lbl" for="asd">Транскрибация</label>
             <select id="asd"><option value="base" selected>Быстро · Base</option><option value="small">Точно · Small (медленнее)</option><option value="giga">GigaAM v3 · топ для русского</option></select></div>
+          <div></div>
         </div>
         <div class="step"><b>03</b><span>Оформление</span></div>
         <div class="chkgrid">

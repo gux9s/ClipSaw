@@ -510,6 +510,43 @@ def pick_series(segs, lang: str, key: str, stories: int, episodes: int,
     return out, scorer
 
 
+def pick_sequential(segs, lo_skip: float = 20.0, tail_skip: float = 20.0):
+    """Всё видео по порядку: части 40-55с, без первых/последних 20с.
+    Границы — по краям слов, на каждой жжём 'ЧАСТЬ N'."""
+    bounds = _word_bounds(segs)
+    ends = sorted({e for _, e in bounds})
+    import bisect
+    if not segs:
+        raise RuntimeError("Нет транскрипции — нечего резать")
+    v0 = segs[0]["start"] + lo_skip
+    v1 = segs[-1]["end"] - tail_skip
+    if v1 - v0 < 39:
+        raise RuntimeError("Видео короче минуты полезного контента")
+    n = max(1, round((v1 - v0) / 47.5))
+    out = []
+    ps = v0
+    for k in range(n):
+        tgt = v0 + (v1 - v0) * (k + 1) / n if k < n - 1 else v1
+        if k < n - 1:
+            i = bisect.bisect_left(ends, max(tgt, ps + 39.5))
+            pe = ends[i] if i < len(ends) and ends[i] <= ps + 56 else min(max(tgt, ps + 39.5), ps + 56)
+        else:
+            pe = v1
+        if pe - ps < 39:
+            break
+        out.append({
+            "start": round(ps, 1), "end": round(pe, 1),
+            "score": 90, "title": f"Часть {k + 1} из {n}",
+            "verdict": f"Нарезка по порядку: часть {k + 1} из {n}.",
+            "hook": "", "story": 0, "part": k, "of": n,
+            "part_label": f"ЧАСТЬ {k + 1}",
+        })
+        ps = pe + 0.3
+    if not out:
+        raise RuntimeError("Не вышло нарезать — попробуй ИИ-режим")
+    return out, "parts"
+
+
 def parse_stamps(text: str):
     """Ручные таймкоды: строки 'мм:сс-мм:сс' / 'ч:мм:сс-...' / 'сек-сек'."""
     def ts(t):
@@ -930,25 +967,30 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
     font = _font(62)
     seam = TOP_H
 
-    # --- баннер: случайная точка в середине (20-40с при минутном клипе) ---
-    bA = bB = -1.0
+    # --- баннеры: 1 на ~50с контента (150-179с → 3 штуки), места равномерно ---
+    wins = []  # (output_start, output_end, content_start)
     bcap, b_step, b_frac = None, 0.0, 0.0
     bpath = banner_path or BANNER_FILE
     use_banner = bool(banner) and os.path.exists(bpath)
+    b_eff = 0.0
     if use_banner:
         bcap = cv2.VideoCapture(bpath)
         bn = int(bcap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
         bfps = bcap.get(cv2.CAP_PROP_FPS) or 60
         b_eff = (bn / max(bfps, 1)) / BANNER_SPEED  # 5.5с → ~4.2с
-        lo, hi = dur * 0.33, dur * 0.67 - b_eff
-        if dur >= b_eff + 3 and hi > lo:
-            bA = random.uniform(lo, hi)
-        elif dur > b_eff + 1:
-            bA = (dur - b_eff) / 2
-        else:
+        n = max(1, min(6, int(round(dur / 50.0))))
+        if dur < b_eff + 3:
             use_banner = False  # клип короче баннера — пропускаем
-        if use_banner:
-            bB = bA + b_eff
+        else:
+            for k in range(n):
+                if n == 1:
+                    lo, hi = dur * 0.33, dur * 0.67 - b_eff
+                    cA = random.uniform(lo, hi) if hi > lo else (dur - b_eff) / 2
+                else:
+                    cA = dur * (k + 1) / (n + 1) - b_eff / 2
+                    cA = min(max(cA, 0.5), max(dur - b_eff - 0.5, 0.5))
+                oA = cA + k * b_eff
+                wins.append((oA, oA + b_eff, cA))
             b_step = max(bfps, 1) * BANNER_SPEED / max(fps, 1)
 
     cmd = [FFMPEG, "-y", "-v", "error",
@@ -958,18 +1000,17 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
     mix_tmp = None
     if use_banner:
         # фриз: контент останавливается на время баннера и продолжается
-        # с того же места — клип длиннее на баннер, зато ничего не теряется
-        froze = bB - bA
+        # с того же места — клип длиннее на суммарный баннер
+        froze = b_eff * len(wins)
         out_dur = dur + froze
-        # --- звук собираем посемпльно в numpy: оригинал + баннер + оригинал ---
+        # --- звук собираем посемпльно в numpy: оригинал + баннеры + оригинал ---
         import numpy as np
         sr, ch = 44100, 2
         af_src = ("aresample=44100,asetrate=44100*1.02,"
                   "aresample=44100,atempo=0.9804") if antidetect else None
         orig = _extract_pcm(src, ss=start, dur=dur, af=af_src, sr=sr, ch=ch)
         n_total = int(round(out_dur * sr))
-        n_bA = min(int(round(bA * sr)), len(orig))
-        need = int(round(froze * sr))
+        need = int(round(b_eff * sr))
         if _banner_has_audio(bpath):
             ban = _extract_pcm(
                 bpath, af=f"atempo={BANNER_SPEED},aresample={sr},volume=0.5",
@@ -980,7 +1021,14 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
                                                dtype=np.int16)])
         else:
             ban = np.zeros((need, ch), dtype=np.int16)
-        tl = np.vstack([orig[:n_bA], ban, orig[n_bA:]])
+        parts, prev_s = [], 0
+        for (_, _, cA) in wins:
+            n_cA = min(int(round(cA * sr)), len(orig))
+            parts.append(orig[prev_s:n_cA])
+            parts.append(ban)
+            prev_s = n_cA
+        parts.append(orig[prev_s:])
+        tl = np.vstack(parts)
         if len(tl) < n_total:
             tl = np.vstack([tl, np.zeros((n_total - len(tl), ch), dtype=np.int16)])
         else:
@@ -1006,18 +1054,23 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
     cap.set(cv2.CAP_PROP_POS_MSEC, start * 1000)
     _warm_start(cap)  # первый кадр не чёрный
     total = max(int(round(out_dur * fps)), 1)
-    last_top, last_bot = None, None
+    last_top, last_bot, last_win = None, None, -1
     try:
         for k in range(total):
             t_rel = k / fps  # время на ВЫХОДЕ
-            if use_banner and t_rel >= bB:
-                ct_rel = t_rel - froze  # после баннера: контент догоняет
-            elif use_banner and t_rel >= bA:
-                ct_rel = bA  # баннер: контент стоит
+            if use_banner:
+                acc, ct_rel, frozen = 0.0, t_rel, False
+                for (oA, oB, cA) in wins:
+                    if t_rel >= oB:
+                        acc += b_eff
+                    elif t_rel >= oA:
+                        ct_rel, frozen = cA, True
+                        break
+                else:
+                    ct_rel = t_rel - acc
             else:
-                ct_rel = t_rel
+                ct_rel, frozen = t_rel, False
             t = start + ct_rel  # время в КОНТЕНТЕ (сабы, трек лиц)
-            frozen = use_banner and bA <= t_rel <= bB
             # цикл в RGB: одна конверсия вместо трёх на кадр
             if frozen and last_top is not None:
                 fr = last_top
@@ -1065,7 +1118,14 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
 
             frame = cv2.vconcat([top, bot])
             banner_on = False
-            if use_banner and bA <= t_rel <= bB:
+            if frozen:
+                if last_win < 0 or t_rel < wins[last_win][0] or t_rel > wins[last_win][1]:
+                    for wi, (oA, oB, _cA) in enumerate(wins):
+                        if oA <= t_rel <= oB:
+                            last_win = wi
+                            break
+                    bcap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    b_frac = 0.0
                 b_frac += b_step
                 n_adv, b_frac = int(b_frac), b_frac - int(b_frac)
                 bok, bfr = False, None
@@ -1110,6 +1170,8 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
                         frame = __import__("numpy").asarray(img)
             if hook_title and (t - start) <= HOOK_SECS and moment.get("hook"):
                 frame = _draw_hook(frame, moment["hook"])
+            if moment.get("part_label"):
+                frame = _draw_part(frame, moment["part_label"])
             proc.stdin.write(frame.tobytes())
             if progress and k % 15 == 0:
                 progress(k / total)
@@ -1201,6 +1263,22 @@ def _caption_states(words, t: float, per_line: int = 4):
 
 
 HOOK_SECS = 2.2  # хук-заголовок висит первые секунды клипа
+
+
+def _draw_part(frame, text: str):
+    """Подпись 'ЧАСТЬ N' внизу кадра (режим нарезки по порядку)."""
+    import cv2
+    if not text:
+        return frame
+    from PIL import Image, ImageDraw
+    font = _font(46)
+    img = Image.fromarray(frame)
+    dr = ImageDraw.Draw(img)
+    bb = dr.textbbox((0, 0), text, font=font, stroke_width=3)
+    x = (OUT_W - (bb[2] - bb[0])) / 2
+    dr.text((x, OUT_H - (bb[3] - bb[1]) - 78), text, font=font,
+            fill="white", stroke_width=3, stroke_fill="black")
+    return __import__("numpy").asarray(img)
 
 
 def _draw_hook(frame, text: str):
@@ -1360,6 +1438,8 @@ def render_clip(src: str, moment: dict, segs, out: str, facetrack: bool = True,
                         frame = __import__("numpy").asarray(img)
             if hook_title and (t - start) <= HOOK_SECS and moment.get("hook"):
                 frame = _draw_hook(frame, moment["hook"])
+            if moment.get("part_label"):
+                frame = _draw_part(frame, moment["part_label"])
             proc.stdin.write(frame.tobytes())
             if progress and k % 15 == 0:
                 progress(k / total)

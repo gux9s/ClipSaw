@@ -29,7 +29,7 @@ FFMPEG = os.path.expanduser("~/.local/bin/ffmpeg")
 
 DB = os.path.join(BASE, "data.db")
 CFG = os.path.join(BASE, "config.json")
-DEFAULT_CFG = {"gemini_key": "", "drex_key": "", "stories": 3, "episodes": 2, "lens": "20-60", "limit_min": 0,
+DEFAULT_CFG = {"gemini_key": "", "drex_key": "", "rmode": "ai", "stories": 3, "episodes": 2, "lens": "20-60", "limit_min": 0,
                "vmode": "split", "captions": True, "facetrack": True,
                "antidetect": False, "mirror": False, "banner": True, "hook_title": False,
                "asr_model": "base", "max_workers": 2}
@@ -280,6 +280,9 @@ def run_job(job_id: str, url: str, opts: dict):
         if stamps:
             moments = [{**m, "title": m.get("title") or f"Момент {k + 1}"}
                        for k, m in enumerate(stamps[:20])]
+        elif opts.get("rmode") == "seq":
+            prog(82, "режу по порядку…")
+            moments, scorer = ac.pick_sequential(segs)
         else:
             prog(82, "оценка моментов…")
             moments, scorer = ac.pick_series(
@@ -368,7 +371,7 @@ def api_start():
     cfg = get_settings()
     if not data.get("api_key"):
         data["api_key"] = cfg.get("drex_key", "")
-    for k in ("stories", "episodes", "limit_min", "vmode", "captions", "facetrack", "antidetect", "mirror", "banner", "hook_title", "asr_model", "drex_key"):
+    for k in ("rmode", "stories", "episodes", "limit_min", "vmode", "captions", "facetrack", "antidetect", "mirror", "banner", "hook_title", "asr_model", "drex_key"):
         if k not in data or data[k] in ("", None):
             data[k] = cfg.get(k)
     if not data.get("min_len") or not data.get("max_len"):
@@ -395,6 +398,7 @@ def api_start():
                             "started": time.time()}
         threading.Thread(target=run_job, args=(job_id, url, {
             "api_key": data.get("api_key", ""), "stories": stories, "episodes": episodes,
+            "rmode": data.get("rmode", "ai") if data.get("rmode") in ("ai", "seq") else "ai",
             "min_len": int(data.get("min_len", 20)), "max_len": int(data.get("max_len", 60)),
             "limit_min": int(data.get("limit_min", 0)), "min_gap": 45,
             "captions": bool(data.get("captions", True)),
