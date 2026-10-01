@@ -109,11 +109,6 @@ os.environ["PATH"] = (os.path.expanduser("~/.deno/bin") + ":"
                       + os.path.expanduser("~/.local/bin") + ":"
                       + os.environ.get("PATH", ""))
 
-HOOK_WORDS = ("секрет,никогда,шок,шоке,правда,ложь,деньги,миллион,умер,скандал,запрет,почему,как,"
-              "смотри,слушай,внимание,топ,худш,лучш,ошибка,фейл,ржака,смех,жесть,треш,украл,измена,"
-              "secret,never,shocking,truth,lie,money,million,dead,scandal,banned,why,how,watch,"
-              "listen,top,worst,best,mistake,fail,funny,crazy,shit,stole,cheat,free,hack").split(",")
-
 
 def _has_videotoolbox() -> bool:
     try:
@@ -322,48 +317,6 @@ def _gemini_score(transcript: str, lang: str, key: str, want: int,
             for m in arr if "start" in m and "end" in m]
 
 
-def _heuristic_score(segs, want: int):
-    wins = []
-    i = 0
-    while i < len(segs):
-        j, words = i, 0
-        while j < len(segs) and segs[j]["end"] - segs[i]["start"] < 45:
-            words += len(segs[j]["text"].split())
-            j += 1
-        if j > i:
-            txt = " ".join(s["text"] for s in segs[i:j])
-            dur = segs[j - 1]["end"] - segs[i]["start"]
-            wps = words / max(dur, 1)
-            bang = txt.count("!") * 6 + txt.count("?") * 4
-            caps = sum(1 for w in txt.split() if w.isupper() and len(w) > 2) * 3
-            hooks = sum(3 for h in HOOK_WORDS if h in txt.lower())
-            laugh = 8 if re.search(r"\[?(смех|ха-?ха|lol|haha|laughter)\]?|\(.*?\)", txt, re.I) else 0
-            score = min(96, int(40 + min(wps, 4) * 8 + bang + caps + hooks + laugh))
-            if txt.rstrip()[-1:] in (".", "!", "?", "…"):
-                score = min(96, score + 8)  # мысль завершена — сцена целая
-            sig = []
-            if hooks:
-                sig.append("хук-слова цепляют с первых секунд")
-            if laugh:
-                sig.append("живая эмоция/смех")
-            if wps >= 2.5:
-                sig.append(f"плотная речь ({wps:.1f} сл/с)")
-            elif wps < 1.2:
-                sig.append("рваный темп — держит паузами")
-            if bang:
-                sig.append("вопросы и восклицания")
-            if caps:
-                sig.append("акцентные слова")
-            verdict = ("Вирусность %d/100: %s." % (
-                score, "; ".join(sig) if sig else "ровный фрагмент без явных крючков"))
-            wins.append({"start": segs[i]["start"], "end": segs[j - 1]["end"],
-                         "score": score, "title": " ".join(txt.split()[:9]) + "…",
-                         "verdict": verdict,
-                         "hook": " ".join(txt.split()[:6]).upper()[:36]})
-        i += max(1, (j - i) // 2)
-    return sorted(wins, key=lambda m: -m["score"])[:want + max(3, want // 3)]
-
-
 def detect_scenes(src: str, min_len: float = 15.0, max_len: float = 120.0):
     """PySceneDetect -> сцены [(start,end)], короткие склеены, длинные режутся пополам."""
     from scenedetect import detect, ContentDetector
@@ -518,17 +471,15 @@ def parse_stamps(text: str):
 def pick_moments(segs, lang: str, key: str, want: int, min_len: int, max_len: int,
                  scenes=None, min_gap: float = 30.0):
     transcript = "\n".join(f"[{s['start']:.1f}-{s['end']:.1f}] {s['text']}" for s in segs)
-    cands = []
-    scorer = "heuristic"
-    if key:
-        try:
-            cands = _gemini_score(transcript[:90000], lang, key, want, min_len, max_len)
-            scorer = "gemini"
-        except Exception as e:
-            cands = [{"_err": str(e)[:100]}]
-            cands = []
+    if not key:
+        raise RuntimeError("Нет Gemini-ключа — вставь его в настройках")
+    try:
+        cands = _gemini_score(transcript[:90000], lang, key, want, min_len, max_len)
+    except Exception as e:
+        raise RuntimeError(f"Gemini недоступен: {e}") from e
+    scorer = "gemini"
     if not cands:
-        cands = _heuristic_score(segs, want)
+        raise RuntimeError("Gemini вернул пусто — попробуй ещё раз")
     # слабые моменты выкидываем, только если сильных хватает на всю пачку
     strong = [m for m in cands if m.get("score", 0) >= 40]
     if len(strong) >= want:
