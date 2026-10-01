@@ -504,6 +504,16 @@ setInterval(async ()=>{
   for(const [id,j] of [...live]){
     try{
       const s=await (await fetch('/api/job/'+id)).json();
+      if(s.ok===false){
+        j.miss=(j.miss||0)+1;
+        if(j.miss>=3){
+          live.delete(id);
+          j.targets.forEach(t=>{if(t.st)t.st.textContent='Задача потеряна (сервер перезапускался) — запусти заново';});
+          renderDashActive();
+        }
+        continue;
+      }
+      j.miss=0;
       j.targets.forEach(t=>{
         if(t.bar)t.bar.style.width=(s.pct||0)+'%';
         if(t.st)t.st.textContent=(s.stage||s.status)+' · '+(s.pct||0)+'%';
