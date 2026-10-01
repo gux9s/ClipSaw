@@ -225,6 +225,14 @@ def _gemini_models(key: str) -> list:
                and not any(bad in m.get("name", "") for bad in
                            ("tts", "image", "imagen", "video", "embed", "aqa"))]
         out.sort(key=vkey, reverse=True)
+        # свежие 3.8/3.7 упираются в 429 — сначала проверенно живые
+        def _prio(name):
+            if "tts" in name or "lite" in name:
+                return 2
+            if "gemini-3.6-flash" in name or "gemini-3.5-flash" in name:
+                return 0
+            return 1
+        out.sort(key=_prio)
         if out:
             return out
     except Exception:
