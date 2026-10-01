@@ -267,54 +267,92 @@ def _post_gen(model: str, key: str, body: bytes):
     raise last
 
 
-def _gemini_score(transcript: str, lang: str, key: str, want: int,
-                  min_len: int = 20, max_len: int = 60):
+DREX_URL = "https://drex.nace.ai/v1/systemone"
+DREX_MODEL = "drex-v1.5"
+
+
+def _drex_call(key: str, state: str, questions: dict):
+    """Один батч в DREX: до 512 вопросов за миллисекунды."""
+    import time
     import urllib.error
-    pool = want + max(3, want // 3)
-    sys = ("Ты — монтажёр вирусных TikTok-нарезок сериалов. Пишешь как живой человек "
-           "из монтажа: коротко, конкретно, дерзко. Никакой воды и штампов нейросети. "
-           "Return ONLY valid JSON, no markdown.")
-    user = (f"Transcript with [start-end sec] markers (language: {lang}):\n{transcript}\n\n"
-            f"Pick the {pool} most viral moments for TikTok (hook in first 2 sec, emotion, "
-            f"story payoff, quotable, complete thought — no cut-off sentences). "
-            f"Each {min_len}-{max_len} sec, use exact segment boundaries. "
-            f"NEVER pick studio logos, intros, title cards, recaps, outros or credits. "
-            f"All moments must start after second 15. "
-            f"Start and end strictly on sentence boundaries. "
-            f"title: живая фраза из момента или дерзкий заход, до 60 символов, как пишут авторы сериальных каналов. "
-            f"verdict: 1 предложение — ЧТО КОНКРЕТНО цепляет (фраза героя, поворот, эмоция + секунда). Без общих слов. "
-            f"hook: капс, до 35 символов, конкретика момента. "
-            f"СТРОГО ЗАПРЕЩЕНЫ слова и обороты: захватывающий, интригующий, увлекательный, потрясающий, "
-            f"невероятный, шокирующий, погружение, завораживающий, интересно, классный момент, "
-            f"мир больших денег, история о богатстве, ШОК!, ТЫ НЕ ПОВЕРИШЬ, СМОТРИ ДО КОНЦА. "
-            f"Хороший пример: title 'Он узнал всё в прямом эфире', "
-            f"verdict 'На 12-й секунде герой слышит имя изменницы — лицо крупно, пауза.', "
-            f"hook 'ОН УСЛЫШАЛ ЕЁ ИМЯ'. "
-            f"Плохой пример (так НЕ писать): title 'Захватывающий фрагмент', "
-            f"verdict 'Интригующий момент о предательстве', hook 'ШОК!'. "
-            f'JSON: [{{"start":12.3,"end":48.1,"score":0-100,"title":"...","verdict":"...","hook":"..."}}] '
-            f'— все тексты на {lang}.')
-    body = json.dumps({"system_instruction": {"parts": [{"text": sys}]},
-                       "contents": [{"parts": [{"text": user}]}],
-                       "generationConfig": {"temperature": 0.7, "response_mime_type": "application/json"}}).encode()
-    last_err = None
-    for model in _gemini_models(key)[:3]:
+    body = json.dumps({"model": DREX_MODEL, "state": state,
+                       "questions": questions}).encode()
+    last = None
+    for attempt in range(3):
+        req = urllib.request.Request(
+            DREX_URL, data=body, headers={"Content-Type": "application/json",
+                                          "Authorization": f"Bearer {key}"})
         try:
-            data = _post_gen(model, key, body)
-            break
+            return json.load(urllib.request.urlopen(req, timeout=60, context=_CTX))
         except urllib.error.HTTPError as e:
-            last_err = e  # 404 на старой модели — пробуем следующую
+            last = e
+            if e.code in (429, 529):
+                time.sleep(4 * (attempt + 1))
+                continue
+            raise
+    raise last
+
+
+def _drex_score(segs, key: str, want: int, min_len: int, max_len: int):
+    """Кандидаты-окна -> DREX (viral/hook/whole) -> скор 0-100. Без текстовой генерации."""
+    # чанки транскрипта, чтобы влезть в лимит токенов модели
+    chunks, cur, cur_chars = [], [], 0
+    for s in segs:
+        t = f"[{s['start']:.1f}-{s['end']:.1f}] {s['text']}"
+        cur.append(s)
+        cur_chars += len(t)
+        if cur_chars > 18000:
+            chunks.append(cur)
+            cur, cur_chars = [], 0
+    if cur:
+        chunks.append(cur)
+    out = []
+    for csegs in chunks:
+        state = "\n".join(f"[{s['start']:.1f}-{s['end']:.1f}] {s['text']}" for s in csegs)
+        wins, questions = [], {}
+        step = max(1, len(csegs) // 60)  # не больше ~60 окон на чанк
+        for i in range(0, len(csegs), step):
+            j = i
+            while j < len(csegs) and csegs[j]["end"] - csegs[i]["start"] <= max_len:
+                dur = csegs[j]["end"] - csegs[i]["start"]
+                if dur >= min_len * 0.7:
+                    s0, e0 = csegs[i]["start"], csegs[j]["end"]
+                    k = len(wins)
+                    wins.append((s0, e0, " ".join(s["text"] for s in csegs[i:j + 1])))
+                    tag = f"[{s0:.1f}-{e0:.1f}]"
+                    questions[f"w{k}_viral"] = {
+                        "type": "noul",
+                        "instructions": f"Moment {tag} will go viral on TikTok: hook in first seconds, emotion, quotable, story payoff."}
+                    questions[f"w{k}_hook"] = {
+                        "type": "noul",
+                        "instructions": f"Moment {tag} opens with a strong hook that stops scrolling."}
+                    questions[f"w{k}_whole"] = {
+                        "type": "noul",
+                        "instructions": f"Moment {tag} is a complete thought, not cut off mid-sentence."}
+                j += 1
+        if not wins:
             continue
-    else:
-        raise last_err or RuntimeError("gemini: нет рабочей модели")
-    text = data["candidates"][0]["content"]["parts"][0]["text"]
-    text = re.sub(r"^```\w*|```$", "", text.strip(), flags=re.M)
-    arr = json.loads(text)
-    return [{"start": float(m["start"]), "end": float(m["end"]),
-             "score": int(m.get("score", 70)), "title": str(m.get("title", ""))[:120],
-             "verdict": str(m.get("verdict", ""))[:240],
-             "hook": str(m.get("hook", ""))[:40]}
-            for m in arr if "start" in m and "end" in m]
+        # батчи по 150 окон (450 вопросов): лимит API — 512
+        ans = {}
+        wkeys = [f"w{k}_{sfx}" for k in range(len(wins)) for sfx in ("viral", "hook", "whole")]
+        for b in range(0, len(wkeys), 450):
+            sub = {k: questions[k] for k in wkeys[b:b + 450]}
+            part = _drex_call(key, state, sub).get("answers", {})
+            ans.update(part)
+        for k, (s0, e0, txt) in enumerate(wins):
+            def _p(suffix):
+                a = (ans.get(f"w{k}_{suffix}") or {})
+                return float(a.get("noul", 0.5))
+            pv, ph, pw = _p("viral"), _p("hook"), _p("whole")
+            score = int(round(100 * (0.55 * pv + 0.25 * ph + 0.20 * pw)))
+            title = " ".join(txt.split()[:9]) + "…"
+            out.append({
+                "start": s0, "end": e0, "score": score, "title": title[:120],
+                "verdict": (f"Drex {score}/100: виральность {pv:.2f}, "
+                            f"хук {ph:.2f}, цельность {pw:.2f}."),
+                "hook": "",
+            })
+    return sorted(out, key=lambda m: -m["score"])[:want + max(3, want // 3)]
 
 
 def detect_scenes(src: str, min_len: float = 15.0, max_len: float = 120.0):
@@ -470,16 +508,15 @@ def parse_stamps(text: str):
 
 def pick_moments(segs, lang: str, key: str, want: int, min_len: int, max_len: int,
                  scenes=None, min_gap: float = 30.0):
-    transcript = "\n".join(f"[{s['start']:.1f}-{s['end']:.1f}] {s['text']}" for s in segs)
     if not key:
-        raise RuntimeError("Нет Gemini-ключа — вставь его в настройках")
+        raise RuntimeError("Нет DREX-ключа — вставь его в настройках")
     try:
-        cands = _gemini_score(transcript[:90000], lang, key, want, min_len, max_len)
+        cands = _drex_score(segs, key, want, min_len, max_len)
     except Exception as e:
-        raise RuntimeError(f"Gemini недоступен: {e}") from e
-    scorer = "gemini"
+        raise RuntimeError(f"DREX недоступен: {e}") from e
+    scorer = "drex"
     if not cands:
-        raise RuntimeError("Gemini вернул пусто — попробуй ещё раз")
+        raise RuntimeError("DREX вернул пусто — попробуй ещё раз")
     # слабые моменты выкидываем, только если сильных хватает на всю пачку
     strong = [m for m in cands if m.get("score", 0) >= 40]
     if len(strong) >= want:

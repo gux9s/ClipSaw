@@ -357,8 +357,8 @@
         <div class="step"><b>01</b><span>Источник</span></div>
         <label class="lbl" for="urls">Ссылки на серии — по одной на строку</label>
         <textarea id="urls" placeholder="по одной ссылке на строку — до 10 за раз, на ночь хватит"></textarea>
-        <label class="lbl" for="key">Gemini API-ключ <span style="text-transform:none;letter-spacing:0">(<a href="https://aistudio.google.com/apikey" target="_blank">взять бесплатно</a> — без него не запустится)</span></label>
-        <input id="key" type="password" placeholder="AIza… (можно сохранить в настройках)">
+        <label class="lbl" for="key">DREX API-ключ <span style="text-transform:none;letter-spacing:0">(<a href="https://drex.nace.ai" target="_blank">nace.ai</a> — без него не запустится)</span></label>
+        <input id="key" type="password" placeholder="nace_sk… (можно сохранить в настройках)">
         <div class="step"><b>02</b><span>Сценки и серии</span></div>
         <div class="ai-grid">
           <div><label class="lbl" for="stories">Сценок (историй)</label>
@@ -424,7 +424,9 @@
     <section class="view" id="v-settings">
       <div class="card">
         <div class="subttl">Доступ</div>
-        <label class="lbl" for="sKey">Gemini API-ключ</label>
+        <label class="lbl" for="sDrex">DREX API-ключ (скоринг)</label>
+        <input id="sDrex" type="password" placeholder="nace_sk…">
+        <label class="lbl" for="sKey">Gemini API-ключ (чат)</label>
         <input id="sKey" type="password" placeholder="AIza…">
         <div class="subttl">Дефолты нарезки</div>
         <div class="ai-grid">
@@ -523,7 +525,7 @@ setInterval(async ()=>{
         live.delete(id);
         j.targets.forEach(t=>{
           if(s.status!=='done'){if(t.st)t.st.textContent='Ошибка: '+(s.error||'');return;}
-          if(t.st)t.st.textContent='Готово: '+s.clips.length+' клипов'+(s.scorer==='gemini'?' · Gemini AI':s.scorer==='manual'?' · вручную':' · эвристика');
+          if(t.st)t.st.textContent='Готово: '+s.clips.length+' клипов'+(s.scorer==='drex'?' · DREX AI':s.scorer==='gemini'?' · Gemini AI':s.scorer==='manual'?' · вручную':' · эвристика');
           if(!t.box)return;
           t.box.innerHTML='';
           s.clips.forEach(c=>{
@@ -551,8 +553,8 @@ setInterval(async ()=>{
 
 function showErr(m){const e=$('err');e.textContent=m;e.style.display='block'}
 function hideErr(){$('err').style.display='none'}
-if(localStorage.getItem('ms_key'))$('key').value=localStorage.getItem('ms_key');
-$('key').addEventListener('change',()=>localStorage.setItem('ms_key',$('key').value.trim()));
+if(localStorage.getItem('cs_drex'))$('key').value=localStorage.getItem('cs_drex');
+$('key').addEventListener('change',()=>localStorage.setItem('cs_drex',$('key').value.trim()));
 $('manualChk').addEventListener('change',()=>{$('stampsBox').style.display=$('manualChk').checked?'block':'none'});
 $('mode').addEventListener('change',()=>{
   const fast=$('mode').value==='fast';
@@ -565,7 +567,7 @@ $('go').onclick=async ()=>{
   if(!urls){showErr('Вставь хоть одну ссылку');return;}
   if($('manualChk').checked&&!$('stamps').value.trim()){showErr('Включены свои таймкоды, но поле пустое');return;}
   const key=$('key').value.trim();
-  localStorage.setItem('ms_key',key);
+  localStorage.setItem('cs_drex',key);
   const mode=$('mode').value;
   $('go').disabled=true;$('go').textContent='Запускаю…';
   try{
@@ -614,7 +616,7 @@ async function loadDash(){
       const d=document.createElement('div');d.className='job';d.style.marginBottom='8px';
       const badge=it.status==='done'?'<span class="badge ok">готово</span>':'<span class="badge err">ошибка</span>';
       d.innerHTML='<div class="t">'+esc(it.title||it.url)+'</div><div class="s"></div>';
-      const scTag=it.scorer==='gemini'?' · Gemini AI':it.scorer==='manual'?' · вручную':'';
+      const scTag=it.scorer==='drex'?' · DREX AI':it.scorer==='gemini'?' · Gemini AI':it.scorer==='manual'?' · вручную':'';
       d.querySelector('.s').innerHTML=badge+' · '+(it.clips||[]).length+' клипов'+scTag+' · '+ago(it.finished);
       box.appendChild(d);
     });
@@ -837,6 +839,7 @@ async function loadSettings(){
   try{
     const j=await (await fetch('/api/settings')).json();
     SETTINGS={...SETTINGS,...j.settings};
+    $('sDrex').value=SETTINGS.drex_key||'';
     $('sKey').value=SETTINGS.gemini_key||'';
     $('sStories').value=String(SETTINGS.stories||3);
     $('sEps').value=String(SETTINGS.episodes||2);
@@ -858,7 +861,7 @@ async function loadSettings(){
 }
 $('sSave').onclick=async ()=>{
   const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({gemini_key:$('sKey').value.trim(),stories:+$('sStories').value,episodes:+$('sEps').value,
+    body:JSON.stringify({gemini_key:$('sKey').value.trim(),drex_key:$('sDrex').value.trim(),stories:+$('sStories').value,episodes:+$('sEps').value,
       lens:$('sLens').value,limit_min:+$('sLimit').value,vmode:$('sVmode').value,asr_model:$('sAsd').value,
       max_workers:+$('sW').value,captions:$('sCaps').checked,antidetect:$('sAnti').checked,mirror:$('sMir').checked,banner:$('sBan').checked,hook_title:$('sHook').checked})});
   const j=await r.json();
@@ -869,7 +872,7 @@ $('sClean').onclick=async ()=>{
   toast('Удалено: '+j.removed+' · освобождено '+fmtSize(j.freed),'ok');loadSettings();
 };
 function applyDefaults(){
-  if($('key')&&!$('key').value&&SETTINGS.gemini_key)$('key').value=SETTINGS.gemini_key;
+  if($('key')&&!$('key').value&&SETTINGS.drex_key)$('key').value=SETTINGS.drex_key;
   $('stories').value=String(SETTINGS.stories||3);
   $('eps').value=String(SETTINGS.episodes||2);
   const lens=SETTINGS.lens||'20-60';
@@ -887,12 +890,12 @@ function applyDefaults(){
 
 /* ---------- init ---------- */
 (async function init(){
-  if(localStorage.getItem('ms_key'))$('key').value=localStorage.getItem('ms_key');
-  $('key').addEventListener('change',()=>localStorage.setItem('ms_key',$('key').value.trim()));
+  if(localStorage.getItem('cs_drex'))$('key').value=localStorage.getItem('cs_drex');
+  $('key').addEventListener('change',()=>localStorage.setItem('cs_drex',$('key').value.trim()));
   try{
     const j=await (await fetch('/api/settings')).json();
     SETTINGS={...SETTINGS,...j.settings};
-    if(!localStorage.getItem('ms_key')&&SETTINGS.gemini_key)$('key').value=SETTINGS.gemini_key;
+    if(!localStorage.getItem('cs_drex')&&SETTINGS.drex_key)$('key').value=SETTINGS.drex_key;
     applyDefaults();
   }catch(e){}
   loadDash();

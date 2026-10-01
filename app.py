@@ -29,7 +29,7 @@ FFMPEG = os.path.expanduser("~/.local/bin/ffmpeg")
 
 DB = os.path.join(BASE, "data.db")
 CFG = os.path.join(BASE, "config.json")
-DEFAULT_CFG = {"gemini_key": "", "stories": 3, "episodes": 2, "lens": "20-60", "limit_min": 0,
+DEFAULT_CFG = {"gemini_key": "", "drex_key": "", "stories": 3, "episodes": 2, "lens": "20-60", "limit_min": 0,
                "vmode": "split", "captions": True, "facetrack": True,
                "antidetect": False, "mirror": False, "banner": True, "hook_title": False,
                "asr_model": "base", "max_workers": 2}
@@ -367,8 +367,8 @@ def api_start():
         return jsonify({"ok": False, "error": "Таймкоды работают только с одним видео"}), 400
     cfg = get_settings()
     if not data.get("api_key"):
-        data["api_key"] = cfg.get("gemini_key", "")
-    for k in ("stories", "episodes", "limit_min", "vmode", "captions", "facetrack", "antidetect", "mirror", "banner", "hook_title", "asr_model"):
+        data["api_key"] = cfg.get("drex_key", "")
+    for k in ("stories", "episodes", "limit_min", "vmode", "captions", "facetrack", "antidetect", "mirror", "banner", "hook_title", "asr_model", "drex_key"):
         if k not in data or data[k] in ("", None):
             data[k] = cfg.get(k)
     if not data.get("min_len") or not data.get("max_len"):
