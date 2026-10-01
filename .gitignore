@@ -1,0 +1,25 @@
+# секреты и локальное состояние
+config.json
+data.db*
+*.log
+
+# тяжёлые медиа и кэши (не для гита)
+*.mp4
+*.m4a
+*.webm
+*.mov
+*.s16
+*.wav
+shorts/
+tmp/
+gameplay/
+models/
+thumbs/
+legacy/
+
+# python
+__pycache__/
+*.pyc
+
+# macos
+.DS_Store

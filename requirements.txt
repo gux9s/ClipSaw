@@ -1,0 +1,8 @@
+Flask==3.0.3
+yt-dlp>=2026.8.19
+faster-whisper>=1.0.0
+opencv-python-headless>=4.8.0
+Pillow>=10.0.0
+scenedetect>=0.6.0
+certifi>=2024.1.0
+gigaam @ git+https://github.com/salute-developers/GigaAM.git
