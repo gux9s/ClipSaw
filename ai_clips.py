@@ -422,25 +422,31 @@ def snap_to_speech(s: float, e: float, bounds, tol: float = 1.2):
     return s, e
 
 
+EP_MIN = 40  # серия короче не бывает — требует формат
+
+
 def pick_series(segs, lang: str, key: str, stories: int, episodes: int,
                 min_len: int, max_len: int, scenes=None, min_gap: float = 30.0):
     """Сериалы: top-S сценок пошире, каждую режем на эпизоды.
     Обрыв — строго между словами, на пике (не в конце мысли)."""
     stories = max(1, min(10, int(stories or 1)))
     episodes = max(1, min(4, int(episodes or 1)))
-    story_min = max(12, int(episodes * min_len * 0.7))
-    story_max = episodes * max_len
+    serial = episodes > 1
+    story_min = max(12, int(episodes * (EP_MIN if serial else min_len) * 0.8))
+    story_max = episodes * max(max_len, (EP_MIN + 25) if serial else min_len)
     seeds, scorer = pick_moments(segs, lang, key, stories, story_min, story_max,
                                  scenes=scenes, min_gap=min_gap)
     bounds = _word_bounds(segs)
     out = []
     for si, sd in enumerate(seeds):
         total = float(sd["end"]) - float(sd["start"])
-        eff = max(1, min(episodes, int(total // 12)))
+        eff = max(1, min(episodes, int(total // EP_MIN))) if serial else 1
+        if eff <= 1 and serial and total < EP_MIN:
+            continue  # сценка не тянет на серии — пропускаем целиком
         if eff <= 1:
             out.append({**sd, "story": si, "part": 0, "of": 1})
             continue
-        prev_end = None
+        prev_end, plist = None, []
         for k in range(eff):
             ps = float(sd["start"]) + total * k / eff
             pe = float(sd["start"]) + total * (k + 1) / eff
@@ -449,21 +455,25 @@ def pick_series(segs, lang: str, key: str, stories: int, episodes: int,
                 ps = max(ps, MIN_START)
             if prev_end is not None:
                 ps = max(ps, prev_end + 0.3)
-            if pe - ps < 8:
+            if pe - ps < (30 if serial else 8):
                 continue
             prev_end = pe
-            last = (k == eff - 1)
+            plist.append({"start": round(ps, 1), "end": round(pe, 1),
+                          "score": int(sd.get("score", 70)),
+                          "hook": str(sd.get("hook", ""))[:40],
+                          "story": si})
+        got = len(plist)
+        if not got:
+            continue
+        for k, p in enumerate(plist):
+            last = (k == got - 1)
             v = (sd.get("verdict", "") + (
-                f" Часть {k + 1} из {eff}: обрыв на самом интересном — продолжение в профиле."
-                if not last else f" Финал истории из {eff} частей."))
-            out.append({
-                "start": round(ps, 1), "end": round(pe, 1),
-                "score": int(sd.get("score", 70)),
-                "title": f"{sd.get('title', '')} · ч.{k + 1}/{eff}",
-                "verdict": v.strip()[:300],
-                "hook": str(sd.get("hook", ""))[:40],
-                "story": si, "part": k, "of": eff,
-            })
+                f" Часть {k + 1} из {got}: обрыв на самом интересном — продолжение в профиле."
+                if not last else (f" Финал истории из {got} частей." if got > 1 else "")))
+            out.append({**p, "part": k,
+                        "title": (f"{sd.get('title', '')} · ч.{k + 1}/{got}"
+                                  if got > 1 else sd.get("title", "")),
+                        "verdict": v.strip()[:300], "of": got})
     return out, scorer
 
 
