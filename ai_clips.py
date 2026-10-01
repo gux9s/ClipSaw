@@ -273,23 +273,28 @@ DREX_MODEL = "drex-v1.5"
 
 def _drex_call(key: str, state: str, questions: dict):
     """Один батч в DREX: до 512 вопросов за миллисекунды."""
+    import socket
     import time
     import urllib.error
     body = json.dumps({"model": DREX_MODEL, "state": state,
                        "questions": questions}).encode()
     last = None
-    for attempt in range(3):
+    for attempt in range(4):
         req = urllib.request.Request(
             DREX_URL, data=body, headers={"Content-Type": "application/json",
                                           "Authorization": f"Bearer {key}"})
         try:
-            return json.load(urllib.request.urlopen(req, timeout=60, context=_CTX))
+            return json.load(urllib.request.urlopen(req, timeout=55, context=_CTX))
         except urllib.error.HTTPError as e:
             last = e
             if e.code in (429, 529):
                 time.sleep(4 * (attempt + 1))
                 continue
             raise
+        except (TimeoutError, socket.timeout, urllib.error.URLError) as e:
+            last = e  # зависший батч — повторяем
+            time.sleep(3 * (attempt + 1))
+            continue
     raise last
 
 
@@ -310,7 +315,7 @@ def _drex_score(segs, key: str, want: int, min_len: int, max_len: int):
     for csegs in chunks:
         state = "\n".join(f"[{s['start']:.1f}-{s['end']:.1f}] {s['text']}" for s in csegs)
         wins, questions = [], {}
-        step = max(1, len(csegs) // 60)  # не больше ~60 окон на чанк
+        step = max(1, len(csegs) // 50)  # не больше ~50 стартов на чанк
         for i in range(0, len(csegs), step):
             j = i
             while j < len(csegs) and csegs[j]["end"] - csegs[i]["start"] <= max_len:
@@ -332,11 +337,11 @@ def _drex_score(segs, key: str, want: int, min_len: int, max_len: int):
                 j += 1
         if not wins:
             continue
-        # батчи по 150 окон (450 вопросов): лимит API — 512
+        # батчи по 100 окон (300 вопросов): быстрее отвечают, лимит API — 512
         ans = {}
         wkeys = [f"w{k}_{sfx}" for k in range(len(wins)) for sfx in ("viral", "hook", "whole")]
-        for b in range(0, len(wkeys), 450):
-            sub = {k: questions[k] for k in wkeys[b:b + 450]}
+        for b in range(0, len(wkeys), 300):
+            sub = {k: questions[k] for k in wkeys[b:b + 300]}
             part = _drex_call(key, state, sub).get("answers", {})
             ans.update(part)
         for k, (s0, e0, txt) in enumerate(wins):
@@ -422,6 +427,16 @@ def snap_to_speech(s: float, e: float, bounds, tol: float = 1.2):
 
 
 EP_MIN = 40  # серия короче не бывает — требует формат
+EP_MAX = 55  # и длиннее тоже (с допуском снапа ±1)
+
+
+def _snap_end_fwd(t: float, ends, lo: float, hi: float):
+    """Конец серии: ближайший конец слова вперёд, но в пределах [lo, hi]."""
+    import bisect
+    i = bisect.bisect_left(ends, max(t, lo))
+    if i < len(ends) and ends[i] <= hi:
+        return ends[i]
+    return min(max(t, lo), hi)
 
 
 def pick_series(segs, lang: str, key: str, stories: int, episodes: int,
@@ -436,31 +451,50 @@ def pick_series(segs, lang: str, key: str, stories: int, episodes: int,
     seeds, scorer = pick_moments(segs, lang, key, stories, story_min, story_max,
                                  scenes=scenes, min_gap=min_gap)
     bounds = _word_bounds(segs)
+    ends = sorted({e for _, e in bounds})
+    dur_total = (segs[-1]["end"] - segs[0]["start"]) if segs else 0
+    import bisect
     out = []
-    for si, sd in enumerate(seeds):
-        total = float(sd["end"]) - float(sd["start"])
-        eff = max(1, min(episodes, int(total // EP_MIN))) if serial else 1
-        if eff <= 1 and serial and total < EP_MIN:
-            continue  # сценка не тянет на серии — пропускаем целиком
-        if eff <= 1:
+    for si, sd in enumerate(sorted(seeds, key=lambda m: float(m["start"]))):
+        if not serial:
             out.append({**sd, "story": si, "part": 0, "of": 1})
             continue
-        prev_end, plist = None, []
-        for k in range(eff):
-            ps = float(sd["start"]) + total * k / eff
-            pe = float(sd["start"]) + total * (k + 1) / eff
-            ps, pe = snap_to_speech(ps, pe, bounds)
-            if k == 0:
-                ps = max(ps, MIN_START)
-            if prev_end is not None:
-                ps = max(ps, prev_end + 0.3)
-            if pe - ps < (30 if serial else 8):
-                continue
-            prev_end = pe
+        # --- точная подгонка дуги под E серий по 40-55с ---
+        s0 = max(float(sd["start"]), MIN_START)
+        need_lo, need_hi = episodes * EP_MIN, episodes * EP_MAX
+        right = dur_total  # дальше расширяться некуда
+        e0 = float(sd["end"])
+        if e0 - s0 < need_lo:  # тянем конец вперёд до ближайшего края слова
+            tgt = s0 + need_lo
+            i = bisect.bisect_left(ends, tgt - 1)
+            e0 = ends[i] if i < len(ends) and ends[i] <= min(tgt + 3, right) else min(tgt, right)
+        if e0 - s0 > need_hi:  # режем конец назад до края слова
+            tgt = s0 + need_hi
+            i = bisect.bisect_left(ends, tgt) - 1
+            e0 = ends[i] if i >= 0 and ends[i] >= tgt - 4 else tgt
+            e0 = max(e0, s0 + need_lo)
+        if e0 - s0 < need_lo - 3 or e0 > right:
+            continue  # не влезло — сценку пропускаем, а не кромсаем
+        # --- E серий строго 40-55, границы по краям слов ---
+        plist, ps = [], s0
+        for k in range(episodes):
+            tgt = ps + (e0 - ps) / (episodes - k)
+            if k < episodes - 1:
+                pe = _snap_end_fwd(tgt, ends, ps + EP_MIN - 0.5, ps + EP_MAX + 1)
+            else:
+                pe = e0
+            if pe - ps < EP_MIN - 1:
+                break
             plist.append({"start": round(ps, 1), "end": round(pe, 1),
                           "score": int(sd.get("score", 70)),
                           "hook": str(sd.get("hook", ""))[:40],
                           "story": si})
+            ps = pe + 0.3
+        if any(not (39.5 <= p["end"] - p["start"] <= 62) for p in plist):
+            continue  # хоть одна серия вне 40-55 — сценку в брак
+        got = len(plist)
+        if got < (episodes if episodes <= 2 else episodes - 1):
+            continue  # развалилось — лучше пропустить, чем отдать огрызки
         got = len(plist)
         if not got:
             continue
