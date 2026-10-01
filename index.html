@@ -286,6 +286,26 @@
   .msg.ai{box-shadow:0 8px 22px rgba(0,0,0,.3)}
   .fgrid{animation:fade .22s ease}
   .modal .box{box-shadow:0 30px 80px rgba(0,0,0,.6)}
+  .step{display:flex;align-items:baseline;gap:10px;margin:20px 0 4px}
+  .step:first-child{margin-top:2px}
+  .step b{font-family:var(--mono);font-size:11px;font-weight:700;color:var(--acc);letter-spacing:.1em}
+  .step span{font-family:var(--disp);font-size:14px;font-weight:700;letter-spacing:-.01em}
+  .step::after{content:"";flex:1;height:1px;background:var(--line);align-self:center}
+  .chkgrid{display:grid;grid-template-columns:1fr 1fr;gap:2px 14px}
+  @media (max-width:760px){.chkgrid{grid-template-columns:1fr}}
+  .subttl{font-family:var(--mono);font-size:11px;font-weight:700;letter-spacing:.1em;color:var(--mut);
+    text-transform:uppercase;margin:20px 0 2px}
+  .subttl:first-child{margin-top:2px}
+  .chips{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap}
+  .chips button{border:1px solid var(--line);background:var(--panel2);color:var(--mut);border-radius:99px;
+    padding:7px 15px;font-size:12.5px;font-weight:700;cursor:pointer;transition:all .15s;font-family:inherit}
+  .chips button:hover{color:var(--fg);border-color:rgba(255,255,255,.22)}
+  .chips button.on{background:var(--acc);border-color:var(--acc);color:var(--acc-ink)}
+  header.top .sub{display:block;font-size:12.5px;color:var(--mut);font-weight:400;margin-top:3px;letter-spacing:0}
+  .sug{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+  .sug button{border:1px dashed rgba(201,242,75,.35);background:transparent;color:var(--acc);
+    border-radius:99px;padding:7px 14px;font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit;transition:all .15s}
+  .sug button:hover{background:rgba(201,242,75,.1)}
 </style>
 </head>
 <body>
@@ -308,7 +328,7 @@
   </aside>
   <main>
     <header class="top">
-      <h1 id="viewTitle">Дашборд</h1>
+      <div><h1 id="viewTitle">Дашборд</h1><span class="sub" id="viewSub"></span></div>
       <span class="pill" id="workerPill">workers · 2</span>
     </header>
 
@@ -334,10 +354,12 @@
     <!-- CUT -->
     <section class="view" id="v-cut">
       <div class="card">
+        <div class="step"><b>01</b><span>Источник</span></div>
         <label class="lbl" for="urls">Ссылки на серии — по одной на строку</label>
         <textarea id="urls" placeholder="по одной ссылке на строку — до 10 за раз, на ночь хватит"></textarea>
         <label class="lbl" for="key">Gemini API-ключ <span style="text-transform:none;letter-spacing:0">(<a href="https://aistudio.google.com/apikey" target="_blank">взять бесплатно</a>, без него — эвристика)</span></label>
         <input id="key" type="password" placeholder="AIza… (можно сохранить в настройках)">
+        <div class="step"><b>02</b><span>Сценки и серии</span></div>
         <div class="ai-grid">
           <div><label class="lbl" for="stories">Сценок (историй)</label>
             <select id="stories"><option>1</option><option>2</option><option selected>3</option><option>5</option><option>8</option></select></div>
@@ -356,12 +378,15 @@
           <div><label class="lbl" for="asd">Транскрибация</label>
             <select id="asd"><option value="base" selected>Быстро · Base</option><option value="small">Точно · Small (медленнее)</option><option value="giga">GigaAM v3 · топ для русского</option></select></div>
         </div>
+        <div class="step"><b>03</b><span>Оформление</span></div>
+        <div class="chkgrid">
         <label class="chk"><input type="checkbox" id="caps" checked> Субтитры с подсветкой слов</label>
         <label class="chk"><input type="checkbox" id="anti"> Анти-детект (цвет · зум · зерно · звук)</label>
         <label class="chk"><input type="checkbox" id="mir"> Зеркало (отразить видео)</label>
         <label class="chk"><input type="checkbox" id="ban" checked> Баннер WONDERCASE в середине</label>
         <label class="chk"><input type="checkbox" id="hook"> Хук-заголовок первые 2 сек</label>
         <label class="chk"><input type="checkbox" id="manualChk"> Свои таймкоды вместо ИИ</label>
+        </div>
         <div id="stampsBox"><textarea id="stamps" placeholder="02:15-03:10&#10;05:40-06:25"></textarea></div>
         <div style="margin-top:14px"><button class="btn" id="go">Нарезать шортсы</button></div>
         <div class="err-line" id="err"></div>
@@ -374,12 +399,14 @@
     <section class="view" id="v-clips">
       <input id="fSearch" type="text" placeholder="Поиск по клипам…" style="margin-bottom:12px">
       <div class="libbar"><button class="btn sm ghost" id="selAll">Выбрать все</button><button class="btn sm" id="delSel" disabled>Удалить выбранные</button><span class="dim" id="selCount"></span></div>
+      <div class="chips" id="scoreChips"><button data-s="0" class="on">Все</button><button data-s="75">Скор 75+</button><button data-s="50">Скор 50+</button></div>
       <div class="fgrid" id="fGrid"><div class="empty">Загрузка…</div></div>
     </section>
 
     <!-- ASK -->
     <section class="view" id="v-ask">
       <div class="card">
+        <div class="sug" id="askSug"><button>5 хуков про измену</button><button>Хештеги для сериала</button><button>Название для 1 серии</button></div>
         <div id="chatLog" class="chat"><div class="empty">Спроси про заголовок, хук или хештеги — отвечу как для своих шортсов</div></div>
         <div class="chatrow"><input id="askIn" type="text" placeholder="Например: придумай 5 хуков про измену…" maxlength="2000" autocomplete="off"><button class="btn sm" id="askGo">→</button></div>
       </div>
@@ -396,8 +423,10 @@
     <!-- SETTINGS -->
     <section class="view" id="v-settings">
       <div class="card">
+        <div class="subttl">Доступ</div>
         <label class="lbl" for="sKey">Gemini API-ключ</label>
         <input id="sKey" type="password" placeholder="AIza…">
+        <div class="subttl">Дефолты нарезки</div>
         <div class="ai-grid">
           <div><label class="lbl" for="sStories">Сценок по умолчанию</label>
             <select id="sStories"><option>1</option><option>2</option><option>3</option><option>5</option><option>8</option></select></div>
@@ -421,8 +450,8 @@
             <select id="sW"><option>1</option><option selected>2</option><option>3</option><option>4</option></select></div>
           <div></div>
         </div>
-        <label class="chk"><input type="checkbox" id="sCaps" checked> Субтитры по умолчанию</label>
-        <label class="chk"><input type="checkbox" id="sAnti"> Анти-детект по умолчанию</label>
+        <div class="subttl">Переключатели</div>
+        <label class="chk"><input type="checkbox" id="sCaps" checked> Субтитры по умолчанию</label>        <label class="chk"><input type="checkbox" id="sAnti"> Анти-детект по умолчанию</label>
         <label class="chk"><input type="checkbox" id="sMir"> Зеркало по умолчанию</label>
         <label class="chk"><input type="checkbox" id="sBan" checked> Баннер по умолчанию</label>
         <label class="chk"><input type="checkbox" id="sHook"> Хук-заголовок по умолчанию</label>
@@ -446,6 +475,7 @@
 <script>
 const $=id=>document.getElementById(id);
 const TITLES={dashboard:'Дашборд',cut:'Нарезка',clips:'Клипы',ask:'Спросить ИИ',history:'История',settings:'Настройки'};
+const SUBS={dashboard:'пачка вертикальных шортсов из серий',cut:'ссылки → сценки → серии',clips:'готовое с постерами и скором',ask:'заголовки, хуки, хештеги',history:'все запуски и их движки',settings:'ключи, дефолты, воркеры'};
 let SETTINGS={};
 let live=new Map();
 let HIST=[];
@@ -459,6 +489,7 @@ function show(v){
   document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('on',b.dataset.v===v));
   document.querySelectorAll('section.view').forEach(s=>s.classList.toggle('on',s.id==='v-'+v));
   $('viewTitle').textContent=TITLES[v]||v;
+  $('viewSub').textContent=SUBS[v]||'';
   if(v==='dashboard')loadDash();
   if(v==='clips')loadClips();
   if(v==='ask')renderChat();
@@ -674,6 +705,7 @@ function paintClips(flt){
   const g=$('fGrid');g.innerHTML='';
   const items=LIB.filter(f=>{
     const meta=f.kind==='short'?clipMeta(f.name):null;
+    if(FSCORE>0&&!(meta&&meta.score>=FSCORE))return false;
     const t=(meta?meta.title+' ':'')+f.name;
     return !flt||t.toLowerCase().includes(flt);
   });
@@ -728,6 +760,12 @@ function preview(f,meta){
 $('mClose').onclick=()=>{$('modal').classList.remove('on');$('mBody').innerHTML=''};
 $('modal').onclick=e=>{if(e.target.id==='modal')$('mClose').click()};
 $('fSearch').addEventListener('input',()=>paintClips($('fSearch').value.trim().toLowerCase()));
+let FSCORE=0;
+document.querySelectorAll('#scoreChips button').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('#scoreChips button').forEach(x=>x.classList.remove('on'));
+  b.classList.add('on');FSCORE=+b.dataset.s;
+  paintClips(($('fSearch')||{value:''}).value.trim().toLowerCase());
+});
 
 /* ---------- спросить ИИ ---------- */
 let CHAT=[];
@@ -763,6 +801,7 @@ async function sendChat(){
 }
 $('askGo').onclick=sendChat;
 $('askIn').addEventListener('keydown',e=>{if(e.key==='Enter')sendChat();});
+document.querySelectorAll('#askSug button').forEach(b=>b.onclick=()=>{$('askIn').value=b.textContent;sendChat();});
 
 /* ---------- история ---------- */
 async function loadHistory(){
