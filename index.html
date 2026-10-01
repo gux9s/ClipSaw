@@ -564,6 +564,8 @@ $('mode').addEventListener('change',()=>{
   const fast=$('mode').value==='fast';
   $('caps').disabled=fast;
 });
+function syncRmode(){const row=$('seRow');if(row)row.style.display=$('rmode').value==='seq'?'none':'';}
+$('rmode').addEventListener('change',syncRmode);
 
 $('go').onclick=async ()=>{
   hideErr();
@@ -889,7 +891,7 @@ function applyDefaults(){
   $('mir').checked=!!SETTINGS.mirror;
   $('ban').checked=SETTINGS.banner!==false;
   $('hook').checked=!!SETTINGS.hook_title;
-  refreshCustom();
+  syncRmode();refreshCustom();
 }
 
 /* ---------- init ---------- */
