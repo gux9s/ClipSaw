@@ -613,6 +613,57 @@ def api_ask():
     return jsonify({"ok": True, "answer": text.strip()[:4000]})
 
 
+@app.get("/api/zip-multi")
+def api_zip_multi():
+    """Один ZIP на несколько задач: ?jobs=id1,id2. Внутри папка на серию."""
+    import re
+    import zipfile
+    raw = (request.args.get("jobs") or "")
+    ids = [j.strip() for j in raw.split(",") if re.fullmatch(r"[A-Za-z0-9_-]{1,32}", j.strip())][:10]
+    if not ids:
+        return jsonify({"ok": False, "error": "нет задач"}), 404
+    zp = os.path.join(TMP_DIR, "all_" + "_".join(i[:6] for i in ids) + ".zip")
+    made, newest = [], 0
+    try:
+        for job_id in ids:
+            files = sorted(
+                f for f in os.listdir(OUT_DIR)
+                if f.startswith(job_id + "_") and f.endswith(".mp4")
+                and os.path.isfile(os.path.join(OUT_DIR, f)))
+            if not files:
+                continue
+            title = job_id
+            try:
+                c = db()
+                try:
+                    r = c.execute("SELECT title FROM jobs WHERE id=?", (job_id,)).fetchone()
+                    if r and r["title"]:
+                        title = r["title"]
+                finally:
+                    c.close()
+            except Exception:
+                pass
+            base = re.sub(r"[^\w\- ]+", "", title, flags=re.U).strip()[:50] or job_id
+            for n, f in enumerate(files, 1):
+                p = os.path.join(OUT_DIR, f)
+                made.append((p, f"{base}/{n:02d}_{f}"))
+                try:
+                    newest = max(newest, os.path.getmtime(p))
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    if not made:
+        return jsonify({"ok": False, "error": "клипы не найдены"}), 404
+    if (not os.path.exists(zp) or os.path.getmtime(zp) < newest
+            or os.path.getsize(zp) == 0):
+        with zipfile.ZipFile(zp, "w", zipfile.ZIP_STORED) as z:
+            for p, arc in made:
+                z.write(p, arc)
+    return send_file(zp, mimetype="application/zip", as_attachment=True,
+                     download_name="clips_all.zip")
+
+
 @app.get("/api/library")
 def api_library():
     from urllib.parse import quote
