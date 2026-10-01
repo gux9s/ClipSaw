@@ -234,6 +234,59 @@
     section.view.on{animation:none}
   }
 </style>
+<style>/* ClipSaw polish v2 — поверх базы, ничего не ломает */
+  :root{--acc-soft:rgba(201,242,75,.1);--card-hi:rgba(255,255,255,.035)}
+  ::selection{background:rgba(201,242,75,.28)}
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-thumb{background:#262b34;border-radius:99px;border:2px solid var(--bg)}
+  ::-webkit-scrollbar-track{background:transparent}
+  body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:2;opacity:.05;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='.55'/%3E%3C/svg%3E")}
+  .logo .ver{font-family:var(--mono);font-size:10px;font-weight:700;color:var(--acc);
+    border:1px solid rgba(201,242,75,.4);border-radius:6px;padding:2px 6px;margin-left:auto;letter-spacing:.08em}
+  .nav{position:relative}
+  .nav button{position:relative}
+  .nav button.on::before{content:"";position:absolute;left:-14px;top:9px;bottom:9px;width:3px;
+    border-radius:99px;background:var(--acc)}
+  header.top h1{font-size:29px;letter-spacing:-.032em;text-wrap:balance}
+  header.top .pill{display:inline-flex;align-items:center;gap:8px}
+  header.top .pill::before{content:"";width:7px;height:7px;border-radius:99px;background:var(--ok);
+    box-shadow:0 0 10px rgba(61,220,151,.9)}
+  h2{display:flex;align-items:center;gap:10px}
+  h2::after{content:"";flex:1;height:1px;background:var(--line)}
+  .grid4 .stat{transition:transform .16s,border-color .16s}
+  .grid4 .stat:hover{transform:translateY(-2px);border-color:rgba(201,242,75,.3)}
+  .stat .n{font-size:31px;font-variant-numeric:tabular-nums}
+  .qa button{position:relative;overflow:hidden}
+  .qa button b::after{content:"→";margin-left:auto;color:var(--acc);opacity:0;transform:translateX(-6px);transition:all .18s}
+  .qa button:hover b::after{opacity:1;transform:none}
+  .card{box-shadow:0 1px 0 var(--card-hi) inset,0 14px 34px rgba(0,0,0,.28)}
+  .btn{letter-spacing:.01em;box-shadow:0 1px 0 rgba(255,255,255,.25) inset,0 10px 24px rgba(201,242,75,.16)}
+  .btn.ghost{box-shadow:none}
+  input:focus,select:focus,textarea:focus{border-color:var(--acc);box-shadow:0 0 0 3px rgba(201,242,75,.14)}
+  .csel>button{box-shadow:0 1px 0 var(--card-hi) inset}
+  .fcard .pv video,.clip video{background:#000}
+  .fcard .pv{position:relative}
+  .fcard .pv video{transition:transform .3s ease}
+  .fcard:hover .pv video{transform:scale(1.045)}
+  .fcard .sel{opacity:0;transition:opacity .15s}
+  .fcard:hover .sel,.fcard.picked .sel{opacity:1}
+  @media (pointer:coarse){.fcard .sel{opacity:1}}
+  .fcard.picked{border-color:rgba(201,242,75,.6);box-shadow:0 0 0 3px rgba(201,242,75,.12)}
+  .ring{--p:0;--rc:var(--acc);width:36px;height:36px;border-radius:50%;flex-shrink:0;
+    display:inline-flex;align-items:center;justify-content:center;vertical-align:middle;margin-right:9px;
+    background:conic-gradient(var(--rc) calc(var(--p)*1%),rgba(255,255,255,.09) 0)}
+  .ring i{width:27px;height:27px;border-radius:50%;background:#101216;color:var(--fg);
+    display:flex;align-items:center;justify-content:center;font-style:normal;
+    font-family:var(--mono);font-size:11px;font-weight:700}
+  .r-mid{--rc:var(--warn)} .r-low{--rc:var(--err)}
+  .job{transition:border-color .15s}
+  .job:hover{border-color:rgba(255,255,255,.16)}
+  .toast{border-left-width:4px}
+  .msg.ai{box-shadow:0 8px 22px rgba(0,0,0,.3)}
+  .fgrid{animation:fade .22s ease}
+  .modal .box{box-shadow:0 30px 80px rgba(0,0,0,.6)}
+</style>
 </head>
 <body>
 <div class="app">
@@ -241,6 +294,7 @@
     <div class="logo">
       <svg width="26" height="26" viewBox="0 0 32 32" fill="none"><rect width="32" height="32" rx="9" fill="#c9f24b"/><path d="M13 10.5v11l4.5-2.75v-5.5z" fill="#141604"/><path d="M19.7 13.25v5.5L24.2 16z" fill="#141604"/></svg>
       ClipSaw
+      <span class="ver">V2</span>
     </div>
     <nav class="nav" id="nav">
       <button data-v="dashboard" class="on"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7.5" height="7.5" rx="2"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="2"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="2"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="2"/></svg><span class="nl">Дашборд</span></button>
@@ -434,7 +488,7 @@ setInterval(async ()=>{
           s.clips.forEach(c=>{
             const d=document.createElement('div');d.className='clip';
             d.innerHTML='<video controls playsinline preload="metadata"></video><div class="in"><div class="ct"></div><div class="hk"></div><div class="cv"></div><div class="cs"></div><a>Скачать MP4</a></div>';
-            d.querySelector('.ct').innerHTML='<span class="mini '+sc(c.score)+'">'+c.score+'</span>'+(c.of>1?'<span class="mini">'+(c.part+1)+'/'+c.of+'</span>':'')+esc(c.title);
+            d.querySelector('.ct').innerHTML='<span class="ring r-'+sc(c.score)+'" style="--p:'+(+c.score||0)+'"><i>'+c.score+'</i></span>'+(c.of>1?'<span class="mini">'+(c.part+1)+'/'+c.of+'</span>':'')+esc(c.title);
             if(c.hook)d.querySelector('.hk').textContent=c.hook;
             if(c.verdict)d.querySelector('.cv').innerHTML='<b>AI:</b> '+esc(c.verdict);
             d.querySelector('.cs').textContent=c.dur+' сек · '+fmtSize(c.size);
@@ -641,8 +695,8 @@ function paintClips(flt){
     pv.appendChild(tag);
     const inn=document.createElement('div');inn.className='in';
     const nm=document.createElement('div');nm.className='n';
-    if(meta&&meta.of>1){nm.innerHTML='<span class="mini">'+(meta.part+1)+'/'+meta.of+'</span>'+esc(meta.title);}
-    else nm.textContent=meta?meta.title:prettyName(f.name);
+    if(meta){const ring='<span class="ring r-'+sc(meta.score)+'" style="--p:'+(+meta.score||0)+'"><i>'+meta.score+'</i></span>';nm.innerHTML=ring+(meta.of>1?'<span class="mini">'+(meta.part+1)+'/'+meta.of+'</span>':'')+esc(meta.title);}
+    else nm.textContent=prettyName(f.name);
     const z=document.createElement('div');z.className='z';
     z.textContent=(meta?meta.score+'/100 · ':'')+fmtSize(f.size);
     if(meta&&meta.verdict){const cv=document.createElement('div');cv.className='cv';cv.innerHTML='<b>AI:</b> '+esc(meta.verdict);inn.appendChild(cv);}
