@@ -234,6 +234,8 @@ def fetch_source(url: str, progress=None) -> str:
             "progress_hooks": [hook],
             "concurrent_fragment_downloads": 4,
             "retries": 10, "fragment_retries": 10,
+            # вис ниже 100 КБ/с — убивать и ретраить, а не висеть вечно
+            "throttled_rate": 100000,
             # android-клиент отдаёт без дросселирования (web режут до ~200КБ/с)
             "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
             "format": ("bv*[height<=1080]+ba/b[height<=1080]"),
