@@ -90,10 +90,10 @@ def _transcribe_giga(path: str, limit_min: int = 0, progress=None):
 GAMEPLAY_DIR = os.path.join(BASE, "gameplay")
 GAMEPLAY_FILE = os.path.join(GAMEPLAY_DIR, "subway.mp4")
 
-# Сплит-раскладка 1080x1920: верх сериал 45% / низ геймплей 55%
+# Сплит-раскладка 1080x1920: верх сериал 50% / низ геймплей 50%
 OUT_W, OUT_H = 1080, 1920
-TOP_H = int(OUT_H * 0.45)          # 864
-BOT_H = OUT_H - TOP_H             # 1056
+TOP_H = int(OUT_H * 0.5)          # 960
+BOT_H = OUT_H - TOP_H             # 960
 
 # Первые секунды видео — заставки студий/логотипы: моменты раньше не начинаем
 MIN_START = 15.0
