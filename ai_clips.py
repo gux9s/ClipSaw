@@ -782,7 +782,7 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
                       progress=None, antidetect: bool = False,
                       mirror: bool = False, gameplay: str | None = None,
                       banner: bool = True, banner_path: str | None = None,
-                      hook_title: bool = False, max_total: float | None = None):
+                      max_total: float | None = None):
     """Вертикаль 1080x1920: верх 40% — сериал (crop-fill), низ 60% — геймплей
     (закольцован, немой). Сабы — у шва. Звук — только из сериала."""
     import cv2
@@ -1040,8 +1040,6 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
                                         stroke_width=3, stroke_fill="black")
                             y += hs[li] + 8
                         frame = __import__("numpy").asarray(img)
-            if hook_title and (t - start) <= HOOK_SECS and moment.get("hook"):
-                frame = _draw_hook(frame, moment["hook"])
             proc.stdin.write(frame.tobytes())
             if progress and k % 15 == 0:
                 progress(k / total)
@@ -1132,42 +1130,6 @@ def _caption_states(words, t: float, per_line: int = 4):
     return [], -1
 
 
-HOOK_SECS = 2.2  # хук-заголовок висит первые секунды клипа
-
-
-def _draw_hook(frame, text: str):
-    """Крупный капс-хук на первые секунды: верх зоны фильма, до 2 строк.
-    Кадр в RGB — так и возвращаем."""
-    import cv2
-    if not text:
-        return frame
-    from PIL import Image, ImageDraw
-    font = _font(88)
-    img = Image.fromarray(frame)
-    dr = ImageDraw.Draw(img)
-    words, lines, line = str(text).upper().split(), [], []
-    for w in words:
-        t = " ".join(line + [w])
-        bb = dr.textbbox((0, 0), t, font=font, stroke_width=4)
-        if bb[2] - bb[0] > OUT_W - 120 and line:
-            lines.append(line)
-            line = [w]
-        else:
-            line = line + [w]
-    if line:
-        lines.append(line)
-    lines = lines[:2]
-    y = 110
-    for ln in lines:
-        txt = " ".join(ln)
-        bbox = dr.textbbox((0, 0), txt, font=font, stroke_width=4)
-        x = (OUT_W - (bbox[2] - bbox[0])) / 2
-        dr.text((x, y), txt, font=font, fill="white",
-                stroke_width=4, stroke_fill="black")
-        y += (bbox[3] - bbox[1]) + 10
-    return __import__("numpy").asarray(img)
-
-
 def fast_cut(src: str, moment: dict, out: str):
     """Мгновенная нарезка без перекодирования: исходное качество и кодек, как есть 16:9."""
     start, dur = float(moment["start"]), float(moment["end"]) - float(moment["start"])
@@ -1185,13 +1147,13 @@ def fast_cut(src: str, moment: dict, out: str):
 def render_clip(src: str, moment: dict, segs, out: str, facetrack: bool = True,
                 captions: bool = True, progress=None, vmode: str = "face",
                 antidetect: bool = False, mirror: bool = False,
-                banner: bool = True, hook_title: bool = False,
+                banner: bool = True,
                 max_total: float | None = None):
     if vmode == "split":
         return render_split_clip(src, moment, segs, out, facetrack=facetrack,
                                  captions=captions, progress=progress,
                                  antidetect=antidetect, mirror=mirror,
-                                 banner=banner, hook_title=hook_title,
+                                 banner=banner,
                                  max_total=max_total)
     import cv2
     from PIL import Image, ImageDraw
@@ -1296,8 +1258,6 @@ def render_clip(src: str, moment: dict, segs, out: str, facetrack: bool = True,
                                         stroke_width=3, stroke_fill="black")
                             y += (bbox[3] - bbox[1]) + 8
                         frame = __import__("numpy").asarray(img)
-            if hook_title and (t - start) <= HOOK_SECS and moment.get("hook"):
-                frame = _draw_hook(frame, moment["hook"])
             proc.stdin.write(frame.tobytes())
             if progress and k % 15 == 0:
                 progress(k / total)

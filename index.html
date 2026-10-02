@@ -373,7 +373,6 @@
         <label class="chk"><input type="checkbox" id="anti"> Анти-детект (цвет · зум · зерно · звук)</label>
         <label class="chk"><input type="checkbox" id="mir"> Зеркало (отразить видео)</label>
         <label class="chk"><input type="checkbox" id="ban" checked> Баннер WONDERCASE в середине</label>
-        <label class="chk"><input type="checkbox" id="hook"> Хук-заголовок первые 2 сек</label>
         <label class="chk"><input type="checkbox" id="manualChk"> Свои таймкоды вместо ИИ</label>
         </div>
         <div id="stampsBox"><textarea id="stamps" placeholder="02:15-03:10&#10;05:40-06:25"></textarea></div>
@@ -430,7 +429,6 @@
         <label class="chk"><input type="checkbox" id="sCaps" checked> Субтитры по умолчанию</label>        <label class="chk"><input type="checkbox" id="sAnti"> Анти-детект по умолчанию</label>
         <label class="chk"><input type="checkbox" id="sMir"> Зеркало по умолчанию</label>
         <label class="chk"><input type="checkbox" id="sBan" checked> Баннер по умолчанию</label>
-        <label class="chk"><input type="checkbox" id="sHook"> Хук-заголовок по умолчанию</label>
         <button class="btn" id="sSave">Сохранить настройки</button>
       </div>
       <div class="card" style="margin-top:12px">
@@ -553,7 +551,7 @@ $('go').onclick=async ()=>{
         min_len:+$('lens').value.split('-')[0],max_len:+$('lens').value.split('-')[1],
         limit_min:+$('limit').value,
         captions:$('caps').checked&&mode!=='fast',facetrack:mode==='face'||mode==='split',
-        antidetect:$('anti').checked,mirror:$('mir').checked,banner:$('ban').checked,hook_title:$('hook').checked,asr_model:$('asd').value,fast:mode==='fast',vmode:mode==='fast'?'blur':mode,
+        antidetect:$('anti').checked,mirror:$('mir').checked,banner:$('ban').checked,asr_model:$('asd').value,fast:mode==='fast',vmode:mode==='fast'?'blur':mode,
         stamps:$('manualChk').checked?$('stamps').value:''})});
     const j=await r.json();
     if(!j.ok)throw new Error(j.error||'Не получилось');
@@ -807,7 +805,6 @@ async function loadSettings(){
     $('sMir').checked=!!SETTINGS.mirror;
     $('sBan').checked=SETTINGS.banner!==false;
     refreshCustom();
-    $('sHook').checked=!!SETTINGS.hook_title;
     $('workerPill').textContent='workers · '+SETTINGS.max_workers;
     const s=await (await fetch('/api/stats')).json();
     $('storeInfo').textContent='Шортсы: '+fmtSize(s.bytes_shorts)+' · Исходники: '+fmtSize(s.bytes_tmp);
@@ -817,7 +814,7 @@ $('sSave').onclick=async ()=>{
   const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({drex_key:$('sDrex').value.trim(),want:+$('sWant').value,
       lens:$('sLens').value,limit_min:+$('sLimit').value,vmode:$('sVmode').value,asr_model:$('sAsd').value,
-      max_workers:+$('sW').value,captions:$('sCaps').checked,antidetect:$('sAnti').checked,mirror:$('sMir').checked,banner:$('sBan').checked,hook_title:$('sHook').checked})});
+      max_workers:+$('sW').value,captions:$('sCaps').checked,antidetect:$('sAnti').checked,mirror:$('sMir').checked,banner:$('sBan').checked})});
   const j=await r.json();
   if(j.ok){SETTINGS={...SETTINGS,...j.settings};applyDefaults();toast('Настройки сохранены','ok');loadDashQuiet()}
 };
@@ -837,7 +834,6 @@ function applyDefaults(){
   $('anti').checked=!!SETTINGS.antidetect;
   $('mir').checked=!!SETTINGS.mirror;
   $('ban').checked=SETTINGS.banner!==false;
-  $('hook').checked=!!SETTINGS.hook_title;
   refreshCustom();
 }
 

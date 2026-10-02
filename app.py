@@ -31,7 +31,7 @@ DB = os.path.join(BASE, "data.db")
 CFG = os.path.join(BASE, "config.json")
 DEFAULT_CFG = {"gemini_key": "", "drex_key": "", "want": 8, "lens": "20-60", "limit_min": 0,
                "vmode": "split", "captions": True, "facetrack": True,
-               "antidetect": False, "mirror": False, "banner": True, "hook_title": False,
+               "antidetect": False, "mirror": False, "banner": True,
                "asr_model": "base", "max_workers": 2}
 
 
@@ -315,7 +315,6 @@ def run_job(job_id: str, url: str, opts: dict):
                                vmode=mode, antidetect=opts.get("antidetect", False),
                                mirror=opts.get("mirror", False),
                                banner=opts.get("banner", True),
-                               hook_title=opts.get("hook_title", False),
                                max_total=float(opts.get("max_len", 60) or 60))
             with lock:
                 done["n"] += 1
@@ -376,7 +375,7 @@ def api_start():
     cfg = get_settings()
     if not data.get("api_key"):
         data["api_key"] = cfg.get("drex_key", "")
-    for k in ("want", "limit_min", "vmode", "captions", "facetrack", "antidetect", "mirror", "banner", "hook_title", "asr_model", "drex_key"):
+    for k in ("want", "limit_min", "vmode", "captions", "facetrack", "antidetect", "mirror", "banner", "asr_model", "drex_key"):
         if k not in data or data[k] in ("", None):
             data[k] = cfg.get(k)
     if not data.get("min_len") or not data.get("max_len"):
@@ -405,7 +404,6 @@ def api_start():
             "antidetect": bool(data.get("antidetect", False)),
             "mirror": bool(data.get("mirror", False)),
             "banner": bool(data.get("banner", True)),
-            "hook_title": bool(data.get("hook_title", False)),
             "asr_model": data.get("asr_model", "base") if data.get("asr_model") in ("base", "small", "giga") else "base",
             "fast": bool(data.get("fast", False)),
             "vmode": data.get("vmode", "blur"), "stamps": stamps}), daemon=True).start()
