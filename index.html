@@ -162,6 +162,11 @@
     padding:8px 0;text-decoration:none;background:var(--panel2);color:var(--fg);border:1px solid var(--line);cursor:pointer;
     transition:border-color .15s}
   .fcard .row a:hover{border-color:rgba(201,242,75,.5)}
+  .clip .row{display:flex;gap:6px;margin-top:8px}
+  .clip .row a,.clip .row button{flex:1;text-align:center;font-size:12.5px;font-weight:700;border-radius:9px;
+    padding:8px 0;text-decoration:none;background:var(--panel2);color:var(--fg);border:1px solid var(--line);cursor:pointer;
+    font-family:inherit;transition:border-color .15s}
+  .clip .row a:hover,.clip .row button:hover{border-color:rgba(201,242,75,.5)}
   .libbar{display:flex;gap:8px;align-items:center;margin-bottom:12px}
   .libbar .dim{font-size:12px;color:var(--mut);font-family:var(--mono)}
   .fcard .sel{position:absolute;top:8px;right:8px;width:20px;height:20px;accent-color:var(--acc);cursor:pointer;z-index:2}
@@ -498,14 +503,18 @@ setInterval(async ()=>{
           t.box.innerHTML='';
           s.clips.forEach(c=>{
             const d=document.createElement('div');d.className='clip';
-            d.innerHTML='<video controls playsinline preload="metadata"></video><div class="in"><div class="ct"></div><div class="hk"></div><div class="cv"></div><div class="cs"></div><a>Скачать MP4</a></div>';
+            d.innerHTML='<video controls playsinline preload="metadata"></video><div class="in"><div class="ct"></div><div class="hk"></div><div class="cv"></div><div class="cs"></div><div class="row"><a>MP4</a><a>Обложка</a><button>Описание</button></div></div>';
             d.querySelector('.ct').innerHTML='<span class="ring r-'+sc(c.score)+'" style="--p:'+(+c.score||0)+'"><i>'+c.score+'</i></span>'+(c.of>1?'<span class="mini">'+(c.part+1)+'/'+c.of+'</span>':'')+esc(c.title);
             if(c.hook)d.querySelector('.hk').textContent=c.hook;
             if(c.verdict)d.querySelector('.cv').innerHTML='<b>AI:</b> '+esc(c.verdict);
             d.querySelector('.cs').textContent=c.dur+' сек · '+fmtSize(c.size);
             d.querySelector('video').src='/api/clip/'+id+'/'+c.i;
             d.querySelector('video').poster='/api/thumb/short/'+id+'_'+(c.i+1)+'.mp4';
-            d.querySelector('a').href='/api/clip/'+id+'/'+c.i;
+            const links=d.querySelectorAll('.row a');
+            links[0].href='/api/clip/'+id+'/'+c.i;
+            links[1].href='/api/thumb/short/'+id+'_'+(c.i+1)+'.mp4';
+            links[1].setAttribute('download','');
+            d.querySelector('.row button').onclick=()=>copyCaption(c,id+'_'+(c.i+1)+'.mp4');
             t.box.appendChild(d);
           });
           const za=document.createElement('a');za.className='zipall';
@@ -670,6 +679,17 @@ async function loadClips(){
     paintClips(($('fSearch')||{value:''}).value.trim().toLowerCase());
   }catch(e){}
 }
+function clipCaption(meta,fname){
+  const tags=new Set(['сериалы','кино','топ','рекомендации','viral','shorts']);
+  if(meta&&meta.title)meta.title.split(/[\s….,!?—–-]+/).filter(w=>w.length>3).slice(0,3).forEach(w=>tags.add(w.toLowerCase().replace(/[^а-яa-zё0-9]/gi,'')));
+  const list=[...tags].filter(Boolean).map(t=>'#'+t).join(' ');
+  return ((meta&&meta.title?meta.title:fname)+'\\n'+list);
+}
+function copyCaption(meta,fname){
+  const t=clipCaption(meta,fname);
+  if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(t).then(()=>toast('Описание скопировано','ok'),()=>toast(t));
+  else toast(t);
+}
 function clipMeta(name){
   for(const it of HIST){
     const m=/^([a-f0-9]{8})_(\d+)\.mp4$/.exec(name);
@@ -714,14 +734,18 @@ function paintClips(flt){
     if(meta&&meta.verdict){const cv=document.createElement('div');cv.className='cv';cv.innerHTML='<b>AI:</b> '+esc(meta.verdict);inn.appendChild(cv);}
     if(meta&&meta.hook){const hk=document.createElement('div');hk.className='hk';hk.textContent=meta.hook;inn.appendChild(hk);}
     const row=document.createElement('div');row.className='row';
-    const a=document.createElement('a');a.textContent='Скачать';a.href=f.url;a.setAttribute('download','');
+    const a=document.createElement('a');a.textContent='MP4';a.href=f.url;a.setAttribute('download','');
+    const cov=document.createElement('a');cov.textContent='Обложка';
+    if(f.thumb){cov.href=f.thumb;cov.setAttribute('download','');}else{cov.style.opacity='.4';}
+    const cp=document.createElement('button');cp.textContent='Описание';
+    cp.onclick=ev=>{ev.stopPropagation();copyCaption(meta,f.name);};
     const del=document.createElement('button');del.textContent='Удалить';
     del.onclick=async ev=>{ev.stopPropagation();
       if(!confirm('Удалить файл?'))return;
       await fetch('/api/del/'+f.kind+'/'+encodeURIComponent(f.name),{method:'DELETE'});
       SEL.delete(selKey(f));
       loadClips();loadDashQuiet();toast('Удалено')};
-    row.appendChild(a);row.appendChild(del);
+    row.appendChild(a);row.appendChild(cov);row.appendChild(cp);row.appendChild(del);
     inn.appendChild(nm);inn.appendChild(z);inn.appendChild(row);
     d.appendChild(pv);d.appendChild(inn);
     d.onclick=e=>{const t=e.target.tagName;if(t!=='A'&&t!=='BUTTON'&&t!=='INPUT')preview(f,meta)};

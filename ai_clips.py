@@ -126,8 +126,8 @@ def _video_codec_args() -> list:
     """Железный H.264 (Apple Silicon): кодирует в разы быстрее x264,
     вес держим фикс. битрейтом 9 Мбит/с — максимум для TikTok без потерь."""
     if _VT:
-        return ["-c:v", "h264_videotoolbox", "-b:v", "12M",
-                "-maxrate", "18M", "-bufsize", "24M", "-profile:v", "high"]
+        return ["-c:v", "h264_videotoolbox", "-b:v", "14M",
+                "-maxrate", "22M", "-bufsize", "28M", "-profile:v", "high"]
     return ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "21",
             "-preset", "veryfast"]
 
