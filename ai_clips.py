@@ -296,7 +296,7 @@ def _drex_score(segs, key: str, want: int, min_len: int, max_len: int):
                             f"хук {ph:.2f}, цельность {pw:.2f}, пик {pk:.2f}."),
                 "hook": "",
             })
-    return sorted(out, key=lambda m: -m["score"])[:want + max(3, want // 3)]
+    return sorted(out, key=lambda m: -m["score"])[:want * 2 + 5]
 
 
 def detect_scenes(src: str, min_len: float = 15.0, max_len: float = 120.0):
@@ -406,46 +406,55 @@ def pick_moments(segs, lang: str, key: str, want: int, min_len: int, max_len: in
     scorer = "drex"
     if not cands:
         raise RuntimeError("DREX вернул пусто — попробуй ещё раз")
-    # только лучшие: пол 60, если пусто — 50, если и так пусто — топ-3 как есть
-    top = [m for m in cands if m.get("score", 0) >= 60]
-    if not top:
-        top = [m for m in cands if m.get("score", 0) >= 50]
-    if not top:
-        top = sorted(cands, key=lambda m: -m.get("score", 0))[:3]
-    cands = top
+    # планка по качеству, но количество добиваем: 60 -> 50 -> 45 -> топ-N
+    take = [m for m in cands if m.get("score", 0) >= 60]
+    if len(take) < want:
+        take = [m for m in cands if m.get("score", 0) >= 50]
+    if len(take) < want:
+        take = [m for m in cands if m.get("score", 0) >= 45]
+    if len(take) < min(want, 3):
+        take = sorted(cands, key=lambda m: -m.get("score", 0))[:min(want, 3)]
+    cands = take
     # адаптивный зазор: на часовом видео под 50 клипов зазор жмём, иначе не влезут
     total_dur = (segs[-1]["end"] - segs[0]["start"]) if segs else 0
     if total_dur > 0:
         fit_gap = (total_dur - want * max_len) / max(want, 1)
         min_gap = max(5.0, min(min_gap, fit_gap)) if fit_gap > 0 else 5.0
-    # жадный отбор без пересечений + привязка к сценам + подгон длины
+    # жадный отбор без пересечений + привязка к сценам + подгон длины.
+    # два прохода: строгий зазор, потом добор с узким — чтобы количество добивалось
     bounds = _word_bounds(segs)
-    picked = []
-    for m in sorted(cands, key=lambda m: -m.get("score", 0)):
-        s, e = float(m["start"]), float(m["end"])
-        if s < MIN_START - 4.0 and e < MIN_START + 4.0:
-            continue  # заставка/логотип в начале — пропускаем целиком
-        if any(not (e + min_gap < p["start"] or s - min_gap > p["end"]) for p in picked):
-            continue
-        dur = e - s
-        if dur > max_len:
-            c = (s + e) / 2
-            s, e = max(0, segs[0]["start"] + 0, c - max_len / 2), c + max_len / 2
-        elif dur < min_len:
-            c = (s + e) / 2
-            s, e = max(0, c - min_len / 2), c + min_len / 2
-        s, e = snap_to_scenes(s, e, scenes)
-        s = max(s, MIN_START)  # привязка к сцене могла утащить на заставку
-        s, e = snap_to_speech(s, e, bounds)  # режем строго между словами
-        s = max(s, MIN_START)  # и спич-снап не лезет на заставку
-        if e - s < 5:
-            continue
-        picked.append({"start": float(round(s, 1)), "end": float(round(e, 1)),
-                       "score": int(m.get("score", 70)), "title": m.get("title", ""),
-                       "verdict": str(m.get("verdict", ""))[:240],
-                       "hook": str(m.get("hook", "") or m.get("title", ""))[:40]})
-        if len(picked) >= want:
+    picked, used = [], set()
+    for gap in (min_gap, 10.0):
+        if len(picked) >= want or (gap != min_gap and min_gap <= 10.0):
             break
+        for mi, m in enumerate(sorted(cands, key=lambda m: -m.get("score", 0))):
+            if mi in used:
+                continue
+            s, e = float(m["start"]), float(m["end"])
+            if s < MIN_START - 4.0 and e < MIN_START + 4.0:
+                continue  # заставка/логотип в начале — пропускаем целиком
+            if any(not (e + gap < p["start"] or s - gap > p["end"]) for p in picked):
+                continue
+            dur = e - s
+            if dur > max_len:
+                c = (s + e) / 2
+                s, e = max(0, segs[0]["start"] + 0, c - max_len / 2), c + max_len / 2
+            elif dur < min_len:
+                c = (s + e) / 2
+                s, e = max(0, c - min_len / 2), c + min_len / 2
+            s, e = snap_to_scenes(s, e, scenes)
+            s = max(s, MIN_START)  # привязка к сцене могла утащить на заставку
+            s, e = snap_to_speech(s, e, bounds)  # режем строго между словами
+            s = max(s, MIN_START)  # и спич-снап не лезет на заставку
+            if e - s < 5:
+                continue
+            used.add(mi)
+            picked.append({"start": float(round(s, 1)), "end": float(round(e, 1)),
+                           "score": int(m.get("score", 70)), "title": m.get("title", ""),
+                           "verdict": str(m.get("verdict", ""))[:240],
+                           "hook": str(m.get("hook", "") or m.get("title", ""))[:40]})
+            if len(picked) >= want:
+                break
     return picked, scorer
 
 

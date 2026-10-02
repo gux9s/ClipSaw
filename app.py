@@ -396,7 +396,7 @@ def api_start():
         threading.Thread(target=run_job, args=(job_id, url, {
             "api_key": data.get("api_key", ""), "want": want,
             "min_len": int(data.get("min_len", 20)), "max_len": int(data.get("max_len", 60)),
-            "limit_min": int(data.get("limit_min", 0)), "min_gap": 45,
+            "limit_min": int(data.get("limit_min", 0)), "min_gap": 20,
             "captions": bool(data.get("captions", True)),
             "facetrack": bool(data.get("facetrack", True)),
             "antidetect": bool(data.get("antidetect", False)),
