@@ -629,7 +629,9 @@ def _cover_resize(fr, tw: int, th: int, cx: float = 0.5, cy: float = 0.5,
     sc = max(tw / max(w, 1), th / max(h, 1)) * zoom
     sw, sh = max(int(round(w * sc)), tw), max(int(round(h * sc)), th)
     if (sw, sh) != (w, h):
-        fr = cv2.resize(fr, (sw, sh), interpolation=cv2.INTER_LINEAR)
+        # Lanczos вместо bilinear: края не мылятся на апскейле 1.5-2x
+        inter = cv2.INTER_LANCZOS4 if sc > 1.0 else cv2.INTER_LINEAR
+        fr = cv2.resize(fr, (sw, sh), interpolation=inter)
     x0 = int(min(max(cx * sw - tw / 2, 0), max(sw - tw, 0)))
     y0 = int(min(max(cy * sh - th / 2 + drift_y, 0), max(sh - th, 0)))
     return fr[y0:y0 + th, x0:x0 + tw]
