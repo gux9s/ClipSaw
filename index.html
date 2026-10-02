@@ -193,14 +193,6 @@
   .zipall:active{transform:scale(.98)}
   .ziplink{font-size:12px;font-weight:700;color:var(--acc);text-decoration:none;margin-left:8px}
   .ziplink:hover{text-decoration:underline}
-  .chat{display:flex;flex-direction:column;gap:8px;max-height:52vh;overflow:auto;margin-bottom:12px}
-  .msg{max-width:88%;padding:10px 13px;border-radius:13px;font-size:13.5px;line-height:1.55;white-space:pre-wrap;word-break:break-word}
-  .msg.ai{background:var(--panel2);border:1px solid var(--line);align-self:flex-start}
-  .msg.me{background:rgba(201,242,75,.1);border:1px solid rgba(201,242,75,.3);align-self:flex-end}
-  .msg.typing{opacity:.55}
-  .chatrow{display:flex;gap:8px}
-  .chatrow input{flex:1}
-  .chatrow .btn{width:auto;padding:0 20px;flex-shrink:0}
   .err-line{display:none;color:var(--err);font-size:13.5px;margin-top:10px}
   .ai-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
   a{color:var(--acc)}
@@ -283,7 +275,6 @@
   .job{transition:border-color .15s}
   .job:hover{border-color:rgba(255,255,255,.16)}
   .toast{border-left-width:4px}
-  .msg.ai{box-shadow:0 8px 22px rgba(0,0,0,.3)}
   .fgrid{animation:fade .22s ease}
   .modal .box{box-shadow:0 30px 80px rgba(0,0,0,.6)}
   .step{display:flex;align-items:baseline;gap:10px;margin:20px 0 4px}
@@ -302,10 +293,6 @@
   .chips button:hover{color:var(--fg);border-color:rgba(255,255,255,.22)}
   .chips button.on{background:var(--acc);border-color:var(--acc);color:var(--acc-ink)}
   header.top .sub{display:block;font-size:12.5px;color:var(--mut);font-weight:400;margin-top:3px;letter-spacing:0}
-  .sug{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
-  .sug button{border:1px dashed rgba(201,242,75,.35);background:transparent;color:var(--acc);
-    border-radius:99px;padding:7px 14px;font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit;transition:all .15s}
-  .sug button:hover{background:rgba(201,242,75,.1)}
 </style>
 </head>
 <body>
@@ -320,7 +307,6 @@
       <button data-v="dashboard" class="on"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7.5" height="7.5" rx="2"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="2"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="2"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="2"/></svg><span class="nl">Дашборд</span></button>
       <button data-v="cut"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><path d="M8.2 7.8L20 19M8.2 16.2L20 5"/></svg><span class="nl">Нарезка</span></button>
       <button data-v="clips"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="M10 9.5v5l4.5-2.5L10 9.5z" fill="currentColor" stroke="none"/></svg><span class="nl">Клипы</span></button>
-      <button data-v="ask"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="12" rx="3"/><path d="M8 17v4l4-4"/></svg><span class="nl">Спросить ИИ</span></button>
       <button data-v="history"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5v5h5"/><path d="M4.5 10a8 8 0 11-.6 4"/></svg><span class="nl">История</span></button>
       <button data-v="settings"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 00-.1-1.2l2-1.5-2-3.4-2.3 1a7 7 0 00-2-1.2L14.2 3H9.8l-.4 2.7a7 7 0 00-2 1.2l-2.3-1-2 3.4 2 1.5A7 7 0 005 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.4 2.3-1a7 7 0 002 1.2l.4 2.7h4.4l.4-2.7a7 7 0 002-1.2l2.3 1 2-3.4-2-1.5c.1-.4.1-.8.1-1.2z"/></svg><span class="nl">Настройки</span></button>
     </nav>
@@ -401,15 +387,6 @@
       <div class="fgrid" id="fGrid"><div class="empty">Загрузка…</div></div>
     </section>
 
-    <!-- ASK -->
-    <section class="view" id="v-ask">
-      <div class="card">
-        <div class="sug" id="askSug"><button>5 хуков про измену</button><button>Хештеги для сериала</button><button>Название для 1 серии</button></div>
-        <div id="chatLog" class="chat"><div class="empty">Спроси про заголовок, хук или хештеги — отвечу как для своих шортсов</div></div>
-        <div class="chatrow"><input id="askIn" type="text" placeholder="Например: придумай 5 хуков про измену…" maxlength="2000" autocomplete="off"><button class="btn sm" id="askGo">→</button></div>
-      </div>
-    </section>
-
     <!-- HISTORY -->
     <section class="view" id="v-history">
       <div class="card" style="padding:6px 14px">
@@ -424,8 +401,6 @@
         <div class="subttl">Доступ</div>
         <label class="lbl" for="sDrex">DREX API-ключ (скоринг)</label>
         <input id="sDrex" type="password" placeholder="nace_sk…">
-        <label class="lbl" for="sKey">Gemini API-ключ (чат)</label>
-        <input id="sKey" type="password" placeholder="AIza…">
         <div class="subttl">Дефолты нарезки</div>
         <div class="ai-grid">
           <div><label class="lbl" for="sWant">Клипов по умолчанию</label>
@@ -470,8 +445,8 @@
 
 <script>
 const $=id=>document.getElementById(id);
-const TITLES={dashboard:'Дашборд',cut:'Нарезка',clips:'Клипы',ask:'Спросить ИИ',history:'История',settings:'Настройки'};
-const SUBS={dashboard:'пачка вертикальных шортсов из серий',cut:'ссылки → сценки → серии',clips:'готовое с постерами и скором',ask:'заголовки, хуки, хештеги',history:'все запуски и их движки',settings:'ключи, дефолты, воркеры'};
+const TITLES={dashboard:'Дашборд',cut:'Нарезка',clips:'Клипы',history:'История',settings:'Настройки'};
+const SUBS={dashboard:'пачка вертикальных шортсов из серий',cut:'ссылки → сценки → серии',clips:'готовое с постерами и скором',history:'все запуски и их движки',settings:'ключи, дефолты, воркеры'};
 let SETTINGS={};
 let live=new Map();
 let HIST=[];
@@ -488,7 +463,6 @@ function show(v){
   $('viewSub').textContent=SUBS[v]||'';
   if(v==='dashboard')loadDash();
   if(v==='clips')loadClips();
-  if(v==='ask')renderChat();
   if(v==='history')loadHistory();
   if(v==='settings')loadSettings();
 }
@@ -773,42 +747,6 @@ document.querySelectorAll('#scoreChips button').forEach(b=>b.onclick=()=>{
   paintClips(($('fSearch')||{value:''}).value.trim().toLowerCase());
 });
 
-/* ---------- спросить ИИ ---------- */
-let CHAT=[];
-try{CHAT=JSON.parse(localStorage.getItem('cs_chat')||'[]');}catch(e){CHAT=[];}
-function saveChat(){try{localStorage.setItem('cs_chat',JSON.stringify(CHAT.slice(-60)));}catch(e){}}
-function renderChat(){
-  const box=$('chatLog');box.innerHTML='';
-  if(!CHAT.length)box.innerHTML='<div class="empty">Спроси про заголовок, хук или хештеги — отвечу как для своих шортсов</div>';
-  CHAT.forEach(m=>{
-    const d=document.createElement('div');d.className='msg '+(m.role==='ai'?'ai':'me');d.textContent=m.text;box.appendChild(d);
-  });
-  box.scrollTop=box.scrollHeight;
-}
-async function sendChat(){
-  const inp=$('askIn'),q=inp.value.trim();
-  if(!q||sendChat.busy)return;
-  sendChat.busy=true;$('askGo').disabled=true;
-  inp.value='';
-  CHAT.push({role:'user',text:q});saveChat();renderChat();
-  const box=$('chatLog');
-  const tp=document.createElement('div');tp.className='msg ai typing';tp.textContent='Думаю… (до 2 минут, если Gemini перегружен)';box.appendChild(tp);box.scrollTop=box.scrollHeight;
-  const ctl=new AbortController(),timer=setTimeout(()=>ctl.abort(),150000);
-  try{
-    const r=await fetch('/api/ask',{method:'POST',headers:{'Content-Type':'application/json'},
-      signal:ctl.signal,
-      body:JSON.stringify({question:q,history:CHAT.slice(0,-1).slice(-10)})});
-    const j=await r.json();
-    tp.remove();
-    if(!j.ok)throw new Error(j.error||'Не получилось');
-    CHAT.push({role:'ai',text:j.answer});saveChat();renderChat();
-  }catch(e){tp.remove();toast(e.name==='AbortError'?'ИИ не ответил за 150 сек — попробуй ещё раз':e.message,'err');}
-  finally{clearTimeout(timer);sendChat.busy=false;$('askGo').disabled=false;}
-}
-$('askGo').onclick=sendChat;
-$('askIn').addEventListener('keydown',e=>{if(e.key==='Enter')sendChat();});
-document.querySelectorAll('#askSug button').forEach(b=>b.onclick=()=>{$('askIn').value=b.textContent;sendChat();});
-
 /* ---------- история ---------- */
 async function loadHistory(){
   try{
@@ -834,7 +772,6 @@ async function loadSettings(){
     const j=await (await fetch('/api/settings')).json();
     SETTINGS={...SETTINGS,...j.settings};
     $('sDrex').value=SETTINGS.drex_key||'';
-    $('sKey').value=SETTINGS.gemini_key||'';
     $('sWant').value=String(SETTINGS.want||8);
     $('sLens').value=SETTINGS.lens||'20-60';
     $('sLimit').value=String(SETTINGS.limit_min ?? 0);
@@ -854,7 +791,7 @@ async function loadSettings(){
 }
 $('sSave').onclick=async ()=>{
   const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({gemini_key:$('sKey').value.trim(),drex_key:$('sDrex').value.trim(),want:+$('sWant').value,
+    body:JSON.stringify({drex_key:$('sDrex').value.trim(),want:+$('sWant').value,
       lens:$('sLens').value,limit_min:+$('sLimit').value,vmode:$('sVmode').value,asr_model:$('sAsd').value,
       max_workers:+$('sW').value,captions:$('sCaps').checked,antidetect:$('sAnti').checked,mirror:$('sMir').checked,banner:$('sBan').checked,hook_title:$('sHook').checked})});
   const j=await r.json();

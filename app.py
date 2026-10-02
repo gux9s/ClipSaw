@@ -561,50 +561,6 @@ def api_zip(job_id):
                      download_name=f"{job_id[:6]}_clips.zip")
 
 
-@app.post("/api/ask")
-def api_ask():
-    """Чат «Спросить ИИ»: вопрос + короткая история -> Gemini."""
-    import ai_clips as ac
-    data = request.get_json(force=True, silent=True) or {}
-    q = (data.get("question") or "").strip()[:2000]
-    if not q:
-        return jsonify({"ok": False, "error": "Пустой вопрос"}), 400
-    key = get_settings().get("gemini_key", "")
-    if not key:
-        return jsonify({"ok": False, "error": "Нет Gemini-ключа в настройках"}), 400
-    contents, total = [], 0
-    for m in (data.get("history") or [])[-10:]:
-        t = str(m.get("text", ""))[:1500]
-        if not t:
-            continue
-        contents.append({"role": "model" if m.get("role") == "ai" else "user",
-                         "parts": [{"text": t}]})
-        total += len(t)
-        if total > 6000:
-            break
-    contents.append({"role": "user", "parts": [{"text": q}]})
-    sys = ("Ты — помощник ClipSaw: нарезка сериалов в вирусные TikTok-шортсы. "
-           "Отвечай по-русски, коротко и по делу: заголовки, хуки, хештеги, "
-           "идеи клипов, советы по виральности.")
-    body = json.dumps({"system_instruction": {"parts": [{"text": sys}]},
-                       "contents": contents,
-                       "generationConfig": {"temperature": 0.8}}).encode()
-    try:
-        data_out, last = None, None
-        for model in ac._gemini_models(key)[:2]:
-            try:
-                data_out = ac._post_gen(model, key, body)
-                break
-            except Exception as e:
-                last = e
-        if data_out is None:
-            raise last or RuntimeError("не отвечает")
-        text = data_out["candidates"][0]["content"]["parts"][0]["text"]
-    except Exception as e:
-        return jsonify({"ok": False, "error": f"ИИ недоступен: {str(e)[:150]}"}), 502
-    return jsonify({"ok": True, "answer": text.strip()[:4000]})
-
-
 @app.get("/api/zip-multi")
 def api_zip_multi():
     """Один ZIP на несколько задач: ?jobs=id1,id2. Внутри папка на серию."""
