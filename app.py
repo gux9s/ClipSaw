@@ -238,8 +238,10 @@ def fetch_source(url: str, progress=None) -> str:
             "throttled_rate": 100000,
             # android-клиент отдаёт без дросселирования (web режут до ~200КБ/с)
             "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
-            # качаем до 1440p: даунскейл в 1080 чище, чем апскейл из 720p
+            # качаем до 1440p: даунскейл в 1080 чище, чем апскейл из 720p.
+            # vbr первым — из одинаковых берём самый жирный по битрейту
             "format": ("bv*[height<=1440]+ba/b[height<=1440]"),
+            "format_sort": ["vbr"],
             "merge_output_format": "mp4", "outtmpl": tmp}
     with YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True)

@@ -920,7 +920,7 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
         else:
             cmd += ["-vf", qvf]
     cmd += _video_codec_args() + ["-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
+            "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart",
             "-t", str(round(out_dur, 2)), out]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
     cap.set(cv2.CAP_PROP_POS_MSEC, start * 1000)
@@ -1225,7 +1225,7 @@ def render_clip(src: str, moment: dict, segs, out: str, facetrack: bool = True,
     else:
         cmd += ["-vf", qvf]
     cmd += _video_codec_args() + ["-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
+            "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart",
             "-t", str(round(dur, 2)), out]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
     cap.set(cv2.CAP_PROP_POS_MSEC, start * 1000)
