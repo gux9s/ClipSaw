@@ -123,11 +123,11 @@ _VT = _has_videotoolbox()
 
 
 def _video_codec_args() -> list:
-    """Железный H.264 (Apple Silicon): кодирует в разы быстрее x264,
-    вес держим фикс. битрейтом 9 Мбит/с — максимум для TikTok без потерь."""
+    """Железный HEVC (Apple Silicon): в ~2.5 раза меньше H.264 при том же качестве.
+    TikTok его ест, iPhone играет нативно."""
     if _VT:
-        return ["-c:v", "h264_videotoolbox", "-b:v", "14M",
-                "-maxrate", "22M", "-bufsize", "28M", "-profile:v", "high"]
+        return ["-c:v", "hevc_videotoolbox", "-b:v", "6M",
+                "-maxrate", "9M", "-bufsize", "12M", "-profile:v", "main"]
     return ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "21",
             "-preset", "veryfast"]
 
