@@ -126,8 +126,8 @@ def _video_codec_args() -> list:
     """Железный H.264 (Apple Silicon): кодирует в разы быстрее x264,
     вес держим фикс. битрейтом 9 Мбит/с — максимум для TikTok без потерь."""
     if _VT:
-        return ["-c:v", "h264_videotoolbox", "-b:v", "9M",
-                "-maxrate", "13M", "-bufsize", "18M", "-profile:v", "high"]
+        return ["-c:v", "h264_videotoolbox", "-b:v", "12M",
+                "-maxrate", "18M", "-bufsize", "24M", "-profile:v", "high"]
     return ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "21",
             "-preset", "veryfast"]
 
@@ -635,6 +635,12 @@ def _cover_resize(fr, tw: int, th: int, cx: float = 0.5, cy: float = 0.5,
     return fr[y0:y0 + th, x0:x0 + tw]
 
 
+def _quality_vf() -> str:
+    """Базовая цепочка качества для TikTok: давим шумы пережатого исходника,
+    слегка точим после апскейла. Всегда, не только с антидетектом."""
+    return "hqdn3d=4:3:6:4.5,unsharp=5:5:0.4:5:5:0.0"
+
+
 def _antidetect_filters():
     """Усиленный антидетект: сдвиг цвета + лёгкое зерно (видео),
     подъём питча на 2% без смены длительности (аудио)."""
@@ -894,17 +900,23 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
         mix_tmp = out + ".mix.s16"
         tl.tofile(mix_tmp)
         cmd += ["-f", "s16le", "-ar", str(sr), "-ac", str(ch), "-i", mix_tmp]
+        qvf = _quality_vf()
         if antidetect:
             vf, _ = _antidetect_filters()
-            cmd += ["-vf", vf]
+            qvf += "," + vf
+        cmd += ["-vf", qvf]
         cmd += ["-map", "0:v", "-map", "1:a"]
     else:
         out_dur = dur
         cmd += ["-ss", str(start), "-t", str(round(dur, 2)), "-i", src,
                 "-map", "0:v", "-map", "1:a?"]
+        qvf = _quality_vf()
         if antidetect:
             vf, af = _antidetect_filters()
-            cmd += ["-vf", vf, "-af", af]
+            qvf += "," + vf
+            cmd += ["-vf", qvf, "-af", af]
+        else:
+            cmd += ["-vf", qvf]
     cmd += _video_codec_args() + ["-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
             "-t", str(round(out_dur, 2)), out]
@@ -1203,9 +1215,13 @@ def render_clip(src: str, moment: dict, segs, out: str, facetrack: bool = True,
            "-i", "pipe:0",
            "-ss", str(start), "-t", str(round(dur, 2)), "-i", src,
            "-map", "0:v", "-map", "1:a?"]
+    qvf = _quality_vf()
     if antidetect:
         vf, af = _antidetect_filters()
-        cmd += ["-vf", vf, "-af", af]
+        qvf += "," + vf
+        cmd += ["-vf", qvf, "-af", af]
+    else:
+        cmd += ["-vf", qvf]
     cmd += _video_codec_args() + ["-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
             "-t", str(round(dur, 2)), out]
