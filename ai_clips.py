@@ -127,7 +127,7 @@ def _video_codec_args() -> list:
     вес держим фикс. битрейтом 9 Мбит/с — максимум для TikTok без потерь."""
     if _VT:
         return ["-c:v", "h264_videotoolbox", "-b:v", "9M",
-                "-maxrate", "13M", "-bufsize", "18M"]
+                "-maxrate", "13M", "-bufsize", "18M", "-profile:v", "high"]
     return ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "21",
             "-preset", "veryfast"]
 
@@ -636,9 +636,9 @@ def _cover_resize(fr, tw: int, th: int, cx: float = 0.5, cy: float = 0.5,
 
 
 def _antidetect_filters():
-    """Усиленный антидетект: сдвиг цвета + плёночное зерно (видео),
+    """Усиленный антидетект: сдвиг цвета + лёгкое зерно (видео),
     подъём питча на 2% без смены длительности (аудио)."""
-    vf = "eq=contrast=1.07:saturation=1.12:brightness=0.015,noise=alls=7:allf=t"
+    vf = "eq=contrast=1.07:saturation=1.12:brightness=0.015,noise=alls=3:allf=t"
     af = "aresample=44100,asetrate=44100*1.02,aresample=44100,atempo=0.9804"
     return vf, af
 
