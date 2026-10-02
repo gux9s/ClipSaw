@@ -361,16 +361,10 @@
         <input id="key" type="password" placeholder="nace_sk… (можно сохранить в настройках)">
         <div class="step"><b>02</b><span>Что нарезать</span></div>
         <div class="ai-grid">
-          <div><label class="lbl" for="rmode">Режим</label>
-            <select id="rmode"><option value="ai" selected>ИИ-моменты (сценки×серии)</option><option value="seq">Всё по порядку (части 40–55с)</option></select></div>
-          <div><label class="lbl" for="lens">Длина серии</label>
-            <select id="lens"><option value="15-30">Короткие · 15–30</option><option value="20-60" selected>Стандарт · 20–60</option><option value="40-75">Длинные · 40–75</option><option value="150-179">Макси · 150–179</option></select></div>
-        </div>
-        <div class="ai-grid" id="seRow">
-          <div><label class="lbl" for="stories">Сценок (историй)</label>
-            <select id="stories"><option>1</option><option>2</option><option selected>3</option><option>5</option><option>8</option></select></div>
-          <div><label class="lbl" for="eps">Серий в сценке</label>
-            <select id="eps"><option>1</option><option selected>2</option><option>3</option><option>4</option></select></div>
+          <div><label class="lbl" for="want">Клипов с видео</label>
+            <select id="want"><option>3</option><option>5</option><option selected>8</option><option>10</option><option>15</option><option>20</option><option>30</option><option>50</option></select></div>
+          <div><label class="lbl" for="lens">Длина клипа</label>
+            <select id="lens"><option value="15-30">Короткие · 15–30</option><option value="20-60" selected>Стандарт · 20–60</option><option value="40-75">Длинные · 40–75</option></select></div>
         </div>
           <div><label class="lbl" for="limit">Анализ</label>
             <select id="limit"><option value="0" selected>Всё видео</option><option value="10">Первые 10 мин</option><option value="20">Первые 20 мин</option><option value="40">Первые 40 мин</option><option value="60">Первый час</option></select></div>
@@ -434,14 +428,10 @@
         <input id="sKey" type="password" placeholder="AIza…">
         <div class="subttl">Дефолты нарезки</div>
         <div class="ai-grid">
-          <div><label class="lbl" for="sStories">Сценок по умолчанию</label>
-            <select id="sStories"><option>1</option><option>2</option><option>3</option><option>5</option><option>8</option></select></div>
-          <div><label class="lbl" for="sEps">Серий по умолчанию</label>
-            <select id="sEps"><option>1</option><option>2</option><option>3</option><option>4</option></select></div>
-        </div>
-        <div class="ai-grid">
+          <div><label class="lbl" for="sWant">Клипов по умолчанию</label>
+            <select id="sWant"><option>3</option><option>5</option><option>8</option><option>10</option><option>20</option><option>30</option><option>50</option></select></div>
           <div><label class="lbl" for="sLens">Длина по умолчанию</label>
-            <select id="sLens"><option value="15-30">15–30</option><option value="20-60">20–60</option><option value="40-75">40–75</option><option value="150-179">150–179</option></select></div>
+            <select id="sLens"><option value="15-30">15–30</option><option value="20-60">20–60</option><option value="40-75">40–75</option></select></div>
           <div><label class="lbl" for="sLimit">Анализ по умолчанию</label>
             <select id="sLimit"><option value="0">Всё</option><option value="10">10 мин</option><option value="20">20 мин</option><option value="40">40 мин</option><option value="60">Час</option></select></div>
         </div>
@@ -564,8 +554,6 @@ $('mode').addEventListener('change',()=>{
   const fast=$('mode').value==='fast';
   $('caps').disabled=fast;
 });
-function syncRmode(){const row=$('seRow');if(row)row.style.display=$('rmode').value==='seq'?'none':'';}
-$('rmode').addEventListener('change',syncRmode);
 
 $('go').onclick=async ()=>{
   hideErr();
@@ -578,7 +566,7 @@ $('go').onclick=async ()=>{
   $('go').disabled=true;$('go').textContent='Запускаю…';
   try{
     const r=await fetch('/api/start',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({urls,api_key:key,stories:+$('stories').value,episodes:+$('eps').value,
+      body:JSON.stringify({urls,api_key:key,want:+$('want').value,
         min_len:+$('lens').value.split('-')[0],max_len:+$('lens').value.split('-')[1],
         limit_min:+$('limit').value,
         captions:$('caps').checked&&mode!=='fast',facetrack:mode==='face'||mode==='split',
@@ -670,7 +658,7 @@ function makeCustom(id){
   sel._cs={sync};sync();
 }
 function refreshCustom(){document.querySelectorAll('select').forEach(s=>{if(s._cs)s._cs.sync();});}
-['stories','eps','lens','limit','mode','asd','sStories','sEps','sLens','sLimit','sVmode','sAsd','sW'].forEach(makeCustom);
+['want','lens','limit','mode','asd','sWant','sLens','sLimit','sVmode','sAsd','sW'].forEach(makeCustom);
 
 /* ---------- клипы ---------- */
 let LIB=[];
@@ -847,8 +835,7 @@ async function loadSettings(){
     SETTINGS={...SETTINGS,...j.settings};
     $('sDrex').value=SETTINGS.drex_key||'';
     $('sKey').value=SETTINGS.gemini_key||'';
-    $('sStories').value=String(SETTINGS.stories||3);
-    $('sEps').value=String(SETTINGS.episodes||2);
+    $('sWant').value=String(SETTINGS.want||8);
     $('sLens').value=SETTINGS.lens||'20-60';
     $('sLimit').value=String(SETTINGS.limit_min ?? 0);
     $('sVmode').value=SETTINGS.vmode||'split';
@@ -867,7 +854,7 @@ async function loadSettings(){
 }
 $('sSave').onclick=async ()=>{
   const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({gemini_key:$('sKey').value.trim(),drex_key:$('sDrex').value.trim(),stories:+$('sStories').value,episodes:+$('sEps').value,
+    body:JSON.stringify({gemini_key:$('sKey').value.trim(),drex_key:$('sDrex').value.trim(),want:+$('sWant').value,
       lens:$('sLens').value,limit_min:+$('sLimit').value,vmode:$('sVmode').value,asr_model:$('sAsd').value,
       max_workers:+$('sW').value,captions:$('sCaps').checked,antidetect:$('sAnti').checked,mirror:$('sMir').checked,banner:$('sBan').checked,hook_title:$('sHook').checked})});
   const j=await r.json();
@@ -879,10 +866,9 @@ $('sClean').onclick=async ()=>{
 };
 function applyDefaults(){
   if($('key')&&!$('key').value&&SETTINGS.drex_key)$('key').value=SETTINGS.drex_key;
-  $('stories').value=String(SETTINGS.stories||3);
-  $('eps').value=String(SETTINGS.episodes||2);
+  $('want').value=String(SETTINGS.want||8);
   const lens=SETTINGS.lens||'20-60';
-  $('lens').value=['15-30','20-60','40-75','150-179'].includes(lens)?lens:'20-60';
+  $('lens').value=['15-30','20-60','40-75'].includes(lens)?lens:'20-60';
   $('limit').value=String(SETTINGS.limit_min ?? 0);
   $('mode').value=SETTINGS.vmode||'split';
   $('asd').value=SETTINGS.asr_model||'base';
@@ -891,7 +877,7 @@ function applyDefaults(){
   $('mir').checked=!!SETTINGS.mirror;
   $('ban').checked=SETTINGS.banner!==false;
   $('hook').checked=!!SETTINGS.hook_title;
-  syncRmode();refreshCustom();
+  refreshCustom();
 }
 
 /* ---------- init ---------- */

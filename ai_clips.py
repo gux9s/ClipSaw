@@ -426,156 +426,6 @@ def snap_to_speech(s: float, e: float, bounds, tol: float = 1.2):
     return s, e
 
 
-EP_MIN = 40  # серия короче не бывает — требует формат
-EP_MAX = 55  # и длиннее тоже (с допуском снапа ±1)
-
-
-def _snap_end_fwd(t: float, ends, lo: float, hi: float):
-    """Конец серии: ближайший конец слова вперёд, но в пределах [lo, hi]."""
-    import bisect
-    i = bisect.bisect_left(ends, max(t, lo))
-    if i < len(ends) and ends[i] <= hi:
-        return ends[i]
-    return min(max(t, lo), hi)
-
-
-def _fit_span(s0: float, e0: float, lo: float, hi: float, ends, right: float):
-    """Тянем/режем дугу ровно в [lo, hi] по краям слов. None — не влезло."""
-    import bisect
-    if e0 - s0 < lo:
-        tgt = s0 + lo
-        i = bisect.bisect_left(ends, tgt - 1)
-        e0 = ends[i] if i < len(ends) and ends[i] <= min(tgt + 3, right) else min(tgt, right)
-    if e0 - s0 > hi:
-        tgt = s0 + hi
-        i = bisect.bisect_left(ends, tgt) - 1
-        e0 = ends[i] if i >= 0 and ends[i] >= tgt - 4 else tgt
-        e0 = max(e0, s0 + lo)
-    if e0 - s0 < lo - 3 or e0 > right:
-        return None
-    return e0
-
-
-def _voice_start(s0: float, bounds, win: float = 5.0):
-    """Старт — ровно с голоса: первое слово в окне [s0, s0+win].
-    Тишина и музыкальные подводки отрезаются (до 5с)."""
-    import bisect
-    starts = sorted({ws for ws, _ in bounds})
-    i = bisect.bisect_left(starts, s0 - 0.5)
-    if i < len(starts) and starts[i] <= s0 + win and starts[i] - s0 > 0.3:
-        return max(starts[i] - 0.15, s0 if s0 >= MIN_START else MIN_START)
-    return s0
-
-
-def pick_series(segs, lang: str, key: str, stories: int, episodes: int,
-                min_len: int, max_len: int, scenes=None, min_gap: float = 30.0):
-    """Сериалы: top-S сценок пошире, каждую режем на эпизоды.
-    Обрыв — строго между словами, на пике (не в конце мысли)."""
-    stories = max(1, min(10, int(stories or 1)))
-    episodes = max(1, min(4, int(episodes or 1)))
-    serial = episodes > 1
-    # диапазон серии: обычный режим 40-55, макси-линза — как выбрано
-    lo, hi = (40, 55) if (serial and max_len <= 75) else (min_len, max_len)
-    story_min = max(12, int(episodes * lo * 0.8))
-    story_max = episodes * hi
-    seeds, scorer = pick_moments(segs, lang, key, stories, story_min, story_max,
-                                 scenes=scenes, min_gap=min_gap)
-    bounds = _word_bounds(segs)
-    ends = sorted({e for _, e in bounds})
-    dur_total = (segs[-1]["end"] - segs[0]["start"]) if segs else 0
-    import bisect
-    out = []
-    for si, sd in enumerate(sorted(seeds, key=lambda m: float(m["start"]))):
-        if not serial:
-            # одиночка: тоже ровно в диапазон линзы
-            s0 = _voice_start(max(float(sd["start"]), MIN_START), bounds)
-            e0 = _fit_span(s0, float(sd["end"]), lo, hi, ends, dur_total)
-            if e0 is None:
-                continue
-            out.append({**sd, "start": round(s0, 1), "end": round(e0, 1),
-                        "story": si, "part": 0, "of": 1})
-            continue
-        # --- точная подгонка дуги под E серий (lo-hi) ---
-        s0 = _voice_start(max(float(sd["start"]), MIN_START), bounds)
-        need_lo, need_hi = episodes * lo, episodes * hi
-        right = dur_total  # дальше расширяться некуда
-        e0 = _fit_span(s0, float(sd["end"]), need_lo, need_hi, ends, right)
-        if e0 is None:
-            continue  # не влезло — сценку пропускаем, а не кромсаем
-        # --- E серий строго lo-hi, границы по краям слов ---
-        plist, ps = [], s0
-        for k in range(episodes):
-            tgt = ps + (e0 - ps) / (episodes - k)
-            if k < episodes - 1:
-                pe = _snap_end_fwd(tgt, ends, ps + lo - 0.5, ps + hi + 1)
-            else:
-                pe = e0
-            if pe - ps < lo - 1:
-                break
-            plist.append({"start": round(ps, 1), "end": round(pe, 1),
-                          "score": int(sd.get("score", 70)),
-                          "hook": str(sd.get("hook", ""))[:40],
-                          "story": si})
-            ps = pe + 0.3
-        if any(not (lo - 0.5 <= p["end"] - p["start"] <= hi + 7) for p in plist):
-            continue  # хоть одна серия вне диапазона — сценку в брак
-        got = len(plist)
-        if got < (episodes if episodes <= 2 else episodes - 1):
-            continue  # развалилось — лучше пропустить, чем отдать огрызки
-        got = len(plist)
-        if not got:
-            continue
-        for k, p in enumerate(plist):
-            last = (k == got - 1)
-            v = (sd.get("verdict", "") + (
-                f" Часть {k + 1} из {got}: обрыв на самом интересном — продолжение в профиле."
-                if not last else (f" Финал истории из {got} частей." if got > 1 else "")))
-            out.append({**p, "part": k,
-                        "title": (f"{sd.get('title', '')} · ч.{k + 1}/{got}"
-                                  if got > 1 else sd.get("title", "")),
-                        "verdict": v.strip()[:300], "of": got})
-    return out, scorer
-
-
-def pick_sequential(segs, lo_skip: float = 20.0, tail_skip: float = 20.0,
-                    lo: float = 40, hi: float = 55):
-    """Всё видео по порядку: части lo-hi, без первых/последних 20с.
-    Границы — по краям слов, на каждой жжём 'ЧАСТЬ N'."""
-    bounds = _word_bounds(segs)
-    ends = sorted({e for _, e in bounds})
-    import bisect
-    if not segs:
-        raise RuntimeError("Нет транскрипции — нечего резать")
-    v0 = segs[0]["start"] + lo_skip
-    v1 = segs[-1]["end"] - tail_skip
-    v0 = _voice_start(v0, bounds)
-    if v1 - v0 < lo - 1:
-        raise RuntimeError("Видео короче минуты полезного контента")
-    n = max(1, round((v1 - v0) / ((lo + hi) / 2)))
-    out = []
-    ps = v0
-    for k in range(n):
-        tgt = v0 + (v1 - v0) * (k + 1) / n if k < n - 1 else v1
-        if k < n - 1:
-            i = bisect.bisect_left(ends, max(tgt, ps + lo - 0.5))
-            pe = ends[i] if i < len(ends) and ends[i] <= ps + hi + 1 else min(max(tgt, ps + lo - 0.5), ps + hi + 1)
-        else:
-            pe = v1
-        if pe - ps < lo - 1:
-            break
-        out.append({
-            "start": round(ps, 1), "end": round(pe, 1),
-            "score": 90, "title": f"Часть {k + 1} из {n}",
-            "verdict": f"Нарезка по порядку: часть {k + 1} из {n}.",
-            "hook": "", "story": 0, "part": k, "of": n,
-            "part_label": f"ЧАСТЬ {k + 1}",
-        })
-        ps = pe + 0.3
-    if not out:
-        raise RuntimeError("Не вышло нарезать — попробуй ИИ-режим")
-    return out, "parts"
-
-
 def parse_stamps(text: str):
     """Ручные таймкоды: строки 'мм:сс-мм:сс' / 'ч:мм:сс-...' / 'сек-сек'."""
     def ts(t):
@@ -1199,8 +1049,6 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
                         frame = __import__("numpy").asarray(img)
             if hook_title and (t - start) <= HOOK_SECS and moment.get("hook"):
                 frame = _draw_hook(frame, moment["hook"])
-            if moment.get("part_label"):
-                frame = _draw_part(frame, moment["part_label"])
             proc.stdin.write(frame.tobytes())
             if progress and k % 15 == 0:
                 progress(k / total)
@@ -1292,22 +1140,6 @@ def _caption_states(words, t: float, per_line: int = 4):
 
 
 HOOK_SECS = 2.2  # хук-заголовок висит первые секунды клипа
-
-
-def _draw_part(frame, text: str):
-    """Подпись 'ЧАСТЬ N' внизу кадра (режим нарезки по порядку)."""
-    import cv2
-    if not text:
-        return frame
-    from PIL import Image, ImageDraw
-    font = _font(46)
-    img = Image.fromarray(frame)
-    dr = ImageDraw.Draw(img)
-    bb = dr.textbbox((0, 0), text, font=font, stroke_width=3)
-    x = (OUT_W - (bb[2] - bb[0])) / 2
-    dr.text((x, OUT_H - (bb[3] - bb[1]) - 78), text, font=font,
-            fill="white", stroke_width=3, stroke_fill="black")
-    return __import__("numpy").asarray(img)
 
 
 def _draw_hook(frame, text: str):
@@ -1467,8 +1299,6 @@ def render_clip(src: str, moment: dict, segs, out: str, facetrack: bool = True,
                         frame = __import__("numpy").asarray(img)
             if hook_title and (t - start) <= HOOK_SECS and moment.get("hook"):
                 frame = _draw_hook(frame, moment["hook"])
-            if moment.get("part_label"):
-                frame = _draw_part(frame, moment["part_label"])
             proc.stdin.write(frame.tobytes())
             if progress and k % 15 == 0:
                 progress(k / total)

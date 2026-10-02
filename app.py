@@ -29,7 +29,7 @@ FFMPEG = os.path.expanduser("~/.local/bin/ffmpeg")
 
 DB = os.path.join(BASE, "data.db")
 CFG = os.path.join(BASE, "config.json")
-DEFAULT_CFG = {"gemini_key": "", "drex_key": "", "rmode": "ai", "stories": 3, "episodes": 2, "lens": "20-60", "limit_min": 0,
+DEFAULT_CFG = {"gemini_key": "", "drex_key": "", "want": 8, "lens": "20-60", "limit_min": 0,
                "vmode": "split", "captions": True, "facetrack": True,
                "antidetect": False, "mirror": False, "banner": True, "hook_title": False,
                "asr_model": "base", "max_workers": 2}
@@ -284,17 +284,11 @@ def run_job(job_id: str, url: str, opts: dict):
         if stamps:
             moments = [{**m, "title": m.get("title") or f"Момент {k + 1}"}
                        for k, m in enumerate(stamps[:20])]
-        elif opts.get("rmode") == "seq":
-            prog(82, "режу по порядку…")
-            _mx = int(opts.get("max_len", 60) or 60)
-            _mn = int(opts.get("min_len", 20) or 20)
-            _lo, _hi = (_mn, _mx) if _mx > 75 else (40, 55)
-            moments, scorer = ac.pick_sequential(segs, lo=_lo, hi=_hi)
         else:
             prog(82, "оценка моментов…")
-            moments, scorer = ac.pick_series(
+            moments, scorer = ac.pick_moments(
                 segs, lang, opts.get("api_key", ""),
-                opts.get("stories", 3), opts.get("episodes", 2),
+                opts.get("want", 8),
                 opts.get("min_len", 20), opts.get("max_len", 60),
                 scenes=scenes, min_gap=opts.get("min_gap", 45))
         with lock:
@@ -378,7 +372,7 @@ def api_start():
     cfg = get_settings()
     if not data.get("api_key"):
         data["api_key"] = cfg.get("drex_key", "")
-    for k in ("rmode", "stories", "episodes", "limit_min", "vmode", "captions", "facetrack", "antidetect", "mirror", "banner", "hook_title", "asr_model", "drex_key"):
+    for k in ("want", "limit_min", "vmode", "captions", "facetrack", "antidetect", "mirror", "banner", "hook_title", "asr_model", "drex_key"):
         if k not in data or data[k] in ("", None):
             data[k] = cfg.get(k)
     if not data.get("min_len") or not data.get("max_len"):
@@ -388,14 +382,9 @@ def api_start():
         except Exception:
             data["min_len"], data["max_len"] = 20, 60
     try:
-        stories = max(1, min(10, int(data.get("stories",
-                        data.get("want", cfg.get("stories", 3)) or 3))))
+        want = max(1, min(50, int(data.get("want", cfg.get("want", 8)) or 8)))
     except (TypeError, ValueError):
-        stories = 3
-    try:
-        episodes = max(1, min(4, int(data.get("episodes", cfg.get("episodes", 2)) or 2)))
-    except (TypeError, ValueError):
-        episodes = 2
+        want = 8
     ids = []
     for url in urls[:10]:
         job_id = uuid.uuid4().hex[:8]
@@ -404,8 +393,7 @@ def api_start():
                             "status": "queued", "pct": 0, "stage": "в очереди…",
                             "started": time.time()}
         threading.Thread(target=run_job, args=(job_id, url, {
-            "api_key": data.get("api_key", ""), "stories": stories, "episodes": episodes,
-            "rmode": data.get("rmode", "ai") if data.get("rmode") in ("ai", "seq") else "ai",
+            "api_key": data.get("api_key", ""), "want": want,
             "min_len": int(data.get("min_len", 20)), "max_len": int(data.get("max_len", 60)),
             "limit_min": int(data.get("limit_min", 0)), "min_gap": 45,
             "captions": bool(data.get("captions", True)),
