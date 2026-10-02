@@ -9,8 +9,9 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 os.environ["PATH"] = (os.path.expanduser("~/.deno/bin") + ":"
-                      + os.path.expanduser("~/.local/bin") + ":"
-                      + os.environ.get("PATH", ""))
+                       + os.path.expanduser("~/.local/bin") + ":"
+                       + "/opt/homebrew/bin:/usr/local/bin:"
+                       + os.environ.get("PATH", ""))
 
 import ai_clips as ac
 from flask import Flask, jsonify, request, send_file
@@ -237,7 +238,11 @@ def fetch_source(url: str, progress=None) -> str:
             # вис ниже 100 КБ/с — убивать и ретраить, а не висеть вечно
             "throttled_rate": 100000,
             # android-клиент отдаёт без дросселирования (web режут до ~200КБ/с)
-            "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
+            "extractor_args": {"youtube": {"player_client": ["android", "ios", "web"]}},
+            # aria2c: 16 коннектов вместо одного — ровная скорость без просадок
+            "external_downloader": {"default": "aria2c"},
+            "external_downloader_args": {"aria2c": ["-x", "16", "-s", "16", "-k", "1M",
+                                                    "--file-allocation=none", "-q"]},
             # качаем до 1440p: даунскейл в 1080 чище, чем апскейл из 720p.
             # vbr первым — из одинаковых берём самый жирный по битрейту
             "format": ("bv*[height<=1440]+ba/b[height<=1440]"),
