@@ -312,7 +312,8 @@ def run_job(job_id: str, url: str, opts: dict):
                                vmode=mode, antidetect=opts.get("antidetect", False),
                                mirror=opts.get("mirror", False),
                                banner=opts.get("banner", True),
-                               hook_title=opts.get("hook_title", False))
+                               hook_title=opts.get("hook_title", False),
+                               max_total=float(opts.get("max_len", 60) or 60))
             with lock:
                 done["n"] += 1
                 n = done["n"]

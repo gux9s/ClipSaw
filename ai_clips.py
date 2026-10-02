@@ -735,12 +735,30 @@ def _seek_live(gcap, gdur: float, need: float, tries: int = 3):
     return best
 
 
+_BANNER_EFF = None
+
+
+def _banner_eff() -> float:
+    global _BANNER_EFF
+    if _BANNER_EFF is None:
+        try:
+            import cv2
+            c = cv2.VideoCapture(BANNER_FILE)
+            n = int(c.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
+            f = c.get(cv2.CAP_PROP_FPS) or 60
+            c.release()
+            _BANNER_EFF = (n / max(f, 1)) / BANNER_SPEED if n else 4.22
+        except Exception:
+            _BANNER_EFF = 4.22
+    return _BANNER_EFF
+
+
 def render_split_clip(src: str, moment: dict, segs, out: str,
                       facetrack: bool = True, captions: bool = True,
                       progress=None, antidetect: bool = False,
                       mirror: bool = False, gameplay: str | None = None,
                       banner: bool = True, banner_path: str | None = None,
-                      hook_title: bool = False):
+                      hook_title: bool = False, max_total: float | None = None):
     """Вертикаль 1080x1920: верх 40% — сериал (crop-fill), низ 60% — геймплей
     (закольцован, немой). Сабы — у шва. Звук — только из сериала."""
     import cv2
@@ -762,6 +780,16 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
         cap.release()
         raise RuntimeError("момент за пределами видео")
     dur = end - start
+    if banner and max_total:
+        # итог вместе с баннерами влезает в линзу: ужимаем контент
+        be = _banner_eff()
+        for _ in range(3):
+            n = max(1, min(6, int(round(dur / 50.0))))
+            cap_dur = max_total - n * be
+            if dur <= cap_dur or cap_dur < 5:
+                break
+            dur = cap_dur
+        end = start + dur
 
     gcap = cv2.VideoCapture(gp)
     gn = int(gcap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
@@ -1127,12 +1155,14 @@ def fast_cut(src: str, moment: dict, out: str):
 def render_clip(src: str, moment: dict, segs, out: str, facetrack: bool = True,
                 captions: bool = True, progress=None, vmode: str = "face",
                 antidetect: bool = False, mirror: bool = False,
-                banner: bool = True, hook_title: bool = False):
+                banner: bool = True, hook_title: bool = False,
+                max_total: float | None = None):
     if vmode == "split":
         return render_split_clip(src, moment, segs, out, facetrack=facetrack,
                                  captions=captions, progress=progress,
                                  antidetect=antidetect, mirror=mirror,
-                                 banner=banner, hook_title=hook_title)
+                                 banner=banner, hook_title=hook_title,
+                                 max_total=max_total)
     import cv2
     from PIL import Image, ImageDraw
     start, end = float(moment["start"]), float(moment["end"])
