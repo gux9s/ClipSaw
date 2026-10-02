@@ -124,11 +124,11 @@ _VT = _has_videotoolbox()
 
 def _video_codec_args() -> list:
     """Железный H.264 (Apple Silicon): кодирует в разы быстрее x264,
-    вес держим фикс. битрейтом 7 Мбит/с — 40-сек клип ≈ 35 МБ вместо 130."""
+    вес держим фикс. битрейтом 9 Мбит/с — максимум для TikTok без потерь."""
     if _VT:
-        return ["-c:v", "h264_videotoolbox", "-b:v", "7M",
-                "-maxrate", "10M", "-bufsize", "14M"]
-    return ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23",
+        return ["-c:v", "h264_videotoolbox", "-b:v", "9M",
+                "-maxrate", "13M", "-bufsize", "18M"]
+    return ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "21",
             "-preset", "veryfast"]
 
 
@@ -402,10 +402,13 @@ def pick_moments(segs, lang: str, key: str, want: int, min_len: int, max_len: in
     scorer = "drex"
     if not cands:
         raise RuntimeError("DREX вернул пусто — попробуй ещё раз")
-    # слабые моменты выкидываем, только если сильных хватает на всю пачку
-    strong = [m for m in cands if m.get("score", 0) >= 40]
-    if len(strong) >= want:
-        cands = strong
+    # только лучшие: пол 60, если пусто — 50, если и так пусто — топ-3 как есть
+    top = [m for m in cands if m.get("score", 0) >= 60]
+    if not top:
+        top = [m for m in cands if m.get("score", 0) >= 50]
+    if not top:
+        top = sorted(cands, key=lambda m: -m.get("score", 0))[:3]
+    cands = top
     # адаптивный зазор: на часовом видео под 50 клипов зазор жмём, иначе не влезут
     total_dur = (segs[-1]["end"] - segs[0]["start"]) if segs else 0
     if total_dur > 0:
