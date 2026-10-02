@@ -269,27 +269,31 @@ def _drex_score(segs, key: str, want: int, min_len: int, max_len: int):
                     questions[f"w{k}_whole"] = {
                         "type": "noul",
                         "instructions": f"Moment {tag} is a complete thought, not cut off mid-sentence."}
+                    questions[f"w{k}_peak"] = {
+                        "type": "noul",
+                        "instructions": f"Moment {tag} has an emotional peak, plot twist or cliffhanger ending."}
                 j += 1
         if not wins:
             continue
-        # батчи по 100 окон (300 вопросов): быстрее отвечают, лимит API — 512
+        # батчи по 100 окон (400 вопросов): быстрее отвечают, лимит API — 512
         ans = {}
-        wkeys = [f"w{k}_{sfx}" for k in range(len(wins)) for sfx in ("viral", "hook", "whole")]
-        for b in range(0, len(wkeys), 300):
-            sub = {k: questions[k] for k in wkeys[b:b + 300]}
+        wkeys = [f"w{k}_{sfx}" for k in range(len(wins))
+                 for sfx in ("viral", "hook", "whole", "peak")]
+        for b in range(0, len(wkeys), 400):
+            sub = {k: questions[k] for k in wkeys[b:b + 400]}
             part = _drex_call(key, state, sub).get("answers", {})
             ans.update(part)
         for k, (s0, e0, txt) in enumerate(wins):
             def _p(suffix):
                 a = (ans.get(f"w{k}_{suffix}") or {})
                 return float(a.get("noul", 0.5))
-            pv, ph, pw = _p("viral"), _p("hook"), _p("whole")
-            score = int(round(100 * (0.55 * pv + 0.25 * ph + 0.20 * pw)))
+            pv, ph, pw, pk = _p("viral"), _p("hook"), _p("whole"), _p("peak")
+            score = int(round(100 * (0.45 * pv + 0.20 * ph + 0.15 * pw + 0.20 * pk)))
             title = " ".join(txt.split()[:9]) + "…"
             out.append({
                 "start": s0, "end": e0, "score": score, "title": title[:120],
                 "verdict": (f"Drex {score}/100: виральность {pv:.2f}, "
-                            f"хук {ph:.2f}, цельность {pw:.2f}."),
+                            f"хук {ph:.2f}, цельность {pw:.2f}, пик {pk:.2f}."),
                 "hook": "",
             })
     return sorted(out, key=lambda m: -m["score"])[:want + max(3, want // 3)]
