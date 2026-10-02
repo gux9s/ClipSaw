@@ -629,8 +629,8 @@ def _cover_resize(fr, tw: int, th: int, cx: float = 0.5, cy: float = 0.5,
     sc = max(tw / max(w, 1), th / max(h, 1)) * zoom
     sw, sh = max(int(round(w * sc)), tw), max(int(round(h * sc)), th)
     if (sw, sh) != (w, h):
-        # Lanczos вместо bilinear: края не мылятся на апскейле 1.5-2x
-        inter = cv2.INTER_LANCZOS4 if sc > 1.0 else cv2.INTER_LINEAR
+        # вверх — Lanczos (края), вниз — Area (без муара)
+        inter = cv2.INTER_LANCZOS4 if sc > 1.0 else cv2.INTER_AREA
         fr = cv2.resize(fr, (sw, sh), interpolation=inter)
     x0 = int(min(max(cx * sw - tw / 2, 0), max(sw - tw, 0)))
     y0 = int(min(max(cy * sh - th / 2 + drift_y, 0), max(sh - th, 0)))
@@ -640,7 +640,7 @@ def _cover_resize(fr, tw: int, th: int, cx: float = 0.5, cy: float = 0.5,
 def _quality_vf() -> str:
     """Базовая цепочка качества для TikTok: давим шумы пережатого исходника,
     слегка точим после апскейла. Всегда, не только с антидетектом."""
-    return "hqdn3d=4:3:6:4.5,unsharp=5:5:0.4:5:5:0.0"
+    return "hqdn3d=4:3:6:4.5,unsharp=5:5:0.5:5:5:0.0"
 
 
 def _antidetect_filters():
@@ -679,10 +679,10 @@ def _chroma_overlay(bg, fg, box_w: int = BANNER_W, cy: int | None = None,
     if bh > bg.shape[0]:
         bh = bg.shape[0]
         bw = max(int(round(w0 * bh / max(h0, 1))), 1)
-    fg = cv2.resize(fg, (bw, bh), interpolation=cv2.INTER_LINEAR)
+    fg = cv2.resize(fg, (bw, bh), interpolation=cv2.INTER_LANCZOS4)
     if zoom > 1.0:  # наезд: режем поля, центр-кроп обратно в бокс
         zw, zh = int(round(bw * zoom)), int(round(bh * zoom))
-        big = cv2.resize(fg, (zw, zh), interpolation=cv2.INTER_LINEAR)
+        big = cv2.resize(fg, (zw, zh), interpolation=cv2.INTER_LANCZOS4)
         dx, dy = (zw - bw) // 2, (zh - bh) // 2
         fg = big[dy:dy + bh, dx:dx + bw]
     fg = cv2.cvtColor(fg, cv2.COLOR_BGR2RGB)
@@ -1245,7 +1245,7 @@ def render_clip(src: str, moment: dict, segs, out: str, facetrack: bool = True,
                 if antidetect:  # наезд 4%: прячет края, лого и ватермарки
                     h0, w0 = fr.shape[:2]
                     fr = cv2.resize(fr, (int(w0 * 1.04), int(h0 * 1.04)),
-                                    interpolation=cv2.INTER_LINEAR)
+                                    interpolation=cv2.INTER_LANCZOS4)
                     dx, dy = (fr.shape[1] - w0) // 2, (fr.shape[0] - h0) // 2
                     fr = fr[dy:dy + h0, dx:dx + w0]
                 fr = cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)
@@ -1253,12 +1253,12 @@ def render_clip(src: str, moment: dict, segs, out: str, facetrack: bool = True,
             t = start + k / fps
             if vmode == "blur":
                 # размытый фон + резкий центр 16:9 (сериал: в кадре часто несколько человек)
-                small = cv2.resize(fr, (270, 480), interpolation=cv2.INTER_LINEAR)
+                small = cv2.resize(fr, (270, 480), interpolation=cv2.INTER_AREA)
                 small = cv2.GaussianBlur(small, (0, 0), 12)
                 bg = cv2.resize(small, (1080, 1920), interpolation=cv2.INTER_LINEAR)
                 bg = cv2.convertScaleAbs(bg, alpha=0.72)
                 fh = int(1080 * H / max(W, 1))
-                fg = cv2.resize(fr, (1080, fh), interpolation=cv2.INTER_LINEAR)
+                fg = cv2.resize(fr, (1080, fh), interpolation=cv2.INTER_LANCZOS4)
                 y0 = (1920 - fh) // 2
                 frame = bg
                 frame[y0:y0 + fh] = fg
@@ -1269,7 +1269,7 @@ def render_clip(src: str, moment: dict, segs, out: str, facetrack: bool = True,
                     cx = 1.0 - cx
                 x0 = int(min(max(cx * W - crop_w / 2, 0), max(W - crop_w, 0)))
                 crop = fr[:, x0:x0 + crop_w] if W > crop_w else fr
-                frame = cv2.resize(crop, (1080, 1920), interpolation=cv2.INTER_LINEAR)
+                frame = cv2.resize(crop, (1080, 1920), interpolation=cv2.INTER_LANCZOS4)
                 cap_y = 1230
             if captions:
                 words = _active_words(segs, t)
