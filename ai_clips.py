@@ -123,11 +123,10 @@ _VT = _has_videotoolbox()
 
 
 def _video_codec_args() -> list:
-    """Железный HEVC (Apple Silicon): в ~2.5 раза меньше H.264 при том же качестве.
-    TikTok его ест, iPhone играет нативно."""
+    """Железный HEVC (Apple Silicon): чисто для верха, вес вторичен."""
     if _VT:
-        return ["-c:v", "hevc_videotoolbox", "-b:v", "6M",
-                "-maxrate", "9M", "-bufsize", "12M", "-profile:v", "main"]
+        return ["-c:v", "hevc_videotoolbox", "-b:v", "10M",
+                "-maxrate", "15M", "-bufsize", "20M", "-profile:v", "main"]
     return ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "21",
             "-preset", "veryfast"]
 
@@ -406,29 +405,26 @@ def pick_moments(segs, lang: str, key: str, want: int, min_len: int, max_len: in
     scorer = "drex"
     if not cands:
         raise RuntimeError("DREX вернул пусто — попробуй ещё раз")
-    # планка по качеству, но количество добиваем: 60 -> 50 -> 45 -> топ-N
-    take = [m for m in cands if m.get("score", 0) >= 60]
-    if len(take) < want:
-        take = [m for m in cands if m.get("score", 0) >= 50]
-    if len(take) < want:
-        take = [m for m in cands if m.get("score", 0) >= 45]
-    if len(take) < want:
-        take = sorted(cands, key=lambda m: -m.get("score", 0))[:want]
-    cands = take
+    # Весь пул в отбор: сначала разводка по времени, качество — планкой внутри.
+    # Два прохода: (зазор, пол) = (норм, 45) затем (узко, 35) — количество добивается.
+    pool = sorted(cands, key=lambda m: -m.get("score", 0))
+    if not pool:
+        raise RuntimeError("DREX вернул пусто — попробуй ещё раз")
     # адаптивный зазор: на часовом видео под 50 клипов зазор жмём, иначе не влезут
     total_dur = (segs[-1]["end"] - segs[0]["start"]) if segs else 0
     if total_dur > 0:
         fit_gap = (total_dur - want * max_len) / max(want, 1)
         min_gap = max(5.0, min(min_gap, fit_gap)) if fit_gap > 0 else 5.0
-    # жадный отбор без пересечений + привязка к сценам + подгон длины.
-    # два прохода: строгий зазор, потом добор с узким — чтобы количество добивалось
+    # жадный отбор без пересечений + привязка к сценам + подгон длины
     bounds = _word_bounds(segs)
     picked, used = [], set()
-    for gap in (min_gap, 10.0):
-        if len(picked) >= want or (gap != min_gap and min_gap <= 10.0):
+    for gap, floor in ((min_gap, 45), (10.0, 35)):
+        if len(picked) >= want:
             break
-        for mi, m in enumerate(sorted(cands, key=lambda m: -m.get("score", 0))):
+        for mi, m in enumerate(pool):
             if mi in used:
+                continue
+            if m.get("score", 0) < floor:
                 continue
             s, e = float(m["start"]), float(m["end"])
             if s < MIN_START - 4.0 and e < MIN_START + 4.0:
