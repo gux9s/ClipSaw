@@ -296,7 +296,7 @@ def _drex_score(segs, key: str, want: int, min_len: int, max_len: int):
                             f"хук {ph:.2f}, цельность {pw:.2f}, пик {pk:.2f}."),
                 "hook": "",
             })
-    return sorted(out, key=lambda m: -m["score"])[:want * 2 + 5]
+    return sorted(out, key=lambda m: -m["score"])[:want * 3 + 10]
 
 
 def detect_scenes(src: str, min_len: float = 15.0, max_len: float = 120.0):
@@ -412,8 +412,8 @@ def pick_moments(segs, lang: str, key: str, want: int, min_len: int, max_len: in
         take = [m for m in cands if m.get("score", 0) >= 50]
     if len(take) < want:
         take = [m for m in cands if m.get("score", 0) >= 45]
-    if len(take) < min(want, 3):
-        take = sorted(cands, key=lambda m: -m.get("score", 0))[:min(want, 3)]
+    if len(take) < want:
+        take = sorted(cands, key=lambda m: -m.get("score", 0))[:want]
     cands = take
     # адаптивный зазор: на часовом видео под 50 клипов зазор жмём, иначе не влезут
     total_dur = (segs[-1]["end"] - segs[0]["start"]) if segs else 0
