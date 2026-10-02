@@ -350,7 +350,7 @@
           <div><label class="lbl" for="want">Клипов с видео</label>
             <select id="want"><option>3</option><option>5</option><option selected>8</option><option>10</option><option>15</option><option>20</option><option>30</option><option>50</option></select></div>
           <div><label class="lbl" for="lens">Длина клипа</label>
-            <select id="lens"><option value="15-30">Короткие · 15–30</option><option value="20-60" selected>Стандарт · 20–60</option><option value="40-75">Длинные · 40–75</option></select></div>
+            <select id="lens"><option value="15-30">Короткие · 15–30</option><option value="20-60" selected>Стандарт · 20–60</option><option value="40-75">Длинные · 40–75</option><option value="80-118">Макси · 80–118 · 2 баннера</option></select></div>
         </div>
           <div><label class="lbl" for="limit">Анализ</label>
             <select id="limit"><option value="0" selected>Всё видео</option><option value="10">Первые 10 мин</option><option value="20">Первые 20 мин</option><option value="40">Первые 40 мин</option><option value="60">Первый час</option></select></div>
@@ -406,7 +406,7 @@
           <div><label class="lbl" for="sWant">Клипов по умолчанию</label>
             <select id="sWant"><option>3</option><option>5</option><option>8</option><option>10</option><option>20</option><option>30</option><option>50</option></select></div>
           <div><label class="lbl" for="sLens">Длина по умолчанию</label>
-            <select id="sLens"><option value="15-30">15–30</option><option value="20-60">20–60</option><option value="40-75">40–75</option></select></div>
+            <select id="sLens"><option value="15-30">15–30</option><option value="20-60">20–60</option><option value="40-75">40–75</option><option value="80-118">80–118 · 2 баннера</option></select></div>
           <div><label class="lbl" for="sLimit">Анализ по умолчанию</label>
             <select id="sLimit"><option value="0">Всё</option><option value="10">10 мин</option><option value="20">20 мин</option><option value="40">40 мин</option><option value="60">Час</option></select></div>
         </div>
@@ -805,7 +805,7 @@ function applyDefaults(){
   if($('key')&&!$('key').value&&SETTINGS.drex_key)$('key').value=SETTINGS.drex_key;
   $('want').value=String(SETTINGS.want||8);
   const lens=SETTINGS.lens||'20-60';
-  $('lens').value=['15-30','20-60','40-75'].includes(lens)?lens:'20-60';
+  $('lens').value=['15-30','20-60','40-75','80-118'].includes(lens)?lens:'20-60';
   $('limit').value=String(SETTINGS.limit_min ?? 0);
   $('mode').value=SETTINGS.vmode||'split';
   $('asd').value=SETTINGS.asr_model||'base';
