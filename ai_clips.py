@@ -789,7 +789,7 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
     start, end = float(moment["start"]), float(moment["end"])
     cap = cv2.VideoCapture(src)
     fps = cap.get(cv2.CAP_PROP_FPS) or 30
-    fps = min(float(fps), 30)
+    fps = round(min(float(fps or 30), 30), 2)
     nfr = cap.get(cv2.CAP_PROP_FRAME_COUNT)
     if nfr and fps > 0:
         end = min(end, nfr / fps)
@@ -854,7 +854,7 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
 
     cmd = [FFMPEG, "-y", "-v", "error",
            "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{OUT_W}x{OUT_H}",
-           "-r", str(int(fps)),
+           "-r", str(fps),
            "-i", "pipe:0"]
     mix_tmp = None
     if use_banner:
@@ -1137,6 +1137,121 @@ def fast_cut(src: str, moment: dict, out: str):
     return out
 
 
+def render_blur9(src: str, moment: dict, segs, out: str,
+                 captions: bool = True, progress=None,
+                 antidetect: bool = False, mirror: bool = False):
+    """Блюр 9:16 под кражу у конкурентов: фон — блюр копия кадра,
+    центр — резкий fit (края с вотермарками режутся), зеркало + зум +
+    сдвиг цвета против Content ID. Сабы наши, звук оригинала."""
+    import cv2
+    from PIL import Image, ImageDraw
+    start, end = float(moment["start"]), float(moment["end"])
+    cap = cv2.VideoCapture(src)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30
+    fps = round(min(float(fps or 30), 30), 2)
+    W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1920
+    H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 1080
+    nfr = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+    if nfr and fps > 0:
+        end = min(end, nfr / fps)
+    if end - start < 1:
+        cap.release()
+        raise RuntimeError("момент за пределами видео")
+    dur = end - start
+    font = _font(64)
+    cmd = [FFMPEG, "-y", "-v", "error",
+           "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "1080x1920",
+           "-r", str(fps),
+           "-i", "pipe:0",
+           "-ss", str(start), "-t", str(round(dur, 2)), "-i", src,
+           "-map", "0:v", "-map", "1:a?"]
+    qvf = _quality_vf()
+    if antidetect:
+        vf, af = _antidetect_filters()
+        qvf += "," + vf
+        cmd += ["-vf", qvf, "-af", af]
+    else:
+        cmd += ["-vf", qvf]
+    cmd += _video_codec_args() + ["-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart",
+            "-t", str(round(dur, 2)), out]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+    cap.set(cv2.CAP_PROP_POS_MSEC, start * 1000)
+    _warm_start(cap)
+    total = max(int(round(dur * fps)), 1)
+    last = None
+    try:
+        for k in range(total):
+            ok, fr = cap.read()
+            if not ok:
+                if last is None:
+                    break
+                fr = last
+            else:
+                if mirror:
+                    fr = cv2.flip(fr, 1)
+                fr = cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)
+            last = fr
+            t = start + k / fps
+            h, w = fr.shape[:2]
+            # фон: блюр-копия на весь кадр, затемнена
+            small = cv2.resize(fr, (135, 240), interpolation=cv2.INTER_AREA)
+            small = cv2.GaussianBlur(small, (0, 0), 8)
+            bg = cv2.resize(small, (1080, 1920), interpolation=cv2.INTER_LINEAR)
+            bg = cv2.convertScaleAbs(bg, alpha=0.6)
+            # центр: fit внутрь 1000x1700 (режем края с вотермарками) + наезд
+            zw, zh = (1040, 1850) if antidetect else (1000, 1780)
+            sc = min(zw / max(w, 1), zh / max(h, 1))
+            fw, fh = max(int(round(w * sc)), 1), max(int(round(h * sc)), 1)
+            fg = cv2.resize(fr, (fw, fh), interpolation=cv2.INTER_LANCZOS4)
+            x0, y0 = (1080 - fw) // 2, (1920 - fh) // 2
+            frame = bg
+            frame[y0:y0 + fh, x0:x0 + fw] = fg
+            if captions:
+                words = _active_words(segs, t)
+                if words:
+                    ch, act = _caption_states(words, t)
+                    if ch:
+                        img = Image.fromarray(frame)
+                        dr = ImageDraw.Draw(img)
+                        lines = _split_lines(dr, font, ch, OUT_W - 140)
+                        hs = []
+                        for ln in lines:
+                            txt = " ".join(w["w"] for w in ln)
+                            bbox = dr.textbbox((0, 0), txt, font=font, stroke_width=3)
+                            hs.append(bbox[3] - bbox[1])
+                        block = sum(hs) + 8 * (len(lines) - 1)
+                        y = min(1330 - block, 1560)
+                        for li, ln in enumerate(lines):
+                            txt = " ".join(w["w"] for w in ln)
+                            bbox = dr.textbbox((0, 0), txt, font=font, stroke_width=3)
+                            tw = bbox[2] - bbox[0]
+                            x = (OUT_W - tw) / 2
+                            for wi, w in enumerate(ln):
+                                pre = " ".join(v["w"] for v in ln[:wi])
+                                pre = (pre + " ") if pre else ""
+                                bx = dr.textbbox((0, 0), pre, font=font, stroke_width=3)
+                                wx = x + (bx[2] - bx[0])
+                                col = "#FFD60A" if wi == act else "white"
+                                dr.text((wx, y), w["w"], font=font, fill=col,
+                                        stroke_width=3, stroke_fill="black")
+                            y += hs[li] + 8
+                        frame = __import__("numpy").asarray(img)
+            proc.stdin.write(frame.tobytes())
+            if progress and k % 15 == 0:
+                progress(k / total)
+    finally:
+        cap.release()
+        try:
+            proc.stdin.close()
+        except Exception:
+            pass
+        proc.wait(timeout=600)
+    if proc.returncode != 0 or not os.path.exists(out):
+        raise RuntimeError("рендер не удался")
+    return out
+
+
 def render_clip(src: str, moment: dict, segs, out: str, facetrack: bool = True,
                 captions: bool = True, progress=None, vmode: str = "face",
                 antidetect: bool = False, mirror: bool = False,
@@ -1148,12 +1263,16 @@ def render_clip(src: str, moment: dict, segs, out: str, facetrack: bool = True,
                                  antidetect=antidetect, mirror=mirror,
                                  banner=banner,
                                  max_total=max_total)
+    if vmode == "blur9":
+        return render_blur9(src, moment, segs, out,
+                            captions=captions, progress=progress,
+                            antidetect=antidetect, mirror=mirror)
     import cv2
     from PIL import Image, ImageDraw
     start, end = float(moment["start"]), float(moment["end"])
     cap = cv2.VideoCapture(src)
     fps = cap.get(cv2.CAP_PROP_FPS) or 30
-    fps = min(float(fps), 30)
+    fps = round(min(float(fps or 30), 30), 2)
     W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1920
     H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 1080
     nfr = cap.get(cv2.CAP_PROP_FRAME_COUNT)
@@ -1168,7 +1287,7 @@ def render_clip(src: str, moment: dict, segs, out: str, facetrack: bool = True,
     font = _font(62)
 
     cmd = [FFMPEG, "-y", "-v", "error",
-           "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "1080x1920", "-r", str(int(fps)),
+           "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "1080x1920", "-r", str(fps),
            "-i", "pipe:0",
            "-ss", str(start), "-t", str(round(dur, 2)), "-i", src,
            "-map", "0:v", "-map", "1:a?"]
