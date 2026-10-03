@@ -123,10 +123,10 @@ _VT = _has_videotoolbox()
 
 
 def _video_codec_args() -> list:
-    """Железный HEVC (Apple Silicon): чисто для верха, вес вторичен."""
-    if _VT:
-        return ["-c:v", "hevc_videotoolbox", "-b:v", "10M",
-                "-maxrate", "15M", "-bufsize", "20M", "-profile:v", "main"]
+    """x264 CRF — софтверный, но заметно качественнее железного CBR:
+    психовизуалка, адаптивный битрейт. Скорость та же (бутылка — Python-цикл)."""
+    return ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "20",
+            "-preset", "veryfast"]
     return ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "21",
             "-preset", "veryfast"]
 
@@ -636,7 +636,7 @@ def _cover_resize(fr, tw: int, th: int, cx: float = 0.5, cy: float = 0.5,
 def _quality_vf() -> str:
     """Базовая цепочка качества для TikTok: давим шумы пережатого исходника,
     слегка точим после апскейла. Всегда, не только с антидетектом."""
-    return "hqdn3d=4:3:6:4.5,unsharp=5:5:0.5:5:5:0.0"
+    return "hqdn3d=5:4:3:3,unsharp=5:5:0.5:5:5:0.0"
 
 
 def _antidetect_filters():
