@@ -137,7 +137,6 @@ def transcribe(path: str, limit_min: int = 0, progress=None, model_name: str = "
     """faster-whisper / GigaAM -> segments[{start,end,text,words[]}]."""
     if model_name == "giga":
         return _transcribe_giga(path, limit_min, progress)
-    from faster_whisper import WhisperModel
     src = path
     tmp_cut = None
     if limit_min and limit_min > 0:

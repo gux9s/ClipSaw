@@ -237,8 +237,8 @@ def fetch_source(url: str, progress=None) -> str:
             "retries": 10, "fragment_retries": 10,
             # вис ниже 100 КБ/с — убивать и ретраить, а не висеть вечно
             "throttled_rate": 100000,
-            # android-клиент отдаёт без дросселирования (web режут до ~200КБ/с)
-            "extractor_args": {"youtube": {"player_client": ["android", "ios", "web"]}},
+            # БЕЗ extractor_args: дефолтные клиенты отдают 1440p, а android/ios
+            # под SABR-гейтом дают только 360p — проверяли, это и душило качество
             # aria2c: 16 коннектов вместо одного — ровная скорость без просадок
             "external_downloader": {"default": "aria2c"},
             "external_downloader_args": {"aria2c": ["-x", "16", "-s", "16", "-k", "1M",
