@@ -790,8 +790,6 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
     cap = cv2.VideoCapture(src)
     fps = cap.get(cv2.CAP_PROP_FPS) or 30
     fps = min(float(fps), 30)
-    W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1920
-    H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 1080
     nfr = cap.get(cv2.CAP_PROP_FRAME_COUNT)
     if nfr and fps > 0:
         end = min(end, nfr / fps)
