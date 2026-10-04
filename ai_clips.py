@@ -662,10 +662,12 @@ def _banner_has_audio(path: str) -> bool:
 
 
 def _chroma_overlay(bg, fg, box_w: int = BANNER_W, cy: int | None = None,
-                    zoom: float = 1.0, y_top: int | None = None):
+                    zoom: float = 1.0, y_top: int | None = None,
+                    opacity: float = 0.9):
     """Баннер: зелёный фон выбит хромакеем, лёгкий despill против ореола.
     cy — центр по вертикали (по умолчанию центр кадра), y_top — верх бокса,
-    zoom — наезд с центр-кропом (убирает поля дизайна до краёв)."""
+    zoom — наезд с центр-кропом (убирает поля дизайна до краёв),
+    opacity — непрозрачность баннера (0.9 = на 10% прозрачный)."""
     import cv2
     import numpy as np
     h0, w0 = fg.shape[:2]
@@ -688,6 +690,8 @@ def _chroma_overlay(bg, fg, box_w: int = BANNER_W, cy: int | None = None,
     mx = np.maximum(fg[..., 2], fg[..., 0])
     fg[..., 1] -= np.clip(fg[..., 1] - mx, 0, None) * 0.85
     a = (mask.astype(np.float32) / 255.0)[..., None]  # 1 = зелень = прозрачно
+    keep = a + (1 - a) * (1 - opacity)  # фон просвечивает и сквозь баннер
+    show = (1 - a) * opacity
     Hh, Ww = bg.shape[:2]
     x0 = (Ww - bw) // 2
     if y_top is not None:
@@ -696,7 +700,7 @@ def _chroma_overlay(bg, fg, box_w: int = BANNER_W, cy: int | None = None,
         y0 = (cy - bh // 2) if cy is not None else (Hh - bh) // 2
         y0 = min(max(y0, 0), max(Hh - bh, 0))
     roi = bg[y0:y0 + bh, x0:x0 + bw].astype(np.float32)
-    bg[y0:y0 + bh, x0:x0 + bw] = np.clip(roi * a + fg * (1 - a), 0, 255).astype(np.uint8)
+    bg[y0:y0 + bh, x0:x0 + bw] = np.clip(roi * keep + fg * show, 0, 255).astype(np.uint8)
     return bg
 
 
