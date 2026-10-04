@@ -638,11 +638,33 @@ def _quality_vf() -> str:
     return "hqdn3d=5:4:3:3,unsharp=5:5:0.5:5:5:0.0"
 
 
+def _rand_meta() -> list:
+    """Уникальные метаданные файла: рандомные время создания, кодер, соль.
+    Content ID и хэши видят каждый рендер новым файлом."""
+    import random
+    import time
+    ts = time.strftime("%Y-%m-%dT%H:%M:%S.000Z",
+                       time.gmtime(time.time() - random.randint(0, 900 * 86400)))
+    enc = f"Lavf{random.choice(['58.29', '59.27', '60.16', '61.7'])}.{random.randint(100, 104)}"
+    salt = "".join(random.choice("abcdef0123456789") for _ in range(8))
+    return ["-map_metadata", "-1",
+            "-metadata", f"creation_time={ts}",
+            "-metadata", f"encoder={enc}",
+            "-metadata", f"comment={salt}"]
+
+
 def _antidetect_filters():
-    """Усиленный антидетект: сдвиг цвета + лёгкое зерно (видео),
-    подъём питча на 2% без смены длительности (аудио)."""
-    vf = "eq=contrast=1.07:saturation=1.12:brightness=0.015,noise=alls=3:allf=t"
-    af = "aresample=44100,asetrate=44100*1.02,aresample=44100,atempo=0.9804"
+    """Усиленный антидетект: ВСЕ параметры случайные в диапазоне —
+    каждый рендер уникален: сдвиг цвета + лёгкое зерно (видео),
+    подъём питча на 1-4% без смены длительности (аудио)."""
+    import random
+    vf = (f"eq=contrast={random.uniform(1.05, 1.09):.3f}:"
+          f"saturation={random.uniform(1.10, 1.14):.3f}:"
+          f"brightness={random.uniform(0.010, 0.020):.3f},"
+          f"noise=alls={random.randint(2, 5)}:allf=t")
+    k = random.uniform(1.01, 1.04)
+    af = (f"aresample=44100,asetrate=44100*{k:.4f},"
+          f"aresample=44100,atempo={1 / k:.4f}")
     return vf, af
 
 
@@ -869,8 +891,7 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
         # --- звук собираем посемпльно в numpy: оригинал + баннеры + оригинал ---
         import numpy as np
         sr, ch = 44100, 2
-        af_src = ("aresample=44100,asetrate=44100*1.02,"
-                  "aresample=44100,atempo=0.9804") if antidetect else None
+        af_src = (_antidetect_filters()[1] if antidetect else None)
         orig = _extract_pcm(src, ss=start, dur=dur, af=af_src, sr=sr, ch=ch)
         n_total = int(round(out_dur * sr))
         need = int(round(b_eff * sr))
@@ -904,11 +925,11 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
             vf, _ = _antidetect_filters()
             qvf += "," + vf
         cmd += ["-vf", qvf]
-        cmd += ["-map", "0:v", "-map", "1:a"]
+        cmd += ["-map", "0:v", "-map", "1:a"] + _rand_meta()
     else:
         out_dur = dur
         cmd += ["-ss", str(start), "-t", str(round(dur, 2)), "-i", src,
-                "-map", "0:v", "-map", "1:a?"]
+                "-map", "0:v", "-map", "1:a?"] + _rand_meta()
         qvf = _quality_vf()
         if antidetect:
             vf, af = _antidetect_filters()
@@ -916,7 +937,7 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
             cmd += ["-vf", qvf, "-af", af]
         else:
             cmd += ["-vf", qvf]
-    cmd += _video_codec_args() + ["-pix_fmt", "yuv420p",
+    cmd += _video_codec_args() + ["-pix_fmt", "yuv420p", "-fflags", "+bitexact",
             "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart",
             "-t", str(round(out_dur, 2)), out]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
@@ -924,6 +945,7 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
     _warm_start(cap)  # первый кадр не чёрный
     total = max(int(round(out_dur * fps)), 1)
     last_top, last_bot, last_win = None, None, -1
+    zm = random.uniform(1.03, 1.06) if antidetect else 1.0  # наезд свой у каждого клипа
     try:
         for k in range(total):
             t_rel = k / fps  # время на ВЫХОДЕ
@@ -960,8 +982,7 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
                     cx = 1.0 - cx
             else:
                 cx = 0.5
-            top = _cover_resize(fr, OUT_W, TOP_H, cx=cx, cy=0.5,
-                                zoom=(1.04 if antidetect else 1.0))
+            top = _cover_resize(fr, OUT_W, TOP_H, cx=cx, cy=0.5, zoom=zm)
 
             # низ НЕ фризим — геймплей едет дальше всегда
             g_frac += g_step
@@ -1176,7 +1197,7 @@ def render_blur9(src: str, moment: dict, segs, out: str,
         cmd += ["-vf", qvf, "-af", af]
     else:
         cmd += ["-vf", qvf]
-    cmd += _video_codec_args() + ["-pix_fmt", "yuv420p",
+    cmd += _video_codec_args() + ["-pix_fmt", "yuv420p", "-fflags", "+bitexact",
             "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart",
             "-t", str(round(dur, 2)), out]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
@@ -1294,7 +1315,7 @@ def render_clip(src: str, moment: dict, segs, out: str, facetrack: bool = True,
            "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "1080x1920", "-r", str(fps),
            "-i", "pipe:0",
            "-ss", str(start), "-t", str(round(dur, 2)), "-i", src,
-           "-map", "0:v", "-map", "1:a?"]
+           "-map", "0:v", "-map", "1:a?"] + _rand_meta()
     qvf = _quality_vf()
     if antidetect:
         vf, af = _antidetect_filters()
@@ -1302,7 +1323,7 @@ def render_clip(src: str, moment: dict, segs, out: str, facetrack: bool = True,
         cmd += ["-vf", qvf, "-af", af]
     else:
         cmd += ["-vf", qvf]
-    cmd += _video_codec_args() + ["-pix_fmt", "yuv420p",
+    cmd += _video_codec_args() + ["-pix_fmt", "yuv420p", "-fflags", "+bitexact",
             "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart",
             "-t", str(round(dur, 2)), out]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
@@ -1310,6 +1331,8 @@ def render_clip(src: str, moment: dict, segs, out: str, facetrack: bool = True,
     _warm_start(cap)  # первый кадр не чёрный
     total = max(int(round(dur * fps)), 1)
     last = None
+    import random as _rnd
+    zm = _rnd.uniform(1.03, 1.06) if antidetect else 1.0  # наезд свой у каждого клипа
     try:
         for k in range(total):
             ok, fr = cap.read()
@@ -1320,9 +1343,9 @@ def render_clip(src: str, moment: dict, segs, out: str, facetrack: bool = True,
             else:
                 if mirror:
                     fr = cv2.flip(fr, 1)
-                if antidetect:  # наезд 4%: прячет края, лого и ватермарки
+                if antidetect:  # наезд 3-6%: прячет края, лого и ватермарки
                     h0, w0 = fr.shape[:2]
-                    fr = cv2.resize(fr, (int(w0 * 1.04), int(h0 * 1.04)),
+                    fr = cv2.resize(fr, (int(w0 * zm), int(h0 * zm)),
                                     interpolation=cv2.INTER_LANCZOS4)
                     dx, dy = (fr.shape[1] - w0) // 2, (fr.shape[0] - h0) // 2
                     fr = fr[dy:dy + h0, dx:dx + w0]
