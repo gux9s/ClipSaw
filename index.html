@@ -378,7 +378,8 @@
         <div class="ai-grid">
           <div><label class="lbl" for="asd">Транскрибация</label>
             <select id="asd"><option value="base" selected>Быстро · Base</option><option value="small">Точно · Small (медленнее)</option><option value="giga">GigaAM v3 · топ для русского</option></select></div>
-          <div></div>
+          <div><label class="lbl" for="game">Геймплей снизу</label>
+            <select id="game"><option value="subway" selected>Subway Surfers</option><option value="minecraft">Minecraft паркур</option></select></div>
         </div>
         <div class="step"><b>03</b><span>Оформление</span></div>
         <div class="chkgrid">
@@ -436,7 +437,8 @@
         <div class="ai-grid">
           <div><label class="lbl" for="sW">Параллельных задач</label>
             <select id="sW"><option>1</option><option selected>2</option><option>3</option><option>4</option></select></div>
-          <div></div>
+          <div><label class="lbl" for="sGame">Геймплей</label>
+            <select id="sGame"><option value="subway">Subway Surfers</option><option value="minecraft">Minecraft паркур</option></select></div>
         </div>
         <div class="subttl">Переключатели</div>
         <label class="chk"><input type="checkbox" id="sCaps" checked> Субтитры по умолчанию</label>        <label class="chk"><input type="checkbox" id="sAnti"> Анти-детект по умолчанию</label>
@@ -564,7 +566,7 @@ $('go').onclick=async ()=>{
         min_len:+$('lens').value.split('-')[0],max_len:+$('lens').value.split('-')[1],
         limit_min:+$('limit').value,
         captions:$('caps').checked&&mode!=='fast',facetrack:mode==='face'||mode==='split',
-        antidetect:$('anti').checked,mirror:$('mir').checked,banner:$('ban').checked,asr_model:$('asd').value,fast:mode==='fast',vmode:mode==='fast'?'blur':mode,
+        antidetect:$('anti').checked,mirror:$('mir').checked,banner:$('ban').checked,asr_model:$('asd').value,gameplay:$('game').value,fast:mode==='fast',vmode:mode==='fast'?'blur':mode,
         stamps:$('manualChk').checked?$('stamps').value:''})});
     const j=await r.json();
     if(!j.ok)throw new Error(j.error||'Не получилось');
@@ -652,7 +654,7 @@ function makeCustom(id){
   sel._cs={sync};sync();
 }
 function refreshCustom(){document.querySelectorAll('select').forEach(s=>{if(s._cs)s._cs.sync();});}
-['want','lens','limit','mode','asd','sWant','sLens','sLimit','sVmode','sAsd','sW'].forEach(makeCustom);
+['want','game','lens','limit','mode','asd','sWant','sLens','sLimit','sVmode','sAsd','sGame','sW'].forEach(makeCustom);
 
 /* ---------- клипы ---------- */
 let LIB=[];
@@ -816,6 +818,7 @@ async function loadSettings(){
     $('sLimit').value=String(SETTINGS.limit_min ?? 0);
     $('sVmode').value=SETTINGS.vmode||'split';
     $('sAsd').value=SETTINGS.asr_model||'base';
+    $('sGame').value=SETTINGS.gameplay||'subway';
     $('sW').value=String(SETTINGS.max_workers||2);
     $('sCaps').checked=!!SETTINGS.captions;
     $('sAnti').checked=!!SETTINGS.antidetect;
@@ -830,7 +833,7 @@ async function loadSettings(){
 $('sSave').onclick=async ()=>{
   const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({drex_key:$('sDrex').value.trim(),want:+$('sWant').value,
-      lens:$('sLens').value,limit_min:+$('sLimit').value,vmode:$('sVmode').value,asr_model:$('sAsd').value,
+      lens:$('sLens').value,limit_min:+$('sLimit').value,vmode:$('sVmode').value,asr_model:$('sAsd').value,gameplay:$('sGame').value,
       max_workers:+$('sW').value,captions:$('sCaps').checked,antidetect:$('sAnti').checked,mirror:$('sMir').checked,banner:$('sBan').checked})});
   const j=await r.json();
   if(j.ok){SETTINGS={...SETTINGS,...j.settings};applyDefaults();toast('Настройки сохранены','ok');loadDashQuiet()}
@@ -847,6 +850,7 @@ function applyDefaults(){
   $('limit').value=String(SETTINGS.limit_min ?? 0);
   $('mode').value=SETTINGS.vmode||'split';
   $('asd').value=SETTINGS.asr_model||'base';
+  $('game').value=SETTINGS.gameplay||'subway';
   $('caps').checked=!!SETTINGS.captions;
   $('anti').checked=!!SETTINGS.antidetect;
   $('mir').checked=!!SETTINGS.mirror;

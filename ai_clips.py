@@ -88,6 +88,12 @@ def _transcribe_giga(path: str, limit_min: int = 0, progress=None):
                      "text": " ".join(x["w"] for x in cur), "words": cur})
     return segs, "ru"
 GAMEPLAY_DIR = os.path.join(BASE, "gameplay")
+GAMEPLAYS = {
+    "subway": {"file": "subway.mp4",
+               "query": "ytsearch1:subway surfers gameplay 1 hour no commentary"},
+    "minecraft": {"file": "minecraft.mp4",
+                  "query": "ytsearch1:minecraft parkour gameplay no commentary"},
+}
 GAMEPLAY_FILE = os.path.join(GAMEPLAY_DIR, "subway.mp4")
 
 # Сплит-раскладка 1080x1920: верх сериал 50% / низ геймплей 50%
@@ -525,24 +531,26 @@ def face_x_at(track, t: float) -> float:
 
 # ---------- 3.5. Сплит: верх контент / низ геймплей ----------
 
-def ensure_gameplay() -> str | None:
+def ensure_gameplay(name: str = "subway") -> str | None:
     """Возвращает путь к закэшированному геймплею; если нет — качает с YouTube."""
-    if os.path.exists(GAMEPLAY_FILE) and os.path.getsize(GAMEPLAY_FILE) > 10 << 20:
-        return GAMEPLAY_FILE
+    meta = GAMEPLAYS.get(name) or GAMEPLAYS["subway"]
+    dest = os.path.join(GAMEPLAY_DIR, meta["file"])
+    if os.path.exists(dest) and os.path.getsize(dest) > 10 << 20:
+        return dest
     os.makedirs(GAMEPLAY_DIR, exist_ok=True)
     try:
         subprocess.run(
             ["yt-dlp", "--no-playlist",
              "-f", "bv*[height<=720]+ba/b[height<=720]/b",
              "--merge-output-format", "mp4",
-             "-o", os.path.join(GAMEPLAY_DIR, "subway.%(ext)s"),
-             "ytsearch1:subway surfers gameplay 1 hour no commentary"],
+             "-o", os.path.join(GAMEPLAY_DIR, meta["file"].rsplit(".", 1)[0] + ".%(ext)s"),
+             meta["query"]],
             timeout=1200, check=True,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         return None
-    if os.path.exists(GAMEPLAY_FILE):
-        return GAMEPLAY_FILE
+    if os.path.exists(dest):
+        return dest
     return None
 
 
@@ -809,7 +817,8 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
     import cv2
     import random
     from PIL import Image, ImageDraw
-    gp = gameplay or ensure_gameplay()
+    gp = (gameplay if gameplay and os.path.exists(gameplay) else
+          ensure_gameplay(gameplay if gameplay in GAMEPLAYS else "subway"))
     if not gp or not os.path.exists(gp):
         raise RuntimeError("нет геймплея — положи gameplay/subway.mp4")
     start, end = float(moment["start"]), float(moment["end"])
@@ -1280,13 +1289,13 @@ def render_blur9(src: str, moment: dict, segs, out: str,
 def render_clip(src: str, moment: dict, segs, out: str, facetrack: bool = True,
                 captions: bool = True, progress=None, vmode: str = "face",
                 antidetect: bool = False, mirror: bool = False,
-                banner: bool = True,
+                banner: bool = True, gameplay: str = "subway",
                 max_total: float | None = None):
     if vmode == "split":
         return render_split_clip(src, moment, segs, out, facetrack=facetrack,
                                  captions=captions, progress=progress,
                                  antidetect=antidetect, mirror=mirror,
-                                 banner=banner,
+                                 banner=banner, gameplay=gameplay,
                                  max_total=max_total)
     if vmode == "blur9":
         return render_blur9(src, moment, segs, out,
