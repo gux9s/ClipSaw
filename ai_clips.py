@@ -266,16 +266,35 @@ def _drex_score(segs, key: str, want: int, min_len: int, max_len: int):
                     tag = f"[{s0:.1f}-{e0:.1f}]"
                     questions[f"w{k}_viral"] = {
                         "type": "noul",
-                        "instructions": f"Moment {tag} will go viral on TikTok: hook in first seconds, emotion, quotable, story payoff."}
+                        "instructions": f"Moment {tag} will go viral on TikTok.",
+                        "criteria": {
+                            "true": ("Opens with a hook in the first 2 seconds (shocking line, "
+                                     "question, conflict); visible emotion or scandal; quotable phrase; "
+                                     "clear story payoff or plot turn inside the moment."),
+                            "false": ("Slow small talk, greetings, filler dialogue, recap of previous "
+                                      "events, credits, silence, or a scene that needs prior context.")}}
                     questions[f"w{k}_hook"] = {
                         "type": "noul",
-                        "instructions": f"Moment {tag} opens with a strong hook that stops scrolling."}
+                        "instructions": f"Moment {tag} opens with a strong hook that stops scrolling.",
+                        "criteria": {
+                            "true": ("First phrase is a shock, secret, threat, accusation, confession "
+                                     "or a question that demands an answer."),
+                            "false": ("Starts with greetings, everyday chatter, scene-setting "
+                                      "or a sentence continued from before.")}}
                     questions[f"w{k}_whole"] = {
                         "type": "noul",
-                        "instructions": f"Moment {tag} is a complete thought, not cut off mid-sentence."}
+                        "instructions": f"Moment {tag} is a complete thought, not cut off mid-sentence.",
+                        "criteria": {
+                            "true": ("Ends on a finished sentence, punchline, decision or cliffhanger pause."),
+                            "false": ("Breaks off mid-word, mid-sentence, or in the middle of an explanation.")}}
                     questions[f"w{k}_peak"] = {
                         "type": "noul",
-                        "instructions": f"Moment {tag} has an emotional peak, plot twist or cliffhanger ending."}
+                        "instructions": f"Moment {tag} has an emotional peak, plot twist or cliffhanger ending.",
+                        "criteria": {
+                            "true": ("Betrayal reveal, fight, confession, plot twist, or a cut right "
+                                     "before the answer — viewer must watch part 2."),
+                            "false": ("Flat emotional line from start to finish, everything resolved, "
+                                      "nothing left hanging.")}}
                 j += 1
         if not wins:
             continue
@@ -779,6 +798,7 @@ def _antidetect_filters():
     vf = (f"eq=contrast={random.uniform(1.05, 1.09):.3f}:"
           f"saturation={random.uniform(1.10, 1.14):.3f}:"
           f"brightness={random.uniform(0.010, 0.020):.3f},"
+          f"hue=h={random.uniform(-4, 4):.1f},"
           f"noise=alls={random.randint(2, 5)}:allf=t")
     k = random.uniform(1.01, 1.04)
     af = (f"aresample=44100,asetrate=44100*{k:.4f},"
@@ -830,7 +850,7 @@ def _banner_needs_key(path: str) -> bool:
 
 def _chroma_overlay(bg, fg, box_w: int = BANNER_W, cy: int | None = None,
                     zoom: float = 1.0, y_top: int | None = None,
-                    opacity: float = 0.9, key_green: bool = True):
+                    opacity: float = 0.95, key_green: bool = True):
     """Баннер: зелёный фон выбит хромакеем, лёгкий despill против ореола.
     cy — центр по вертикали (по умолчанию центр кадра), y_top — верх бокса,
     zoom — наезд с центр-кропом (убирает поля дизайна до краёв),
@@ -1095,6 +1115,7 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
     total = max(int(round(out_dur * fps)), 1)
     last_top, last_bot, last_win = None, None, -1
     zm = random.uniform(1.03, 1.06) if antidetect else 1.0  # наезд свой у каждого клипа
+    jx, jy = (random.uniform(-0.04, 0.04), random.uniform(-0.04, 0.04)) if antidetect else (0.0, 0.0)
     try:
         for k in range(total):
             t_rel = k / fps  # время на ВЫХОДЕ
@@ -1130,8 +1151,8 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
                 if mirror:
                     cx = 1.0 - cx
             else:
-                cx = 0.5
-            top = _cover_resize(fr, OUT_W, TOP_H, cx=cx, cy=0.5, zoom=zm)
+                cx = 0.5 + jx
+            top = _cover_resize(fr, OUT_W, TOP_H, cx=cx, cy=0.5 + jy, zoom=zm)
 
             # низ НЕ фризим — геймплей едет дальше всегда
             g_frac += g_step
@@ -1153,7 +1174,7 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
             last_bot = gfr
             # медленный дрейф окна по ВРЕМЕНИ КОНТЕНТА — во фризе стоит вместе с картинкой
             drift = (ct_rel * 12) % 400
-            bot = _cover_resize(gfr, OUT_W, BOT_H, cx=0.5, cy=0.4, drift_y=drift)
+            bot = _cover_resize(gfr, OUT_W, BOT_H, cx=0.5 + jx, cy=0.4 + jy, drift_y=drift)
 
             frame = cv2.vconcat([top, bot])
             banner_on = False
