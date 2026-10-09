@@ -400,6 +400,9 @@
         <label class="lbl" for="refBulk" style="margin-top:12px">Пачка: ссылка + просмотры (по строке)</label>
         <textarea id="refBulk" placeholder="https://tiktok.com/@x/video/123 1.2M&#10;https://tiktok.com/@y/video/456 800k" style="min-height:64px"></textarea>
         <div class="chatrow" style="margin-top:8px"><button class="btn sm" id="refBulkGo">Разобрать пачку</button><span class="dim" id="refBulkSt"></span></div>
+        <label class="lbl" for="refHunt" style="margin-top:12px">Автоохота: топ шортсов по запросу (TikTok забанен с сервера — охотимся на YouTube)</label>
+        <div class="chatrow"><input id="refHunt" type="text" placeholder="универ смешные моменты" autocomplete="off"><button class="btn sm" id="refHuntGo">Охотиться</button></div>
+        <div class="dim" id="refHuntSt" style="margin-top:8px"></div>
         <div id="refList" style="margin-top:10px"><div class="empty">Пока пусто — кинь ссылку, ИИ разберёт хук, темп и топ-момент</div></div>
       </div>
       <h2>Очередь</h2>
@@ -841,6 +844,26 @@ $('refGo').onclick=async ()=>{
     $('refUrl').value='';toast('Референс разобран','ok');loadRefs();
   }catch(e){toast(e.message,'err');}
   $('refGo').disabled=false;$('refGo').textContent='Разобрать';
+};
+$('refHuntGo').onclick=async ()=>{
+  const q=$('refHunt').value.trim();
+  if(!q){toast('Впиши запрос','err');return;}
+  $('refHuntGo').disabled=true;$('refHuntSt').textContent='Ищу топ…';
+  try{
+    const r=await fetch('/api/refs/hunt',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({q,limit:10})});
+    const j=await r.json();
+    if(!j.ok)throw new Error(j.error||'Не вышло');
+    const poll=async ()=>{
+      try{
+        const s=await (await fetch('/api/refs/bulk/'+j.batch)).json();
+        $('refHuntSt').textContent='Разобрано '+s.done+'/'+s.total+(s.last?' · '+s.last:'');
+        loadRefs();
+        if(!s.finished)refTimer=setTimeout(poll,3000);
+        else{$('refHuntGo').disabled=false;toast('Охота готова: '+s.done,'ok');}
+      }catch(e){refTimer=setTimeout(poll,5000);}
+    };
+    poll();
+  }catch(e){toast(e.message,'err');$('refHuntGo').disabled=false;}
 };
 let refTimer=null;
 $('refBulkGo').onclick=async ()=>{

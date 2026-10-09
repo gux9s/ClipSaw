@@ -828,6 +828,47 @@ def api_refs_bulk():
     return jsonify({"ok": True, "batch": bid, "total": len(items)})
 
 
+@app.post("/api/refs/hunt")
+def api_refs_hunt():
+    """Автоохота: поиск шортсов по запросу -> топ по просмотрам -> в обучение.
+    TikTok с этого IP забанен, охотимся на YouTube Shorts (тот же контент)."""
+    from yt_dlp import YoutubeDL
+    import uuid
+    data = request.get_json(force=True, silent=True) or {}
+    q = (data.get("q") or "").strip()
+    if not q:
+        return jsonify({"ok": False, "error": "Дай тег или запрос"}), 400
+    try:
+        limit = max(3, min(20, int(data.get("limit", 10))))
+    except (TypeError, ValueError):
+        limit = 10
+    try:
+        with YoutubeDL({"quiet": True, "no_warnings": True,
+                        "socket_timeout": 30, "extract_flat": True,
+                        "noplaylist": False}) as ydl:
+            info = ydl.extract_info(f"ytsearch{limit}:{q}", download=False)
+        cands = []
+        for e in (info.get("entries") or []):
+            vid = (e or {}).get("id")
+            vc = (e or {}).get("view_count") or 0
+            if vid and vc:
+                cands.append({"url": f"https://www.youtube.com/watch?v={vid}",
+                              "views": vc,
+                              "title": (e.get("title") or "")[:80]})
+        cands.sort(key=lambda x: -x["views"])
+        if not cands:
+            return jsonify({"ok": False, "error": "Ничего не нашлось"}), 404
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)[:200]}), 400
+    bid = uuid.uuid4().hex[:8]
+    REF_BATCHES[bid] = {"total": len(cands), "done": 0, "finished": False,
+                        "last": "", "hunt": q}
+    threading.Thread(target=_refs_bulk_worker, args=(bid, cands),
+                     daemon=True).start()
+    top = [{"title": c["title"], "views": c["views"]} for c in cands[:5]]
+    return jsonify({"ok": True, "batch": bid, "total": len(cands), "top": top})
+
+
 @app.get("/api/refs/bulk/<bid>")
 def api_refs_bulk_status(bid):
     st = REF_BATCHES.get(bid)
