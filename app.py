@@ -843,10 +843,14 @@ def api_refs_hunt():
     except (TypeError, ValueError):
         limit = 10
     try:
+        max_dur = float(data.get("max_dur", 0) or 0)
+    except (TypeError, ValueError):
+        max_dur = 0
+    try:
         with YoutubeDL({"quiet": True, "no_warnings": True,
                         "socket_timeout": 30, "extract_flat": True,
                         "noplaylist": False}) as ydl:
-            info = ydl.extract_info(f"ytsearch{limit}:{q}", download=False)
+            info = ydl.extract_info(f"ytsearch{limit * 3}:{q}", download=False)
         cands = []
         for e in (info.get("entries") or []):
             vid = (e or {}).get("id")
@@ -854,8 +858,29 @@ def api_refs_hunt():
             if vid and vc:
                 cands.append({"url": f"https://www.youtube.com/watch?v={vid}",
                               "views": vc,
-                              "title": (e.get("title") or "")[:80]})
+                              "title": (e.get("title") or "")[:80],
+                              "dur": (e.get("duration") or 0)})
         cands.sort(key=lambda x: -x["views"])
+        if max_dur > 0:
+            # добираем длительности точечно, берём топ по просмотрам
+            with YoutubeDL({"quiet": True, "no_warnings": True,
+                            "socket_timeout": 30}) as ydl:
+                sized = []
+                for c in cands[:limit * 2]:
+                    d = c.get("dur") or 0
+                    if not d:
+                        try:
+                            inf = ydl.extract_info(c["url"], download=False)
+                            d = inf.get("duration") or 0
+                        except Exception:
+                            d = 0
+                    if d <= max_dur:
+                        sized.append(c)
+                    if len(sized) >= limit:
+                        break
+            cands = sized
+        else:
+            cands = cands[:limit]
         if not cands:
             return jsonify({"ok": False, "error": "Ничего не нашлось"}), 404
     except Exception as e:
