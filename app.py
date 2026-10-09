@@ -752,8 +752,10 @@ def _analyze_ref(url: str, views: int = 0):
                     top = (f"{m['score']}: {m['title'][:100]} "
                            f"[{m['start']:.0f}-{m['end']:.0f}с]")
                     score = int(m["score"])
-                    for f in ("viral", "hook", "whole", "peak"):
-                        mm = __import__("re").search(rf"{f} (\d\.\d+)", m.get("verdict", ""))
+                    _pv = {"viral": r"виральность (\d\.\d+)", "hook": r"хук (\d\.\d+)",
+                           "whole": r"цельность (\d\.\d+)", "peak": r"пик (\d\.\d+)"}
+                    for f, pat in _pv.items():
+                        mm = __import__("re").search(pat, m.get("verdict", ""))
                         probs[f] = float(mm.group(1)) if mm else 0.5
             except Exception:
                 pass

@@ -16,8 +16,12 @@ FEATS = ("viral", "hook", "whole", "peak")
 
 def _probs(verdict: str):
     out = {}
+    pats = {"viral": r"виральность (\d\.\d+)", "hook": r"хук (\d\.\d+)",
+            "whole": r"цельность (\d\.\d+)", "peak": r"пик (\d\.\d+)"}
     for f in FEATS:
-        m = re.search(rf"{f} (\d\.\d+)", verdict or "")
+        m = re.search(pats[f], verdict or "")
+        if not m:
+            m = re.search(rf"{f} (\d\.\d+)", verdict or "")
         out[f] = float(m.group(1)) if m else 0.5
     m = re.search(r"Drex (\d+)", verdict or "")
     out["score"] = (int(m.group(1)) / 100) if m else 0.5
@@ -40,17 +44,15 @@ def dataset():
         c.close()
     pos = [(r[0], r[1]) for r in rows if r[1] and r[1] > 0]
     neg = [r[0] for r in rows if r[1] == -1]
-    if not pos:
-        return []
     vs = sorted(v for _, v in pos)
-    med = vs[len(vs) // 2]
+    med = vs[len(vs) // 2] if vs else 0
     data = [(_probs(v), 1 if w >= med else 0) for v, w in pos]
     data += [(_probs(v), 0) for v in neg]
-    # залётные референсы — эталонные хиты
+    # залётные референсы — эталонные хиты (не зависят от меток клипов)
     for vr, hk, wh, pk, sc, vw in refs:
-        data.append({"viral": vr or 0.5, "hook": hk or 0.5,
+        data.append(({"viral": vr or 0.5, "hook": hk or 0.5,
                       "whole": wh or 0.5, "peak": pk or 0.5,
-                      "score": (sc or 70) / 100}, 1)
+                      "score": (sc or 70) / 100}, 1))
     return data
 
 
@@ -59,7 +61,10 @@ def train():
     data = dataset()
     pos = [x for x, y in data if y == 1]
     neg = [x for x, y in data if y == 0]
-    if len(pos) < 10 or len(neg) < 3 or len(data) < 15:
+    if not neg and len(pos) >= 8:
+        # негативов нет (одни хиты) — сравниваем с нейтралью 0.5
+        neg = [{f: 0.5 for f in FEATS + ("score",)}] * max(3, len(pos) // 3)
+    if len(pos) < 8 or len(neg) < 2 or len(data) < 10:
         return None
     w = {}
     for f in FEATS + ("score",):
