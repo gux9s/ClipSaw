@@ -801,9 +801,36 @@ def _banner_has_audio(path: str) -> bool:
     return _BANNER_AUDIO
 
 
+_BANNER_KEY = None
+
+
+def _banner_needs_key(path: str) -> bool:
+    """Нужен ли хромакей: да, если фон реально зелёный (≥40% кадра).
+    Иначе баннер — цельная сцена, кладём как есть (иначе съест продукт)."""
+    global _BANNER_KEY
+    if _BANNER_KEY is None:
+        try:
+            import cv2
+            import numpy as np
+            c = cv2.VideoCapture(path)
+            n = int(c.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
+            c.set(cv2.CAP_PROP_POS_FRAMES, n // 2)
+            ok, fr = c.read()
+            c.release()
+            if ok and fr is not None:
+                hsv = cv2.cvtColor(fr, cv2.COLOR_BGR2HSV)
+                green = cv2.inRange(hsv, np.array([35, 70, 70]), np.array([85, 255, 255]))
+                _BANNER_KEY = float((green > 0).mean()) >= 0.4
+            else:
+                _BANNER_KEY = True
+        except Exception:
+            _BANNER_KEY = True
+    return _BANNER_KEY
+
+
 def _chroma_overlay(bg, fg, box_w: int = BANNER_W, cy: int | None = None,
                     zoom: float = 1.0, y_top: int | None = None,
-                    opacity: float = 0.9):
+                    opacity: float = 0.9, key_green: bool = True):
     """Баннер: зелёный фон выбит хромакеем, лёгкий despill против ореола.
     cy — центр по вертикали (по умолчанию центр кадра), y_top — верх бокса,
     zoom — наезд с центр-кропом (убирает поля дизайна до краёв),
@@ -823,13 +850,17 @@ def _chroma_overlay(bg, fg, box_w: int = BANNER_W, cy: int | None = None,
         dx, dy = (zw - bw) // 2, (zh - bh) // 2
         fg = big[dy:dy + bh, dx:dx + bw]
     fg = cv2.cvtColor(fg, cv2.COLOR_BGR2RGB)
-    hsv = cv2.cvtColor(fg, cv2.COLOR_RGB2HSV)
-    mask = cv2.inRange(hsv, np.array([35, 70, 70]), np.array([85, 255, 255]))
-    mask = cv2.GaussianBlur(mask, (5, 5), 0)
-    fg = fg.astype(np.float32)
-    mx = np.maximum(fg[..., 2], fg[..., 0])
-    fg[..., 1] -= np.clip(fg[..., 1] - mx, 0, None) * 0.85
-    a = (mask.astype(np.float32) / 255.0)[..., None]  # 1 = зелень = прозрачно
+    if key_green:
+        hsv = cv2.cvtColor(fg, cv2.COLOR_RGB2HSV)
+        mask = cv2.inRange(hsv, np.array([35, 70, 70]), np.array([85, 255, 255]))
+        mask = cv2.GaussianBlur(mask, (5, 5), 0)
+        fg = fg.astype(np.float32)
+        mx = np.maximum(fg[..., 2], fg[..., 0])
+        fg[..., 1] -= np.clip(fg[..., 1] - mx, 0, None) * 0.85
+        a = (mask.astype(np.float32) / 255.0)[..., None]  # 1 = зелень = прозрачно
+    else:
+        fg = fg.astype(np.float32)
+        a = np.zeros_like(fg[..., :1])  # цельная сцена — зелень не трогаем
     keep = a + (1 - a) * (1 - opacity)  # фон просвечивает и сквозь баннер
     show = (1 - a) * opacity
     Hh, Ww = bg.shape[:2]
@@ -988,8 +1019,7 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
         else:
             for k in range(n):
                 if n == 1:
-                    lo, hi = dur * 0.33, dur * 0.67 - b_eff
-                    cA = random.uniform(lo, hi) if hi > lo else (dur - b_eff) / 2
+                    cA = dur / 2 - b_eff / 2  # строго середина по правилам рекламодателя
                 else:
                     cA = dur * (k + 1) / (n + 1) - b_eff / 2
                     cA = min(max(cA, 0.5), max(dur - b_eff - 0.5, 0.5))
@@ -1145,7 +1175,8 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
                 if bok and bfr is not None:
                     # баннер висит прямо под фильмом (зазор 8px), от края до края
                     frame = _chroma_overlay(frame, bfr, y_top=TOP_H + BANNER_GAP,
-                                            zoom=BANNER_ZOOM)
+                                            zoom=BANNER_ZOOM,
+                                            key_green=_banner_needs_key(bpath))
                     banner_on = True
             if captions and not banner_on:
                 words = _active_words(segs, t)
