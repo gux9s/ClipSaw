@@ -30,7 +30,7 @@ FFMPEG = os.path.expanduser("~/.local/bin/ffmpeg")
 
 DB = os.path.join(BASE, "data.db")
 CFG = os.path.join(BASE, "config.json")
-DEFAULT_CFG = {"gemini_key": "", "drex_key": "", "want": 8, "gameplay": "subway", "lens": "20-60", "limit_min": 0,
+DEFAULT_CFG = {"gemini_key": "", "drex_key": "", "want": 8, "gameplay": "subway", "lens": "40-60", "limit_min": 0,
                "vmode": "split", "captions": True, "facetrack": True,
                "antidetect": False, "mirror": False, "banner": True,
                "asr_model": "base", "max_workers": 2}
@@ -401,7 +401,7 @@ def api_start():
             data[k] = cfg.get(k)
     if not data.get("min_len") or not data.get("max_len"):
         try:
-            mn, mx = str(data.get("lens", cfg.get("lens", "20-60"))).split("-")
+            mn, mx = str(data.get("lens", cfg.get("lens", "40-60"))).split("-")
             data["min_len"], data["max_len"] = int(mn), int(mx)
         except Exception:
             data["min_len"], data["max_len"] = 20, 60
