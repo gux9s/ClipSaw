@@ -36,7 +36,7 @@ DEFAULT_CFG = {"gemini_key": "", "drex_key": "", "want": 8, "gameplay": "subway"
                "asr_model": "base", "max_workers": 2}
 
 
-DB_VERSION = 5
+DB_VERSION = 6
 
 
 def _connect():
@@ -110,6 +110,16 @@ def init_db():
                   id TEXT PRIMARY KEY, url TEXT, title TEXT, dur REAL,
                   hook TEXT, wps REAL, top TEXT, created REAL)""")
                 c.execute("CREATE INDEX IF NOT EXISTS ix_refs_created ON refs(created)")
+            if ver < 6:
+                cols = [r[1] for r in c.execute("PRAGMA table_info(refs)").fetchall()]
+                for col, typ in (("views", "INTEGER NOT NULL DEFAULT 0"),
+                                 ("viral", "REAL NOT NULL DEFAULT 0.5"),
+                                 ("hookp", "REAL NOT NULL DEFAULT 0.5"),
+                                 ("whole", "REAL NOT NULL DEFAULT 0.5"),
+                                 ("peak", "REAL NOT NULL DEFAULT 0.5"),
+                                 ("score", "INTEGER NOT NULL DEFAULT 0")):
+                    if col not in cols:
+                        c.execute(f"ALTER TABLE refs ADD COLUMN {col} {typ}")
             c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES ('version',?)",
                       (str(DB_VERSION),))
     finally:
@@ -677,7 +687,7 @@ def api_refs_list():
         c = db()
         try:
             rows = c.execute(
-                "SELECT id,url,title,dur,hook,wps,top,created FROM refs"
+                "SELECT id,url,title,dur,hook,wps,top,created,views,score FROM refs"
                 " ORDER BY created DESC LIMIT 100").fetchall()
             items = [dict(r) for r in rows]
         finally:
@@ -706,58 +716,150 @@ def api_refs_del(rid):
     return jsonify({"ok": True})
 
 
-@app.post("/api/refs")
-def api_refs_add():
-    """Разбор залётного референса: качаем, транскрибируем, DREX ищет,
-    что в нём работает. Файл удаляем, профиль остаётся."""
+def _parse_views(s: str) -> int:
+    """150000, 150k, 1.5M, 1,2 млн, 500 тыс -> число."""
+    import re
+    t = (s or "").strip().lower().replace(",", ".").replace(" ", "")
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*(к|k|тыс|m|м|млн|mln)?\.?", t)
+    if not m:
+        return 0
+    v, suf = float(m.group(1)), (m.group(2) or "")
+    if suf in ("m", "м", "млн", "mln"):
+        v *= 1000000
+    elif suf in ("к", "k", "тыс"):
+        v *= 1000
+    return int(v)
+
+
+def _analyze_ref(url: str, views: int = 0):
+    """Скачать -> транскрибировать -> DREX-разбор. Файл удаляем, профиль возвращаем."""
     import ai_clips as ac
     import uuid
+    src, title = fetch_source(url)
+    try:
+        segs, lang = ac.transcribe(src, 0)
+        words = sum(len(s["text"].split()) for s in segs)
+        dur = segs[-1]["end"] - segs[0]["start"] if segs else 0
+        wps = round(words / max(dur, 1), 2)
+        hook = " ".join(segs[0]["text"].split()[:12]) if segs else ""
+        top, probs, score = "", {}, 0
+        key = get_settings().get("drex_key", "")
+        if key and segs:
+            try:
+                cands = ac._drex_score(segs, key, 3, 10, 60)
+                if cands:
+                    m = cands[0]
+                    top = (f"{m['score']}: {m['title'][:100]} "
+                           f"[{m['start']:.0f}-{m['end']:.0f}с]")
+                    score = int(m["score"])
+                    for f in ("viral", "hook", "whole", "peak"):
+                        mm = __import__("re").search(rf"{f} (\d\.\d+)", m.get("verdict", ""))
+                        probs[f] = float(mm.group(1)) if mm else 0.5
+            except Exception:
+                pass
+    finally:
+        try:
+            if src and os.path.exists(src):
+                os.remove(src)
+        except OSError:
+            pass
+    return {"id": uuid.uuid4().hex[:8], "url": url, "title": title,
+            "dur": round(dur, 1), "hook": hook, "wps": wps, "top": top,
+            "views": views, "score": score,
+            "viral": probs.get("viral", 0.5), "hookp": probs.get("hook", 0.5),
+            "whole": probs.get("whole", 0.5), "peak": probs.get("peak", 0.5),
+            "created": time.time()}
+
+
+REF_BATCHES = {}
+
+
+def _refs_bulk_worker(bid: str, items):
+    st = REF_BATCHES.get(bid)
+    if not st:
+        return
+    for it in items:
+        if st.get("stop"):
+            break
+        try:
+            r = _analyze_ref(it["url"], it["views"])
+            try:
+                c = db()
+                try:
+                    with c:
+                        c.execute("INSERT INTO refs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                                  (r["id"], r["url"], r["title"], r["dur"], r["hook"],
+                                   r["wps"], r["top"], r["created"], r["views"],
+                                   r["viral"], r["hookp"], r["whole"], r["peak"], r["score"]))
+                finally:
+                    c.close()
+            except Exception:
+                pass
+            st["done"] += 1
+            st["last"] = (r["title"] or r["url"])[:60]
+        except Exception as e:
+            st["done"] += 1
+            st["errors"] = st.get("errors", 0) + 1
+            st["last"] = f"Ошибка: {str(e)[:80]}"
+    st["finished"] = True
+
+
+@app.post("/api/refs/bulk")
+def api_refs_bulk():
+    """Пачка: {"items": [{"url", "views"}]} -> фоновый разбор, статус по id."""
+    import uuid
+    data = request.get_json(force=True, silent=True) or {}
+    items = []
+    for it in (data.get("items") or [])[:50]:
+        if isinstance(it, dict) and (it.get("url") or "").strip():
+            items.append({"url": it["url"].strip(),
+                          "views": _parse_views(str(it.get("views", "")))})
+        elif isinstance(it, str) and it.strip():
+            parts = it.strip().rsplit(None, 1)
+            if len(parts) == 2 and _parse_views(parts[1]) > 0:
+                items.append({"url": parts[0], "views": _parse_views(parts[1])})
+            else:
+                items.append({"url": it.strip(), "views": 0})
+    if not items:
+        return jsonify({"ok": False, "error": "Пусто"}), 400
+    bid = uuid.uuid4().hex[:8]
+    REF_BATCHES[bid] = {"total": len(items), "done": 0, "finished": False, "last": ""}
+    threading.Thread(target=_refs_bulk_worker, args=(bid, items), daemon=True).start()
+    return jsonify({"ok": True, "batch": bid, "total": len(items)})
+
+
+@app.get("/api/refs/bulk/<bid>")
+def api_refs_bulk_status(bid):
+    st = REF_BATCHES.get(bid)
+    if not st:
+        return jsonify({"ok": False, "error": "нет пачки"}), 404
+    return jsonify({"ok": True, **{k: v for k, v in st.items() if k != "stop"}})
+@app.post("/api/refs")
+def api_refs_add():
     data = request.get_json(force=True, silent=True) or {}
     url = (data.get("url") or "").strip()
     if not url:
         return jsonify({"ok": False, "error": "Дай ссылку"}), 400
     try:
-        src, title = fetch_source(url)
-        try:
-            segs, lang = ac.transcribe(src, 0)
-            words = sum(len(s["text"].split()) for s in segs)
-            dur = segs[-1]["end"] - segs[0]["start"] if segs else 0
-            wps = round(words / max(dur, 1), 2)
-            hook = " ".join(segs[0]["text"].split()[:12]) if segs else ""
-            top = ""
-            key = get_settings().get("drex_key", "")
-            if key and segs:
-                try:
-                    cands = ac._drex_score(segs, key, 3, 15, 60)
-                    if cands:
-                        m = cands[0]
-                        top = (f"{m['score']}: {m['title'][:100]} "
-                               f"[{m['start']:.0f}-{m['end']:.0f}с]")
-                except Exception:
-                    pass
-        finally:
-            try:
-                if src and os.path.exists(src):
-                    os.remove(src)
-            except OSError:
-                pass
+        r = _analyze_ref(url, _parse_views(str(data.get("views", ""))))
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)[:200]}), 400
-    rid = uuid.uuid4().hex[:8]
     try:
         c = db()
         try:
             with c:
-                c.execute("INSERT INTO refs VALUES (?,?,?,?,?,?,?,?)",
-                          (rid, url, title, dur, hook, wps, top, time.time()))
+                c.execute("INSERT INTO refs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                          (r["id"], r["url"], r["title"], r["dur"], r["hook"],
+                           r["wps"], r["top"], r["created"], r["views"],
+                           r["viral"], r["hookp"], r["whole"], r["peak"], r["score"]))
         finally:
             c.close()
     except Exception:
         import traceback
         traceback.print_exc()
         return jsonify({"ok": False}), 500
-    return jsonify({"ok": True, "id": rid, "title": title, "dur": round(dur, 1),
-                    "wps": wps, "hook": hook, "top": top})
+    return jsonify({"ok": True, "id": r["id"], "title": r["title"], "dur": r["dur"],
+                    "wps": r["wps"], "hook": r["hook"], "top": r["top"]})
 
 
 @app.get("/api/learn")

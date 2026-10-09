@@ -397,6 +397,9 @@
       <div class="card">
         <label class="lbl" for="refUrl">Ссылка на залётное видео</label>
         <div class="chatrow"><input id="refUrl" type="text" placeholder="https://tiktok.com/... или youtube..." autocomplete="off"><button class="btn sm" id="refGo">Разобрать</button></div>
+        <label class="lbl" for="refBulk" style="margin-top:12px">Пачка: ссылка + просмотры (по строке)</label>
+        <textarea id="refBulk" placeholder="https://tiktok.com/@x/video/123 1.2M&#10;https://tiktok.com/@y/video/456 800k" style="min-height:64px"></textarea>
+        <div class="chatrow" style="margin-top:8px"><button class="btn sm" id="refBulkGo">Разобрать пачку</button><span class="dim" id="refBulkSt"></span></div>
         <div id="refList" style="margin-top:10px"><div class="empty">Пока пусто — кинь ссылку, ИИ разберёт хук, темп и топ-момент</div></div>
       </div>
       <h2>Очередь</h2>
@@ -820,7 +823,7 @@ async function loadRefs(){
     j.items.forEach(r=>{
       const d=document.createElement('div');d.className='job';d.style.marginBottom='8px';
       d.innerHTML='<div class="t">'+esc(r.title||r.url)+'</div><div class="s"></div>';
-      d.querySelector('.s').textContent=Math.round(r.dur||0)+'с · '+r.wps+' сл/с · хук: '+(r.hook||'—')+(r.top?' · топ: '+r.top:'');
+      d.querySelector('.s').textContent=Math.round(r.dur||0)+'с · '+r.wps+' сл/с'+(r.views?' · '+fmtViews(r.views)+' просм':'')+' · хук: '+(r.hook||'—')+(r.top?' · топ: '+r.top:'');
       const del=document.createElement('button');del.textContent='Удалить';del.style.marginTop='8px';
       del.onclick=async ()=>{await fetch('/api/refs/'+r.id,{method:'DELETE'});loadRefs();};
       d.appendChild(del);box.appendChild(d);
@@ -839,10 +842,32 @@ $('refGo').onclick=async ()=>{
   }catch(e){toast(e.message,'err');}
   $('refGo').disabled=false;$('refGo').textContent='Разобрать';
 };
+let refTimer=null;
+$('refBulkGo').onclick=async ()=>{
+  const lines=$('refBulk').value.split('\n').map(s=>s.trim()).filter(Boolean);
+  if(!lines.length){toast('Вставь строки','err');return;}
+  $('refBulkGo').disabled=true;
+  try{
+    const r=await fetch('/api/refs/bulk',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({items:lines})});
+    const j=await r.json();
+    if(!j.ok)throw new Error(j.error||'Не вышло');
+    $('refBulk').value='';
+    const poll=async ()=>{
+      try{
+        const s=await (await fetch('/api/refs/bulk/'+j.batch)).json();
+        $('refBulkSt').textContent='Разобрано '+s.done+'/'+s.total+(s.last?' · '+s.last:'');
+        loadRefs();
+        if(!s.finished)refTimer=setTimeout(poll,3000);
+        else{$('refBulkGo').disabled=false;toast('Пачка готова: '+s.done,'ok');}
+      }catch(e){refTimer=setTimeout(poll,5000);}
+    };
+    poll();
+  }catch(e){toast(e.message,'err');$('refBulkGo').disabled=false;}
+};
 async function loadLearn(){
   try{
     const j=await (await fetch('/api/learn')).json();
-    $('learnBox').textContent='Меток: '+j.labeled+' (хороших: '+j.pos+', брак: '+j.neg+') · '+(j.trained?'ранкер ОБУЧЕН и работает':'для обучения нужно 10+ с просмотрами и 3+ удалённых');
+    $('learnBox').textContent='Меток: '+j.labeled+' (хороших: '+j.pos+', брак: '+j.neg+', референсов: '+(j.refs||0)+') · '+(j.trained?'ранкер ОБУЧЕН и работает':'для обучения нужно 10+ с просмотрами и 3+ удалённых');
   }catch(e){}
 }
 $('learnGo').onclick=async ()=>{

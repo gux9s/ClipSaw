@@ -30,6 +30,12 @@ def dataset():
     try:
         rows = c.execute(
             "SELECT verdict, views FROM clips WHERE views != 0").fetchall()
+        try:
+            refs = c.execute(
+                "SELECT viral, hookp, whole, peak, score, views FROM refs"
+                " WHERE views > 0").fetchall()
+        except Exception:
+            refs = []
     finally:
         c.close()
     pos = [(r[0], r[1]) for r in rows if r[1] and r[1] > 0]
@@ -40,6 +46,11 @@ def dataset():
     med = vs[len(vs) // 2]
     data = [(_probs(v), 1 if w >= med else 0) for v, w in pos]
     data += [(_probs(v), 0) for v in neg]
+    # залётные референсы — эталонные хиты
+    for vr, hk, wh, pk, sc, vw in refs:
+        data.append({"viral": vr or 0.5, "hook": hk or 0.5,
+                      "whole": wh or 0.5, "peak": pk or 0.5,
+                      "score": (sc or 70) / 100}, 1)
     return data
 
 
@@ -85,5 +96,13 @@ def status():
     pos = sum(1 for _, y in data if y == 1)
     neg = sum(1 for _, y in data if y == 0)
     w = load_weights()
-    return {"labeled": len(data), "pos": pos, "neg": neg,
+    try:
+        c = sqlite3.connect(DB, timeout=10)
+        try:
+            nrefs = c.execute("SELECT COUNT(*) FROM refs").fetchone()[0]
+        finally:
+            c.close()
+    except Exception:
+        nrefs = 0
+    return {"labeled": len(data), "pos": pos, "neg": neg, "refs": nrefs,
             "trained": bool(w), "weights": w}
