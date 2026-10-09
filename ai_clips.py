@@ -352,6 +352,50 @@ def _word_bounds(segs):
     return sorted(b)
 
 
+_LORE = None
+
+
+def _lore_names():
+    """Имена персонажей (lore/*.json): моменты с героями получают бонус —
+    зритель идёт на знакомые лица."""
+    global _LORE
+    if _LORE is None:
+        _LORE = set()
+        try:
+            d = os.path.join(BASE, "lore")
+            for f in os.listdir(d):
+                if f.endswith(".json"):
+                    data = json.load(open(os.path.join(d, f), encoding="utf-8"))
+                    for c in data.get("characters", []):
+                        for a in [c.get("name", "")] + c.get("aliases", []):
+                            a = (a or "").strip().lower()
+                            if len(a) > 2:
+                                _LORE.add(a)
+        except Exception:
+            pass
+    return _LORE
+
+
+def _segs_text(segs, s: float, e: float) -> str:
+    return " ".join(x.get("text", "") for x in segs
+                     if x.get("end", 0) > s - 0.5 and x.get("start", 0) < e + 0.5)
+
+
+def _tight_span(s: float, e: float, bounds):
+    """Границы впритык к речи: ни секунды тишины по краям.
+    Возвращает (ns, ne, coverage 0..1)."""
+    inside = [(ws, we) for ws, we in bounds if we > s + 0.1 and ws < e - 0.1]
+    if not inside:
+        return s, e, 1.0
+    ns = max(s, inside[0][0] - 0.15)
+    ne = min(e, inside[-1][1] + 0.4)
+    if ne - ns < 3:
+        return s, e, 1.0
+    speech = sum(min(we, ne) - max(ws, ns) for ws, we in inside)
+    cov = max(0.0, min(1.0, speech / max(ne - ns, 0.01)))
+    return ns, ne, cov
+
+
 def snap_to_speech(s: float, e: float, bounds, tol: float = 1.2):
     """Границы клипа — ровно по краям слов: не режем слово и фразу пополам."""
     import bisect
@@ -447,11 +491,25 @@ def pick_moments(segs, lang: str, key: str, want: int, min_len: int, max_len: in
             s = max(s, MIN_START)  # привязка к сцене могла утащить на заставку
             s, e = snap_to_speech(s, e, bounds)  # режем строго между словами
             s = max(s, MIN_START)  # и спич-снап не лезет на заставку
+            s, e, cov = _tight_span(s, e, bounds)  # тишина по краям — вон
             if e - s < 5:
                 continue
+            sc = int(m.get("score", 70))
+            if cov < 0.5:  # половина молчания — минус за рыхлость
+                sc = max(0, sc - 8)
+            names = _lore_names()
+            hit = ""
+            if names:
+                low = (m.get("title", "") + " " + _segs_text(segs, s, e)).lower()
+                for nm in names:
+                    if nm in low:
+                        hit = nm
+                        break
+            if hit:
+                sc = min(97, sc + 6)  # знакомый герой в кадре = смотрят охотнее
             used.add(mi)
             picked.append({"start": float(round(s, 1)), "end": float(round(e, 1)),
-                           "score": int(m.get("score", 70)), "title": m.get("title", ""),
+                           "score": sc, "title": m.get("title", ""),
                            "verdict": str(m.get("verdict", ""))[:240],
                            "hook": str(m.get("hook", "") or m.get("title", ""))[:40]})
             if len(picked) >= want:
