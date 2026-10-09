@@ -632,6 +632,40 @@ def api_debug_stacks():
     return app.response_class("\n".join(out), mimetype="text/plain")
 
 
+def _clip_id(name: str):
+    """job_id, idx из имени файла <job>_<i>.mp4."""
+    import re
+    m = re.fullmatch(r"([A-Za-z0-9_-]{1,32})_(\d+)\.mp4", name or "")
+    return (m.group(1), int(m.group(2)) - 1) if m else (None, None)
+
+
+@app.post("/api/views")
+def api_views():
+    """Ручная пометка просмотров клипа: {"kind","name","views"}. Учит ранкер."""
+    data = request.get_json(force=True, silent=True) or {}
+    kind, name = (data.get("kind") or ""), (data.get("name") or "")
+    try:
+        views = max(0, int(data.get("views", 0)))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "число нужно"}), 400
+    job_id, idx = _clip_id(name)
+    if not job_id or kind not in ("short", "legacy"):
+        return jsonify({"ok": False, "error": "не клип"}), 400
+    try:
+        c = db()
+        try:
+            with c:
+                c.execute("UPDATE clips SET views=? WHERE job_id=? AND idx=?",
+                          (views, job_id, idx))
+        finally:
+            c.close()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"ok": False}), 500
+    return jsonify({"ok": True, "views": views})
+
+
 @app.get("/api/library")
 def api_library():
     from urllib.parse import quote
@@ -687,6 +721,23 @@ def serve_file(kind, name):
     return send_file(p, as_attachment=True)
 
 
+def _mark_rejected(kind, name):
+    """Удалённый клип = негативная метка для обучения ранкера."""
+    job_id, idx = _clip_id(name)
+    if not job_id or kind not in ("short", "legacy"):
+        return
+    try:
+        c = db()
+        try:
+            with c:
+                c.execute("UPDATE clips SET views=-1 WHERE job_id=? AND idx=?",
+                          (job_id, idx))
+        finally:
+            c.close()
+    except Exception:
+        pass
+
+
 @app.delete("/api/del/<kind>/<name>")
 def api_del(kind, name):
     d = OUT_DIR if kind == "short" else LEGACY_DIR if kind == "legacy" else None
@@ -696,6 +747,7 @@ def api_del(kind, name):
     if os.path.isfile(p):
         os.remove(p)
         _drop_thumb(kind, name)
+        _mark_rejected(kind, name)
         return jsonify({"ok": True})
     return jsonify({"ok": False}), 404
 
@@ -718,6 +770,7 @@ def api_del_bulk():
             if os.path.isfile(p):
                 os.remove(p)
                 _drop_thumb(kind, name)
+                _mark_rejected(kind, name)
                 removed += 1
             else:
                 failed.append(name)
