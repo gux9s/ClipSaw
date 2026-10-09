@@ -393,6 +393,12 @@
         <div style="margin-top:14px"><button class="btn" id="go">Нарезать шортсы</button></div>
         <div class="err-line" id="err"></div>
       </div>
+      <h2>Референсы конкурентов</h2>
+      <div class="card">
+        <label class="lbl" for="refUrl">Ссылка на залётное видео</label>
+        <div class="chatrow"><input id="refUrl" type="text" placeholder="https://tiktok.com/... или youtube..." autocomplete="off"><button class="btn sm" id="refGo">Разобрать</button></div>
+        <div id="refList" style="margin-top:10px"><div class="empty">Пока пусто — кинь ссылку, ИИ разберёт хук, темп и топ-момент</div></div>
+      </div>
       <h2>Очередь</h2>
       <div id="queue"><div class="empty">Здесь появятся задачи и готовые клипы</div></div>
     </section>
@@ -445,6 +451,9 @@
         <label class="chk"><input type="checkbox" id="sMir"> Зеркало по умолчанию</label>
         <label class="chk"><input type="checkbox" id="sBan" checked> Баннер по умолчанию</label>
         <button class="btn" id="sSave">Сохранить настройки</button>
+        <div class="subttl">Обучение ранкера</div>
+        <div class="dim" id="learnBox" style="margin-bottom:10px">Загрузка…</div>
+        <button class="btn ghost" id="learnGo">Обучить на моих метках</button>
       </div>
       <div class="card" style="margin-top:12px">
         <div style="font-weight:700;margin-bottom:6px;font-family:var(--disp)">Хранилище</div>
@@ -482,7 +491,8 @@ function show(v){
   if(v==='dashboard')loadDash();
   if(v==='clips')loadClips();
   if(v==='history')loadHistory();
-  if(v==='settings')loadSettings();
+  if(v==='settings'){loadSettings();loadLearn();}
+  if(v==='cut')loadRefs();
 }
 document.querySelectorAll('#nav button').forEach(b=>b.onclick=()=>show(b.dataset.v));
 document.querySelectorAll('[data-go]').forEach(b=>b.onclick=()=>show(b.dataset.go));
@@ -800,6 +810,49 @@ document.querySelectorAll('#scoreChips button').forEach(b=>b.onclick=()=>{
   b.classList.add('on');FSCORE=+b.dataset.s;
   paintClips(($('fSearch')||{value:''}).value.trim().toLowerCase());
 });
+
+/* ---------- референсы + обучение ---------- */
+async function loadRefs(){
+  try{
+    const j=await (await fetch('/api/refs')).json();
+    const box=$('refList');box.innerHTML='';
+    if(!(j.items||[]).length){box.innerHTML='<div class="empty">Пока пусто — кинь ссылку, ИИ разберёт хук, темп и топ-момент</div>';return;}
+    j.items.forEach(r=>{
+      const d=document.createElement('div');d.className='job';d.style.marginBottom='8px';
+      d.innerHTML='<div class="t">'+esc(r.title||r.url)+'</div><div class="s"></div>';
+      d.querySelector('.s').textContent=Math.round(r.dur||0)+'с · '+r.wps+' сл/с · хук: '+(r.hook||'—')+(r.top?' · топ: '+r.top:'');
+      const del=document.createElement('button');del.textContent='Удалить';del.style.marginTop='8px';
+      del.onclick=async ()=>{await fetch('/api/refs/'+r.id,{method:'DELETE'});loadRefs();};
+      d.appendChild(del);box.appendChild(d);
+    });
+  }catch(e){}
+}
+$('refGo').onclick=async ()=>{
+  const u=$('refUrl').value.trim();
+  if(!u){toast('Вставь ссылку','err');return;}
+  $('refGo').disabled=true;$('refGo').textContent='Разбираю…';
+  try{
+    const r=await fetch('/api/refs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:u})});
+    const j=await r.json();
+    if(!j.ok)throw new Error(j.error||'Не вышло');
+    $('refUrl').value='';toast('Референс разобран','ok');loadRefs();
+  }catch(e){toast(e.message,'err');}
+  $('refGo').disabled=false;$('refGo').textContent='Разобрать';
+};
+async function loadLearn(){
+  try{
+    const j=await (await fetch('/api/learn')).json();
+    $('learnBox').textContent='Меток: '+j.labeled+' (хороших: '+j.pos+', брак: '+j.neg+') · '+(j.trained?'ранкер ОБУЧЕН и работает':'для обучения нужно 10+ с просмотрами и 3+ удалённых');
+  }catch(e){}
+}
+$('learnGo').onclick=async ()=>{
+  try{
+    const r=await fetch('/api/learn/train',{method:'POST'});
+    const j=await r.json();
+    if(!j.ok)throw new Error(j.error||'Не вышло');
+    toast('Ранкер обучен','ok');loadLearn();
+  }catch(e){toast(e.message,'err');}
+};
 
 /* ---------- история ---------- */
 async function loadHistory(){

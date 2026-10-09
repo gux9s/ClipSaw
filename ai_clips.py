@@ -381,6 +381,45 @@ def _segs_text(segs, s: float, e: float) -> str:
                      if x.get("end", 0) > s - 0.5 and x.get("start", 0) < e + 0.5)
 
 
+_REFS_CACHE = (0, None)
+
+
+def _ref_boosts():
+    """Профиль залётных референсов: медианная длина + топ-слова хуков.
+    Кэш на 60с. Возвращает (ref_dur|None, [слова])."""
+    import re
+    import sqlite3
+    import time
+    global _REFS_CACHE
+    now = time.time()
+    if now - _REFS_CACHE[0] < 60 and _REFS_CACHE[1] is not None:
+        return _REFS_CACHE[1]
+    out = (None, [])
+    try:
+        c = sqlite3.connect(os.path.join(BASE, "data.db"), timeout=10)
+        try:
+            rows = c.execute("SELECT dur, hook, top FROM refs").fetchall()
+        finally:
+            c.close()
+        if rows:
+            ds = sorted(r[0] for r in rows if r[0] and r[0] > 0)
+            ref_dur = ds[len(ds) // 2] if ds else None
+            stop = {"это", "как", "что", "для", "так", "уже", "если", "когда",
+                    "или", "его", "ее", "её", "меня", "тебя", "себя", "просто",
+                    "очень", "даже", "только", "потом", "зачем", "почему"}
+            freq = {}
+            for r in rows:
+                for t in re.findall(r"[а-яА-ЯёЁa-zA-Z]{4,}", f"{r[1] or ''} {r[2] or ''}".lower()):
+                    if t not in stop:
+                        freq[t] = freq.get(t, 0) + 1
+            words = sorted(freq, key=lambda w: -freq[w])[:25]
+            out = (ref_dur, words)
+    except Exception:
+        pass
+    _REFS_CACHE = (now, out)
+    return out
+
+
 def _tight_span(s: float, e: float, bounds):
     """Границы впритык к речи: ни секунды тишины по краям.
     Возвращает (ns, ne, coverage 0..1)."""
@@ -507,6 +546,19 @@ def pick_moments(segs, lang: str, key: str, want: int, min_len: int, max_len: in
                         break
             if hit:
                 sc = min(97, sc + 6)  # знакомый герой в кадре = смотрят охотнее
+            rd, rw = _ref_boosts()
+            if rd and abs((e - s) - rd) <= 8:
+                sc = min(97, sc + 4)  # длина как у залётных референсов
+            if rw:
+                low_words = set(low.split())
+                hits = sum(1 for w in rw if w in low_words)
+                if hits:
+                    sc = min(97, sc + min(6, hits * 2))  # слова из залётных хуков
+            try:  # поправка выученного ранкера (-10..+10), если обучен
+                import learn as learn_mod
+                sc = max(0, min(97, sc + learn_mod.adjust(sc, m.get("verdict", ""))))
+            except Exception:
+                pass
             used.add(mi)
             picked.append({"start": float(round(s, 1)), "end": float(round(e, 1)),
                            "score": sc, "title": m.get("title", ""),

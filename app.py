@@ -36,7 +36,7 @@ DEFAULT_CFG = {"gemini_key": "", "drex_key": "", "want": 8, "gameplay": "subway"
                "asr_model": "base", "max_workers": 2}
 
 
-DB_VERSION = 4
+DB_VERSION = 5
 
 
 def _connect():
@@ -105,6 +105,11 @@ def init_db():
                     if col not in cols:
                         c.execute(f"ALTER TABLE clips ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0")
                 c.execute("UPDATE clips SET \"of\"=1 WHERE \"of\"=0")
+            if ver < 5:
+                c.execute("""CREATE TABLE IF NOT EXISTS refs(
+                  id TEXT PRIMARY KEY, url TEXT, title TEXT, dur REAL,
+                  hook TEXT, wps REAL, top TEXT, created REAL)""")
+                c.execute("CREATE INDEX IF NOT EXISTS ix_refs_created ON refs(created)")
             c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES ('version',?)",
                       (str(DB_VERSION),))
     finally:
@@ -664,6 +669,111 @@ def api_views():
         traceback.print_exc()
         return jsonify({"ok": False}), 500
     return jsonify({"ok": True, "views": views})
+
+
+@app.get("/api/refs")
+def api_refs_list():
+    try:
+        c = db()
+        try:
+            rows = c.execute(
+                "SELECT id,url,title,dur,hook,wps,top,created FROM refs"
+                " ORDER BY created DESC LIMIT 100").fetchall()
+            items = [dict(r) for r in rows]
+        finally:
+            c.close()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        items = []
+    return jsonify({"ok": True, "items": items})
+
+
+@app.delete("/api/refs/<rid>")
+def api_refs_del(rid):
+    import re
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", rid or ""):
+        return jsonify({"ok": False}), 404
+    try:
+        c = db()
+        try:
+            with c:
+                c.execute("DELETE FROM refs WHERE id=?", (rid,))
+        finally:
+            c.close()
+    except Exception:
+        pass
+    return jsonify({"ok": True})
+
+
+@app.post("/api/refs")
+def api_refs_add():
+    """Разбор залётного референса: качаем, транскрибируем, DREX ищет,
+    что в нём работает. Файл удаляем, профиль остаётся."""
+    import ai_clips as ac
+    import uuid
+    data = request.get_json(force=True, silent=True) or {}
+    url = (data.get("url") or "").strip()
+    if not url:
+        return jsonify({"ok": False, "error": "Дай ссылку"}), 400
+    try:
+        src, title = fetch_source(url)
+        try:
+            segs, lang = ac.transcribe(src, 0)
+            words = sum(len(s["text"].split()) for s in segs)
+            dur = segs[-1]["end"] - segs[0]["start"] if segs else 0
+            wps = round(words / max(dur, 1), 2)
+            hook = " ".join(segs[0]["text"].split()[:12]) if segs else ""
+            top = ""
+            key = get_settings().get("drex_key", "")
+            if key and segs:
+                try:
+                    cands = ac._drex_score(segs, key, 3, 15, 60)
+                    if cands:
+                        m = cands[0]
+                        top = (f"{m['score']}: {m['title'][:100]} "
+                               f"[{m['start']:.0f}-{m['end']:.0f}с]")
+                except Exception:
+                    pass
+        finally:
+            try:
+                if src and os.path.exists(src):
+                    os.remove(src)
+            except OSError:
+                pass
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)[:200]}), 400
+    rid = uuid.uuid4().hex[:8]
+    try:
+        c = db()
+        try:
+            with c:
+                c.execute("INSERT INTO refs VALUES (?,?,?,?,?,?,?,?)",
+                          (rid, url, title, dur, hook, wps, top, time.time()))
+        finally:
+            c.close()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"ok": False}), 500
+    return jsonify({"ok": True, "id": rid, "title": title, "dur": round(dur, 1),
+                    "wps": wps, "hook": hook, "top": top})
+
+
+@app.get("/api/learn")
+def api_learn():
+    import learn as learn_mod
+    return jsonify({"ok": True, **learn_mod.status()})
+
+
+@app.post("/api/learn/train")
+def api_learn_train():
+    import learn as learn_mod
+    res = learn_mod.train()
+    if not res:
+        return jsonify({"ok": False,
+                        "error": "Мало меток: нужно 10+ клипов с просмотрами и 3+ удалённых"}), 400
+    return jsonify({"ok": True, **res})
 
 
 @app.get("/api/library")
