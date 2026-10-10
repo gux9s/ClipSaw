@@ -1057,7 +1057,7 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
         else:
             for k in range(n):
                 if n == 1:
-                    cA = od / 2 - b_eff / 2  # строго середина по правилам рекламодателя
+                    cA = od / 2  # старт ровно на середине итога
                 else:
                     cA = od * (k + 1) / (n + 1) - b_eff / 2
                     cA = min(max(cA, 0.5), max(od - b_eff - 0.5, 0.5))
