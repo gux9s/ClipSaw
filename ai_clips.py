@@ -130,8 +130,10 @@ _VT = _has_videotoolbox()
 
 def _video_codec_args() -> list:
     """x264 CRF — софтверный, но заметно качественнее железного CBR:
-    психовизуалка, адаптивный битрейт. Скорость та же (бутылка — Python-цикл)."""
-    return ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18",
+    психовизуалка, адаптивный битрейт. Скорость та же (бутылка — Python-цикл).
+    CRF случаен 18-20: у каждого клипа свой паттерн артефактов."""
+    import random as _r
+    return ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", str(_r.randint(18, 20)),
             "-preset", "fast"]
     return ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "21",
             "-preset", "veryfast"]
@@ -992,24 +994,29 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
         raise RuntimeError("нет геймплея — положи gameplay/subway.mp4")
     start, end = float(moment["start"]), float(moment["end"])
     cap = cv2.VideoCapture(src)
+    src_fps = float(cap.get(cv2.CAP_PROP_FPS) or 30) or 30
     fps = cap.get(cv2.CAP_PROP_FPS) or 30
     fps = round(min(float(fps or 30), 30), 2)
     nfr = cap.get(cv2.CAP_PROP_FRAME_COUNT)
-    if nfr and fps > 0:
-        end = min(end, nfr / fps)
+    if nfr and src_fps > 0:
+        end = min(end, nfr / src_fps)
     if end - start < 1:
         cap.release()
         raise RuntimeError("момент за пределами видео")
     dur = end - start
+    # скорость верха ±3%: ломает пиксельный и звуковой отпечатки разом.
+    # Сабы/трек лиц идут по контентному времени — синхрон цел.
+    spd = random.uniform(0.97, 1.03) if antidetect else 1.0
+    od = dur / spd  # длина контента на выходе
     if banner and max_total:
         # итог вместе с баннерами влезает в линзу: ужимаем контент
         be = _banner_eff()
         for _ in range(3):
-            n = max(1, min(6, int(round(dur / 50.0))))
-            cap_dur = max_total - n * be
-            if dur <= cap_dur or cap_dur < 5:
+            n = max(1, min(6, int(round(od / 50.0))))
+            if od + n * be <= max_total or od < 5:
                 break
-            dur = cap_dur
+            od = max_total - n * be
+        dur = od * spd
         end = start + dur
 
     gcap = cv2.VideoCapture(gp)
@@ -1021,6 +1028,9 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
         _seek_live(gcap, gdur, dur)
     else:
         gcap.set(cv2.CAP_PROP_POS_MSEC, 0)
+    # шаг кадров верха: сходимость fps + скорость (иначе 60fps исходник идёт в слоу-мо)
+    top_adv = max(src_fps, 1) / max(fps, 1) * spd
+    t_frac = 0.0
     # шаг кадров геймплея: геймплей 60fps, выход 25-30fps — пропускаем кадры,
     # иначе низ пойдёт в слоу-мо
     g_step = max(gfps, 1) / max(fps, 1)
@@ -1041,16 +1051,16 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
         bn = int(bcap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
         bfps = bcap.get(cv2.CAP_PROP_FPS) or 60
         b_eff = (bn / max(bfps, 1)) / BANNER_SPEED  # 5.5с → ~4.2с
-        n = max(1, min(6, int(round(dur / 50.0))))
-        if dur < b_eff + 3:
+        n = max(1, min(6, int(round(od / 50.0))))
+        if od < b_eff + 3:
             use_banner = False  # клип короче баннера — пропускаем
         else:
             for k in range(n):
                 if n == 1:
-                    cA = dur / 2 - b_eff / 2  # строго середина по правилам рекламодателя
+                    cA = od / 2 - b_eff / 2  # строго середина по правилам рекламодателя
                 else:
-                    cA = dur * (k + 1) / (n + 1) - b_eff / 2
-                    cA = min(max(cA, 0.5), max(dur - b_eff - 0.5, 0.5))
+                    cA = od * (k + 1) / (n + 1) - b_eff / 2
+                    cA = min(max(cA, 0.5), max(od - b_eff - 0.5, 0.5))
                 oA = cA + k * b_eff
                 wins.append((oA, oA + b_eff, cA))
             b_step = max(bfps, 1) * BANNER_SPEED / max(fps, 1)
@@ -1070,11 +1080,13 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
         # фриз: контент останавливается на время баннера и продолжается
         # с того же места — клип длиннее на суммарный баннер
         froze = b_eff * len(wins)
-        out_dur = dur + froze
+        out_dur = od + froze
         # --- звук собираем посемпльно в numpy: оригинал + баннеры + оригинал ---
         import numpy as np
         sr, ch = 44100, 2
-        af_src = (_antidetect_filters()[1] if antidetect else None)
+        af_src = f"atempo={spd:.4f}"
+        if antidetect:
+            af_src += "," + _antidetect_filters()[1]
         orig = _extract_pcm(src, ss=start, dur=dur, af=af_src, sr=sr, ch=ch)
         n_total = int(round(out_dur * sr))
         need = int(round(b_eff * sr))
@@ -1110,16 +1122,21 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
         cmd += ["-vf", qvf]
         cmd += ["-map", "0:v", "-map", "1:a"] + _rand_meta()
     else:
-        out_dur = dur
+        out_dur = od
         cmd += ["-ss", str(start), "-t", str(round(dur, 2)), "-i", src,
                 "-map", "0:v", "-map", "1:a?"] + _rand_meta()
         qvf = _quality_vf()
+        # звук догоняет скорость картинки, иначе рассинхрон губ
+        spd_af = [] if abs(spd - 1.0) < 1e-6 else [f"atempo={spd:.4f}"]
         if antidetect:
             vf, af = _antidetect_filters()
             qvf += "," + vf
-            cmd += ["-vf", qvf, "-af", af]
+            spd_af.append(af)
+            cmd += ["-vf", qvf, "-af", ",".join(spd_af)]
         else:
             cmd += ["-vf", qvf]
+            if spd_af:
+                cmd += ["-af", ",".join(spd_af)]
     cmd += _video_codec_args() + ["-pix_fmt", "yuv420p", "-fflags", "+bitexact",
             "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart",
             "-t", str(round(out_dur, 2)), out]
@@ -1134,24 +1151,33 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
         for k in range(total):
             t_rel = k / fps  # время на ВЫХОДЕ
             if use_banner:
-                acc, ct_rel, frozen = 0.0, t_rel, False
+                acc, ct_base, frozen = 0.0, t_rel, False
                 for (oA, oB, cA) in wins:
                     if t_rel >= oB:
                         acc += b_eff
                     elif t_rel >= oA:
-                        ct_rel, frozen = cA, True
+                        ct_base, frozen = cA, True
                         break
                 else:
-                    ct_rel = t_rel - acc
+                    ct_base = t_rel - acc
             else:
-                ct_rel, frozen = t_rel, False
+                ct_base, frozen = t_rel, False
+            ct_rel = ct_base * spd  # контентное время с учётом скорости
+            if ct_rel > dur:
+                ct_rel = dur
             t = start + ct_rel  # время в КОНТЕНТЕ (сабы, трек лиц)
             # цикл в RGB: одна конверсия вместо трёх на кадр
             if frozen and last_top is not None:
                 fr = last_top
             else:
-                ok, fr = cap.read()
-                if not ok:
+                t_frac += top_adv
+                n_adv, t_frac = int(t_frac), t_frac - int(t_frac)
+                ok, fr = False, None
+                for _ in range(max(n_adv, 0)):
+                    ok, fr = cap.read()
+                    if not ok:
+                        break
+                if not ok or fr is None:
                     if last_top is None:
                         break
                     fr = last_top
