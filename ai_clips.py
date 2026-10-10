@@ -852,7 +852,8 @@ def _banner_needs_key(path: str) -> bool:
 
 def _chroma_overlay(bg, fg, box_w: int = BANNER_W, cy: int | None = None,
                     zoom: float = 1.0, y_top: int | None = None,
-                    opacity: float = 0.95, key_green: bool = True):
+                    opacity: float = 0.95, key_green: bool = True,
+                    bj: dict | None = None):
     """Баннер: зелёный фон выбит хромакеем, лёгкий despill против ореола.
     cy — центр по вертикали (по умолчанию центр кадра), y_top — верх бокса,
     zoom — наезд с центр-кропом (убирает поля дизайна до краёв),
@@ -871,7 +872,12 @@ def _chroma_overlay(bg, fg, box_w: int = BANNER_W, cy: int | None = None,
         big = cv2.resize(fg, (zw, zh), interpolation=cv2.INTER_LANCZOS4)
         dx, dy = (zw - bw) // 2, (zh - bh) // 2
         fg = big[dy:dy + bh, dx:dx + bw]
-    fg = cv2.cvtColor(fg, cv2.COLOR_BGR2RGB)
+    fg = cv2.cvtColor(fg, cv2.COLOR_BGR2RGB).astype(np.float32)
+    if bj is not None:  # сублиминальный джиттер: глаз не видит, хэш другой
+        fg *= bj.get("gain", 1.0)
+        ns = bj.get("ns", 0.0)
+        if ns > 0:
+            fg += np.random.normal(0, ns, fg.shape).astype(np.float32)
     if key_green:
         hsv = cv2.cvtColor(fg, cv2.COLOR_RGB2HSV)
         mask = cv2.inRange(hsv, np.array([35, 70, 70]), np.array([85, 255, 255]))
@@ -1048,6 +1054,12 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
                 oA = cA + k * b_eff
                 wins.append((oA, oA + b_eff, cA))
             b_step = max(bfps, 1) * BANNER_SPEED / max(fps, 1)
+        # сублиминальный джиттер баннера на весь рендер: глаз не видит, хэш другой
+        bj = {"zoom": BANNER_ZOOM + random.uniform(-0.02, 0.02),
+              "dy": random.randint(-6, 6),
+              "gain": random.uniform(0.97, 1.03),
+              "ns": random.uniform(0.8, 1.6),
+              "asp": random.uniform(1.29, 1.31)}
 
     cmd = [FFMPEG, "-y", "-v", "error",
            "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{OUT_W}x{OUT_H}",
@@ -1068,7 +1080,7 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
         need = int(round(b_eff * sr))
         if _banner_has_audio(bpath):
             ban = _extract_pcm(
-                bpath, af=f"atempo={BANNER_SPEED},aresample={sr},volume=0.5",
+                bpath, af=f"atempo={bj['asp']:.3f},aresample={sr},volume=0.5",
                 sr=sr, ch=ch)
             ban = ban[:need]
             if len(ban) < need:
@@ -1197,8 +1209,8 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
                         break
                 if bok and bfr is not None:
                     # баннер висит прямо под фильмом (зазор 8px), от края до края
-                    frame = _chroma_overlay(frame, bfr, y_top=TOP_H + BANNER_GAP,
-                                            zoom=BANNER_ZOOM,
+                    frame = _chroma_overlay(frame, bfr, y_top=TOP_H + BANNER_GAP + bj["dy"],
+                                            zoom=bj["zoom"], bj=bj,
                                             key_green=_banner_needs_key(bpath))
                     banner_on = True
             if captions and not banner_on:
