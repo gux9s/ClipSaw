@@ -131,8 +131,8 @@ _VT = _has_videotoolbox()
 def _video_codec_args() -> list:
     """x264 CRF — софтверный, но заметно качественнее железного CBR:
     психовизуалка, адаптивный битрейт. Скорость та же (бутылка — Python-цикл)."""
-    return ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "20",
-            "-preset", "veryfast"]
+    return ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18",
+            "-preset", "fast"]
     return ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "21",
             "-preset", "veryfast"]
 
@@ -552,6 +552,8 @@ def pick_moments(segs, lang: str, key: str, want: int, min_len: int, max_len: in
             s, e, cov = _tight_span(s, e, bounds)  # тишина по краям — вон
             if e - s < 5:
                 continue
+            if cov < 0.35:
+                continue  # почти одно молчание — не сцена, а пауза
             sc = int(m.get("score", 70))
             if cov < 0.5:  # половина молчания — минус за рыхлость
                 sc = max(0, sc - 8)
