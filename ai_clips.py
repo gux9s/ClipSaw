@@ -1595,6 +1595,7 @@ def render_twitch_clip(src: str, moment: dict, segs, out: str,
     bcap, b_step, b_frac = None, 0.0, 0.0
     bpath = banner_path or BANNER_FILE
     use_banner = bool(banner) and os.path.exists(bpath)
+    tw_key = _banner_green(bpath) if use_banner else False
     b_eff = 0.0
     if use_banner:
         bcap = cv2.VideoCapture(bpath)
@@ -1783,7 +1784,7 @@ def render_twitch_clip(src: str, moment: dict, segs, out: str,
                     _by = (OUT_H2 - _bh) // 2 + random.randint(-15, 15)
                     frame = _banner_overlay(
                         frame, bfr, y_top=_by,
-                        zoom=1.0, bj=bj, opacity=0.95)
+                        zoom=1.0, bj=bj, opacity=0.95, key_green=tw_key)
                     banner_on = True
             if captions and not banner_on:
                 words = _active_words(segs, t)
@@ -2143,11 +2144,105 @@ def _banner_has_audio(path: str) -> bool:
     return _BANNER_AUDIO[path]
 
 
+_GREEN_CACHE = {}
+# Параметры ключа подобраны на RubUP green-screen (0.20/0.10: зелень ушла
+# полностью, без красного ореола; 0.30 уже красит контент в красный).
+_KEY_SIM, _KEY_BLEND = 0.20, 0.10
+
+
+def _banner_green(path: str | None = None) -> bool:
+    """У баннера зелёный фон под хромакей? Смотрим УГЛЫ кадров с отступом
+    0.5%: у хромакей-файлов (RubUP green-screen) зелень идёт по самой
+    кромке, у обычных креативов (banner.mp4) углы чёрные.
+    Важно смотреть именно кромку, а не долю зелени: у обычных креативов
+    зелёного контента внутри может быть даже больше (зелёный бак)."""
+    key = path or BANNER_FILE
+    if key in _GREEN_CACHE:
+        return _GREEN_CACHE[key]
+    res = False
+    try:
+        import cv2
+        import tempfile
+        _w, _h, _n, _f = _probe_wh_fps(key)
+        dur = _n / max(_f, 1) if _n and _f else 0
+        if dur > 0:
+            hits, total = 0, 0
+            for frac in (0.1, 0.3, 0.5, 0.7, 0.9):
+                tmp = os.path.join(tempfile.gettempdir(),
+                                   f"bngrn_{os.getpid()}.png")
+                try:
+                    subprocess.run(
+                        [FFMPEG, "-y", "-v", "error",
+                         "-ss", f"{dur * frac:.2f}", "-i", key,
+                         "-frames:v", "1", tmp],
+                        timeout=60, check=False)
+                    fr = cv2.imread(tmp)
+                    if fr is None:
+                        continue
+                    h, w = fr.shape[:2]
+                    ix = max(int(w * 0.005), 2)
+                    iy = max(int(h * 0.005), 2)
+                    for yy, xx in ((iy, ix), (iy, w - 1 - ix),
+                                   (h - 1 - iy, ix), (h - 1 - iy, w - 1 - ix)):
+                        b, g, r = (int(v) for v in fr[yy, xx])
+                        total += 1
+                        if g > 150 and (g - r) > 60 and (g - b) > 60:
+                            hits += 1
+                except Exception:
+                    continue
+                finally:
+                    try:
+                        if os.path.exists(tmp):
+                            os.remove(tmp)
+                    except OSError:
+                        pass
+            res = total >= 8 and hits / max(total, 1) >= 0.6
+    except Exception:
+        res = False
+    _GREEN_CACHE[key] = res
+    return res
+
+
+def _banner_key_vf(path: str | None = None) -> str:
+    """Кусок ffmpeg-цепочки для вычитания зелени (или '' для обычных
+    креативов). Вставлять ПЕРЕД format=yuva420p."""
+    if _banner_green(path):
+        return (f"chromakey=0x00FF00:{_KEY_SIM}:{_KEY_BLEND},"
+                f"despill=type=green,")
+    return ""
+
+
+def _green_alpha_bgr(fg_bgr):
+    """Покадровый хромакей для numpy-пути (twitch): маска 0..1, 1=оставить.
+    Зелень в прозрачность + растушёвка краёв от ореола."""
+    import cv2
+    import numpy as np
+    b, g, r = cv2.split(fg_bgr)
+    gi, ri, bi = g.astype(int), r.astype(int), b.astype(int)
+    gm = (((gi > 150) & ((gi - ri) > 60) & ((gi - bi) > 60))
+          .astype(np.uint8) * 255)
+    soft = cv2.GaussianBlur(gm, (0, 0), 1.5) / 255.0
+    return 1.0 - soft
+
+
+def _despill_bgr(fg_bgr):
+    """Давит зелёный отблеск на краях контента после кеинга."""
+    import cv2
+    import numpy as np
+    b, g, r = cv2.split(fg_bgr)
+    mx = np.maximum(r.astype(np.int16), b.astype(np.int16))
+    ex = np.clip(g.astype(np.int16) - mx - 25, 0, 255).astype(np.float32)
+    g2 = (g.astype(np.float32) - ex * 0.75).clip(0, 255).astype(np.uint8)
+    return cv2.merge([b, g2, r])
+
+
 def _banner_overlay(bg, fg, box_w: int = BANNER_W, cy: int | None = None,
                     zoom: float = 1.0, y_top: int | None = None,
                     opacity: float = 0.95,
-                    bj: dict | None = None):
-    """Баннер кладёт непрозрачно (хромакея нет — фон уже вычищен из файлов).
+                    bj: dict | None = None, key_green: bool = False):
+    """Баннер поверх кадра. key_green=True — вычитает зелёный фон
+    (хромакей-файлы типа RubUP green-screen): зелень в прозрачность
+    с растушёвкой + despill, сквозь неё видно видео.
     cy — центр по вертикали (по умолчанию центр кадра), y_top — верх бокса,
     zoom — наезд с центр-кропом,
     opacity — непрозрачность баннера (0.95 = фон чуть просвечивает)."""
@@ -2165,6 +2260,10 @@ def _banner_overlay(bg, fg, box_w: int = BANNER_W, cy: int | None = None,
         big = cv2.resize(fg, (zw, zh), interpolation=cv2.INTER_LANCZOS4)
         dx, dy = (zw - bw) // 2, (zh - bh) // 2
         fg = big[dy:dy + bh, dx:dx + bw]
+    keep_mask = None
+    if key_green:
+        keep_mask = _green_alpha_bgr(fg)
+        fg = _despill_bgr(fg)
     fg = cv2.cvtColor(fg, cv2.COLOR_BGR2RGB).astype(np.float32)
     if bj is not None:  # сублиминальный джиттер: глаз не видит, хэш другой
         fg *= bj.get("gain", 1.0)
@@ -2172,8 +2271,10 @@ def _banner_overlay(bg, fg, box_w: int = BANNER_W, cy: int | None = None,
         if ns > 0:
             fg += np.random.normal(0, ns, fg.shape).astype(np.float32)
     fg = fg.astype(np.float32)
-    keep = (1 - opacity)  # фон чуть просвечивает сквозь баннер
-    show = opacity
+    if keep_mask is not None:
+        alpha = (keep_mask * opacity)[..., None]  # попиксельная прозрачность
+    else:
+        alpha = opacity  # обычная плашка целиком, фон чуть просвечивает
     Hh, Ww = bg.shape[:2]
     x0 = (Ww - bw) // 2
     if y_top is not None:
@@ -2182,7 +2283,8 @@ def _banner_overlay(bg, fg, box_w: int = BANNER_W, cy: int | None = None,
         y0 = (cy - bh // 2) if cy is not None else (Hh - bh) // 2
         y0 = min(max(y0, 0), max(Hh - bh, 0))
     roi = bg[y0:y0 + bh, x0:x0 + bw].astype(np.float32)
-    bg[y0:y0 + bh, x0:x0 + bw] = np.clip(roi * keep + fg * show, 0, 255).astype(np.uint8)
+    bg[y0:y0 + bh, x0:x0 + bw] = np.clip(
+        roi * (1 - alpha) + fg * alpha, 0, 255).astype(np.uint8)
     return bg
 
 
@@ -2587,7 +2689,8 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
         # баннерный кусок пиксель-в-пиксель одинаков во всех клипах пачки
         _bn_w = random.randint(1000, 1022)
         _bn_y = random.randint(758, 794)
-        fc.append(f"[2:v]scale={_bn_w}:-2,fps=30,format=yuva420p,"
+        _bn_key = _banner_key_vf(bpath)
+        fc.append(f"[2:v]scale={_bn_w}:-2,fps=30,{_bn_key}format=yuva420p,"
                   f"colorchannelmixer=aa=0.95,setpts=PTS/{BANNER_SPEED:.3f}[bn0]")
         fc.append(f"[bn0]split={len(wins)}" + "".join(f"[bb{i}]" for i in range(len(wins))))
         for wi, (oA, oB, cA) in enumerate(wins):
@@ -3478,7 +3581,8 @@ def swap_banner(src: str, out: str, banner_path: str | None = None,
         [FFMPEG, "-y", "-v", "error", "-ss", f"{src_mid:.2f}", "-i", src,
          "-frames:v", "1", frame_png],
         timeout=120, check=True)
-    # свой баннер вписываем в кадр (центр), кладем непрозрачно — фон уже чистый
+    # свой баннер вписываем в кадр (центр); зелёный фон хромакей-файлов
+    # вычитается ключом (_sw_key), сквозь него видно исходное видео
     sw = min(bw or W, W)
     sh = max(int(round((bh or H) * sw / max(bw or W, 1))), 1)
     if sh > H:
@@ -3497,7 +3601,8 @@ def swap_banner(src: str, out: str, banner_path: str | None = None,
     vparts.append(f"[1:v]trim=start=0:end={b_eff:.3f},setpts=PTS-STARTPTS[vf]")
     vparts.append(f"[2:v]split={1 + len(covf)}"
                   + "".join(f"[cbs{i}]" for i in range(1 + len(covf))))
-    bfs = f"[cbs0]scale={sw}:{sh},fps={fps_i},format=yuva420p,colorchannelmixer=aa=0.95"
+    _sw_key = _banner_key_vf(bpath)
+    bfs = f"[cbs0]scale={sw}:{sh},fps={fps_i},{_sw_key}format=yuva420p,colorchannelmixer=aa=0.95"
     bfs += ",setpts=PTS/{:.3f}[vb]".format(BANNER_SPEED)
     vparts.append(bfs)
     vparts.append(f"[vf][vb]overlay={ox}:{oy}:eof_action=pass[vmid]")
@@ -3528,7 +3633,7 @@ def swap_banner(src: str, out: str, banner_path: str | None = None,
             f"{cur}drawbox=x={rx}:y={ry}:w={rw}:h={rh}:color=black@0.85:t=fill:"
             f"enable='between(t,{s:.3f},{e:.3f})'[d{ci}]")
         vparts.append(
-            f"[cbs{ci + 1}]scale={csw}:{csh},fps={fps_i},format=yuva420p,"
+            f"[cbs{ci + 1}]scale={csw}:{csh},fps={fps_i},{_sw_key}format=yuva420p,"
             f"colorchannelmixer=aa=0.95,"
             f"setpts=PTS-STARTPTS+{s:.3f}/TB[cb{ci}]")
         vparts.append(

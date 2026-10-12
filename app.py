@@ -1783,10 +1783,17 @@ def list_banners():
         if base == os.path.basename(ac.BANNER_FILE):
             name += " (по умолчанию)"
         try:
+            green = bool(ac._banner_green(p))
+        except Exception:
+            green = False
+        if green:
+            name += " · хромакей"
+        try:
             size = os.path.getsize(p)
         except OSError:
             size = 0
-        items.append({"id": base, "name": name, "dur": dur, "size": size})
+        items.append({"id": base, "name": name, "dur": dur, "size": size,
+                      "green": green})
     return items
 
 
