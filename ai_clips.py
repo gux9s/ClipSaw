@@ -130,23 +130,42 @@ _VT = _has_videotoolbox()
 
 
 def _video_codec_args() -> list:
-    """Скорость даёт железо (VideoToolbox, медиа-движок Mac): клип 50с
-    кодируется ~1 мин вместо ~8, основной CPU свободен — две задачи не душат
-    друг друга. Качество держим щедрым битрейтом 14-18 Мбит (джиттер ради
-    уникальности отпечатков); после TikTok-пережатия разница с x264 не видна.
-    Нет железа — откат на софтверный x264 fast CRF (медленнее, но работает)."""
+    """Железо (VideoToolbox) даёт скорость: клип 50с кодируется ~1 мин.
+    Битрейт держим TikTok-дружелюбным 6-8 Мбит VBR: файл 50с весит
+    ~35-50 МБ вместо 90-110, быстрее грузится и не застревает
+    в транскодинге TikTok (одна из причин вечных 0 просмотров).
+    Джиттер битрейта + случайный GOP — плюс к уникальности отпечатков."""
     import random as _r
     if _VT:
-        br = _r.randint(14, 18)
+        br = _r.randint(6, 8)
         return ["-c:v", "h264_videotoolbox", "-pix_fmt", "yuv420p",
-                "-b:v", f"{br}M", "-maxrate", f"{br + 4}M",
-                "-bufsize", f"{2 * br}M", "-allow_sw", "1"]
-    return ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", str(_r.randint(17, 19)),
-            "-preset", "fast", "-tune", "film"]
+                "-b:v", f"{br}M", "-maxrate", f"{br + 3}M",
+                "-bufsize", f"{2 * br}M", "-allow_sw", "1",
+                "-g", str(_r.randint(48, 72))]
+    return ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", str(_r.randint(20, 22)),
+            "-preset", "fast", "-tune", "film",
+            "-g", str(_r.randint(48, 72))]
 
 
 # Единая громкость под ленту: тихие сериалы подтягиваем к уровню TikTok.
 _LOUDNORM = "loudnorm=I=-16:TP=-1.5:LRA=11"
+# ВАЖНО: loudnorm без финального ресемпла поднимает выход до 96/192 кГц —
+# такие файлы TikTok плохо перекодирует (вечные 0 просмотров без нарушений).
+# Поэтому везде после loudnorm добавляем возврат на 48 кГц стерео.
+_TIKTOK_AF_TAIL = "aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo"
+
+
+def _tiktok_af(*parts: str) -> str:
+    """Собирает аудиоцепочку, гарантируя 48кГц на выходе.
+    Принимает кусочки (antidetect, loudnorm...), в конец дописывает ресемпл."""
+    chain = ",".join(p for p in parts if p)
+    if "loudnorm" in chain and "aresample=48000" not in chain:
+        chain = chain + "," + _TIKTOK_AF_TAIL
+    return chain
+
+
+# Финальные аудио-аргументы кодирования: TikTok ждёт 48кГц AAC.
+_AUDIO_OUT = ["-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2"]
 
 
 # ---------- 1. Транскрибация ----------
@@ -1609,11 +1628,17 @@ def render_twitch_clip(src: str, moment: dict, segs, out: str,
         froze = b_eff * len(wins)
         out_dur = od + froze
         import numpy as np
-        sr, chn = 44100, 2
+        sr, chn = 48000, 2
         af_parts = []
         if antidetect:
             af_parts.append(_antidetect_filters()[1])
+        else:
+            _pk = random.uniform(1.005, 1.012)
+            af_parts.append(
+                f"aresample=44100,asetrate=44100*{_pk:.4f},"
+                f"aresample=44100,atempo={1 / _pk:.4f}")
         af_parts.append(_LOUDNORM)
+        af_parts.append(f"volume={random.uniform(0.95, 1.05):.3f}")
         orig = _extract_pcm(src, ss=start, dur=dur, af=",".join(af_parts),
                             sr=sr, ch=chn)
         n_total = int(round(out_dur * sr))
@@ -1659,9 +1684,15 @@ def render_twitch_clip(src: str, moment: dict, segs, out: str,
             vf, af = _antidetect_filters()
             qvf += "," + vf
             spd_af.append(af)
-        cmd += ["-vf", qvf, "-af", ",".join(spd_af)]
-    cmd += _video_codec_args() + ["-pix_fmt", "yuv420p", "-fflags", "+bitexact",
-            "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
+        else:
+            _tk = random.uniform(1.005, 1.012)
+            spd_af.append(
+                f"aresample=44100,asetrate=44100*{_tk:.4f},"
+                f"aresample=44100,atempo={1 / _tk:.4f}")
+        spd_af.append(f"volume={random.uniform(0.95, 1.05):.3f}")
+        cmd += ["-vf", qvf, "-af", _tiktok_af(*spd_af)]
+    cmd += _video_codec_args() + ["-pix_fmt", "yuv420p",
+            *_AUDIO_OUT, "-movflags", "+faststart",
             "-t", str(round(out_dur, 2)), out]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
     cap.set(cv2.CAP_PROP_POS_MSEC, start * 1000)
@@ -1672,8 +1703,12 @@ def render_twitch_clip(src: str, moment: dict, segs, out: str,
     sw, sh = W * sc, H * sc
     bx0, by0 = (sw - OUT_W2) / 2, (sh - BOT_H2) / 2
     last_top, last_win = None, -1
-    zm = random.uniform(1.03, 1.06) if antidetect else 1.0
-    jx, jy = (random.uniform(-0.04, 0.04), random.uniform(-0.04, 0.04)) if antidetect else (0.0, 0.0)
+    if antidetect:
+        zm = random.uniform(1.03, 1.06)
+        jx, jy = random.uniform(-0.04, 0.04), random.uniform(-0.04, 0.04)
+    else:
+        zm = random.uniform(1.01, 1.025)
+        jx, jy = random.uniform(-0.015, 0.015), random.uniform(-0.015, 0.015)
     try:
         for k in range(total):
             t_rel = k / fps
@@ -1745,8 +1780,9 @@ def render_twitch_clip(src: str, moment: dict, segs, out: str,
                     _bh0, _bw0 = bfr.shape[:2]
                     _bh = int(round(_bh0 * min(1022, OUT_W2) / max(_bw0, 1)))
                     _bh = min(_bh, OUT_H2)
+                    _by = (OUT_H2 - _bh) // 2 + random.randint(-15, 15)
                     frame = _banner_overlay(
-                        frame, bfr, y_top=(OUT_H2 - _bh) // 2,
+                        frame, bfr, y_top=_by,
                         zoom=1.0, bj=bj, opacity=0.95)
                     banner_on = True
             if captions and not banner_on:
@@ -1842,6 +1878,62 @@ def _has_video(path: str) -> bool:
         return bool(ok) and (n > 0 or (fr is not None and fr.size > 0))
     except Exception:
         return False
+
+
+def tiktok_safety_check(path: str) -> dict:
+    """Предзаливная проверка файла под TikTok. Возвращает
+    {ok, problems[], info{}} — файл с ok=False почти наверняка получит 0
+    просмотров (битый звук 96к, гигантский вес, не та частота кадров и т.п.)."""
+    problems, info = [], {}
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return {"ok": False, "problems": ["файл не найден"], "info": {}}
+    info["size_mb"] = round(size / 1e6, 1)
+    if size > 70 * 1024 * 1024:
+        problems.append(f"тяжёлый файл ({info['size_mb']} МБ): будет долго грузиться и может зависнуть в обработке — норма до ~50 МБ")
+    if size < 50000:
+        problems.append("файл подозрительно маленький — возможно, битый")
+    try:
+        r = subprocess.run([FFMPEG, "-i", path],
+                           capture_output=True, text=True, timeout=30)
+        err = r.stderr or ""
+    except Exception:
+        err = ""
+    m = re.search(r"Video:.*?(\d{3,5})x(\d{3,5}).*?(\d+(?:\.\d+)?)\s*fps", err)
+    if m:
+        info["wh"] = f"{m.group(1)}x{m.group(2)}"
+        try:
+            info["fps"] = float(m.group(3))
+        except ValueError:
+            pass
+        if f"{m.group(1)}x{m.group(2)}" != "1080x1920":
+            problems.append(f"разрешение {m.group(1)}x{m.group(2)} вместо 1080x1920")
+    ma = re.search(r"Audio:.*?(\d{4,6})\s*Hz", err)
+    if ma:
+        info["audio_hz"] = int(ma.group(1))
+        if int(ma.group(1)) not in (44100, 48000):
+            problems.append(f"звук {ma.group(1)} Гц вместо 48к — TikTok плохо такое перекодирует (было главной причиной нулей)")
+    elif "Audio:" not in err:
+        problems.append("нет звуковой дорожки — такие видео TikTok почти не раздаёт")
+    md = re.search(r"Duration: (\d+):(\d+):([\d.]+)", err)
+    if md:
+        dur = int(md.group(1)) * 3600 + int(md.group(2)) * 60 + float(md.group(3))
+        info["dur"] = round(dur, 1)
+        if dur < 5:
+            problems.append("короче 5с — неINFOрмативно для ленты")
+    # первый кадр не чёрный (обложка решает CTR)
+    try:
+        import cv2
+        import numpy as np
+        c = cv2.VideoCapture(path)
+        ok, fr = c.read()
+        c.release()
+        if ok and fr is not None and float(np.mean(fr)) < 10:
+            problems.append("первый кадр чёрный — сменится обложка, упадёт CTR")
+    except Exception:
+        pass
+    return {"ok": not problems, "problems": problems, "info": info}
 
 
 def ensure_gameplay(name: str = "subway") -> str | None:
@@ -2343,9 +2435,14 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
         raise RuntimeError("момент за пределами видео")
     dur = end - start
     cap.release()
-    # скорость верха ±3%: ломает пиксельный и звуковой отпечатки разом.
+    # скорость верха ломает пиксельный и звуковой отпечатки разом.
     # Сабы/трек лиц идут по контентному времени — синхрон цел.
-    spd = random.uniform(0.97, 1.03) if antidetect else 1.0
+    # Always-on: даже без чекбокса лёгкий дрейф ±1.5%, иначе все клипы
+    # пачки идут 1:1 с оригиналом и TikTok режет их в 0 как дубли.
+    if antidetect:
+        spd = random.uniform(0.97, 1.03)
+    else:
+        spd = random.uniform(0.985, 1.015)
     od = dur / spd  # длина контента на выходе
     if banner and max_total:
         # итог вместе с баннерами влезает в линзу: ужимаем контент
@@ -2404,9 +2501,12 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
                 wins.append((oA, oA + b_eff, cA))
     out_dur = od + b_eff * len(wins)
     # --- верх: куски по 2с со статичным кропом за лицом (или центр) ---
-    Z = random.uniform(1.03, 1.06) if antidetect else 1.0
-    jx, jy = ((random.uniform(-0.04, 0.04), random.uniform(-0.04, 0.04))
-              if antidetect else (0.0, 0.0))
+    if antidetect:
+        Z = random.uniform(1.03, 1.06)
+        jx, jy = random.uniform(-0.04, 0.04), random.uniform(-0.04, 0.04)
+    else:
+        Z = random.uniform(1.01, 1.025)
+        jx, jy = random.uniform(-0.015, 0.015), random.uniform(-0.015, 0.015)
     sc0 = max(1080.0 / max(W, 1), 768.0 / max(H, 1)) * Z
     sw0, sh0 = int(round(W * sc0)), int(round(H * sc0))
     SEG = 2.0
@@ -2423,6 +2523,14 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
         _vf0, _af0 = _antidetect_filters()
         vf_ad = "," + _vf0
         af_ad = "," + _af0
+    else:
+        # always-on: лёгкий питч + цвет, глаз не видит, Content ID — да
+        _k = random.uniform(1.005, 1.012)
+        af_ad = (f",aresample=44100,asetrate=44100*{_k:.4f},"
+                 f"aresample=44100,atempo={1 / _k:.4f}")
+        vf_ad = (f",eq=contrast={random.uniform(1.02, 1.04):.3f}:"
+                 f"saturation={random.uniform(1.04, 1.08):.3f}:"
+                 f"brightness={random.uniform(0.004, 0.010):.3f}")
     fc = [f"[0:v]trim=start={off:.3f}:end={off + dur:.3f},setpts=(PTS-STARTPTS)/{spd:.4f}[cbase]",
           f"[cbase]split={len(segs2)}" + "".join(f"[cs{i}]" for i in range(len(segs2)))]
     # подменяем split-источник на именованные чанки
@@ -2447,8 +2555,10 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
         fc.append("[vtop0]hflip[vtop]")
     else:
         fc.append("[vtop0]null[vtop]")
-    # --- низ: геймплей кольцом ---
-    fc.append(f"[1:v]fps=30,scale=1080:1152:force_original_aspect_ratio=increase,"
+    # --- низ: геймплей кольцом. Случайный флип низа у каждого клипа:
+    # одинаковый subway сверху разных моментов даёт разный низ-хеш ---
+    _gflip = ",hflip" if random.random() < 0.5 else ""
+    fc.append(f"[1:v]fps=30{_gflip},scale=1080:1152:force_original_aspect_ratio=increase,"
               f"crop=1080:1152:x='(in_w-out_w)/2+({jx:.4f}*in_w)':"
               f"y='(in_h-out_h)/2+({jy:.4f}*in_h)',setsar=1[vbot]")
     fc.append("[vtop][vbot]vstack=inputs=2[vbase]")
@@ -2473,11 +2583,15 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
             prev = cA
         fc.append(f"[vb{bi}]trim=start={prev:.3f}:end={od:.3f},setpts=PTS-STARTPTS[p{len(wins)}a]")
         order.append(f"[p{len(wins)}a]")
-        fc.append(f"[2:v]scale=1022:-2,fps=30,format=yuva420p,"
+        # баннер: ширина и вертикаль гуляют у каждого рендера, иначе
+        # баннерный кусок пиксель-в-пиксель одинаков во всех клипах пачки
+        _bn_w = random.randint(1000, 1022)
+        _bn_y = random.randint(758, 794)
+        fc.append(f"[2:v]scale={_bn_w}:-2,fps=30,format=yuva420p,"
                   f"colorchannelmixer=aa=0.95,setpts=PTS/{BANNER_SPEED:.3f}[bn0]")
         fc.append(f"[bn0]split={len(wins)}" + "".join(f"[bb{i}]" for i in range(len(wins))))
         for wi, (oA, oB, cA) in enumerate(wins):
-            fc.append(f"[f{wi}][bb{wi}]overlay=(W-w)/2:776:eof_action=pass[m{wi}]")
+            fc.append(f"[f{wi}][bb{wi}]overlay=(W-w)/2:{_bn_y}:eof_action=pass[m{wi}]")
             order[1 + wi * 2] = f"[m{wi}]"
         fc.append("".join(order) + f"concat=n={len(order)}:v=1:a=0[vcat]")
         vlink = "[vcat]"
@@ -2543,10 +2657,12 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
             aorder2.append(aorder[-1])
             aorder = [x for x in aorder2 if x]
         fc.append("".join(aorder) + f"concat=n={len(aorder)}:v=0:a=1[acat]")
-        fc.append("[acat]loudnorm=I=-16:TP=-1.5:LRA=11[aout]")
+        fc.append(f"[acat]{_LOUDNORM},volume={random.uniform(0.95, 1.05):.3f},"
+                  f"{_TIKTOK_AF_TAIL}[aout]")
         amap = ["-map", "[aout]"]
     elif has_src_a:
-        fc.append("[aa]loudnorm=I=-16:TP=-1.5:LRA=11[aout]")
+        fc.append(f"[aa]{_LOUDNORM},volume={random.uniform(0.95, 1.05):.3f},"
+                  f"{_TIKTOK_AF_TAIL}[aout]")
         amap = ["-map", "[aout]"]
     else:
         amap = []
@@ -2558,8 +2674,8 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
         cmd += ["-i", bpath]
     cmd += ["-filter_complex", ";".join(fc),
             "-map", "[vout]"] + amap + _rand_meta() + _video_codec_args() + [
-                "-pix_fmt", "yuv420p", "-fflags", "+bitexact", "-r", "30",
-                "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
+                "-pix_fmt", "yuv420p", "-r", "30",
+                *_AUDIO_OUT, "-movflags", "+faststart",
                 "-t", str(round(out_dur, 2)), out]
     try:
         rc = _run_ffmpeg_progress(cmd, out_dur, progress)
@@ -3231,7 +3347,7 @@ def remove_silence(src: str, out: str, min_sil: float = 0.8,
         [FFMPEG, "-y", "-v", "error", "-i", src,
          "-filter_complex", ";".join(fc),
          "-map", "[vout]"] + amap + _rand_meta() + _video_codec_args() + [
-             "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", out],
+             *_AUDIO_OUT, "-movflags", "+faststart", out],
         timeout=1800, check=True)
     if progress:
         progress(100, "готово")
@@ -3441,11 +3557,11 @@ def swap_banner(src: str, out: str, banner_path: str | None = None,
                 ai += 1
         fc = ";".join(vparts) + ";"
         fc += ";".join(aparts) + ";"
-        fc += f"anullsrc=r=44100:cl=stereo:d={b_eff:.3f}[asil];"
+        fc += f"anullsrc=r=48000:cl=stereo:d={b_eff:.3f}[asil];"
         if ban_audio:
             fc += (f"[2:a]atempo={BANNER_SPEED:.3f},atrim=0:{b_eff:.3f},"
                    f"asetpts=PTS-STARTPTS,"
-                   f"volume=0.5,aresample=44100,"
+                   f"volume=0.5,aresample=48000,"
                    f"aformat=channel_layouts=stereo[ba];"
                    f"[asil][ba]amix=inputs=2:duration=first[amix];")
         fc += "".join(aorder) + f"concat=n={len(aorder)}:v=0:a=1[aout]"
@@ -3465,7 +3581,7 @@ def swap_banner(src: str, out: str, banner_path: str | None = None,
            "-i", frame_png, "-i", bpath,
            "-filter_complex", fc,
            "-map", "[vout]"] + amap + _rand_meta() + _video_codec_args() + [
-               "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", out]
+               *_AUDIO_OUT, "-movflags", "+faststart", out]
     subprocess.run(cmd, timeout=1800, check=True)
     try:
         if os.path.exists(frame_png):
@@ -3493,24 +3609,39 @@ def uniqualize_video(src: str, out: str, opts: dict | None = None,
     """Уникализатор: делает копию видео с другим хешем и отпечатком —
     лёгкие необратимые правки картинки и звука против Content ID и
     антиплагиата соцсетей. Глаз разницы почти не видит.
-    По умолчанию уже злое: скорость +1%, питч, подрезка краёв."""
+    По умолчанию уже злое: скорость +1%, питч, подрезка краёв.
+    ВАЖНО для TikTok: каждый прогон ОБЯЗАН отличаться (скорость/зум/цвет
+    рандомятся), иначе повторная заливка чужого видео с вотермаркой = 0."""
     import random
     opts = opts or {}
     try:
-        speed = float(opts.get("speed", 1.01))
+        _spd0 = float(opts.get("speed", 1.01))
     except (TypeError, ValueError):
-        speed = 1.01
+        _spd0 = 1.01
+    try:
+        _zm0 = float(opts.get("zoom", 2.0))
+    except (TypeError, ValueError):
+        _zm0 = 2.0
+    # дефолтные вызовы (цепочка unique_in и форма без явных настроек):
+    # скорость и зум обязаны гулять, иначе все файлы пачки с тем же темпом
+    _auto = (abs(_spd0 - 1.01) < 1e-9 or abs(_spd0 - 1.0) < 1e-9) and abs(_zm0 - 2.0) < 1e-9
+    speed = _spd0
+    if _auto:
+        # цепочка (скачал чужое -> вставил баннер -> уникализировал):
+        # скорость обязана гулять, иначе все файлы одной пачки с тем же темпом
+        speed = round(random.uniform(1.015, 1.04), 3)
     speed = min(1.05, max(0.95, speed))
     mirror = bool(opts.get("mirror", False))
     color = str(opts.get("color", "medium"))
-    try:
-        zoom_pct = float(opts.get("zoom", 2.0))
-    except (TypeError, ValueError):
-        zoom_pct = 2.0
-    zoom_pct = min(5.0, max(0.0, zoom_pct))
+    zoom_pct = _zm0
+    if _auto:
+        # зум гуляет шире: заодно подъедает края с тикток-вотермаркой оригинала
+        zoom_pct = round(random.uniform(2.5, 4.5), 1)
+    zoom_pct = min(6.0, max(0.0, zoom_pct))
     grain = bool(opts.get("grain", True))
     pitch = bool(opts.get("pitch", True))
-    # подрезка краёв: ломает точное совпадение длины и стартовых кадров
+    # подрезка краёв: ломает точное совпадение длины и стартовых кадров.
+    # Расширили до 0.3-0.8с с каждой стороны: длительность гуляет ±1.5с.
     th, te = 0.0, 0.0
     _w, _h = 0, 0
     try:
@@ -3519,8 +3650,8 @@ def uniqualize_video(src: str, out: str, opts: dict | None = None,
     except Exception:
         _dur = 0
     if _dur > 5:
-        th = round(random.uniform(0.2, 0.4), 2)
-        te = round(_dur - random.uniform(0.2, 0.4), 2)
+        th = round(random.uniform(0.3, 0.8), 2)
+        te = round(_dur - random.uniform(0.3, 0.8), 2)
     # сила цветокора по пресету + лёгкий джиттер (каждый прогон уникален)
     if color == "light":
         cc = (1.02, 1.04, 1.05, 1.09, 0.004, 0.010, -2, 2, 2, 3)
@@ -3537,8 +3668,12 @@ def uniqualize_video(src: str, out: str, opts: dict | None = None,
         vf.append(f"setpts={1.0 / speed:.4f}*PTS")  # видео догоняет звук
     z = 1.0 + zoom_pct / 100.0
     if z > 1.0001 and _w > 0 and _h > 0:
+        # случайный центр кропа (±3%): одинаковый исходник даёт разный кадр
+        jx = random.uniform(-0.03, 0.03)
+        jy = random.uniform(-0.03, 0.03)
         vf.append(f"scale=iw*{z:.3f}:ih*{z:.3f},"
-                  f"crop={_w}:{_h}:x='(in_w-{_w})/2':y='(in_h-{_h})/2'")
+                  f"crop={_w}:{_h}:x='(in_w-{_w})/2+({jx:.4f}*in_w)':"
+                  f"y='(in_h-{_h})/2+({jy:.4f}*in_h)'")
     vf.append(
         f"eq=contrast={random.uniform(cc[0], cc[1]):.3f}:"
         f"saturation={random.uniform(cc[2], cc[3]):.3f}:"
@@ -3552,19 +3687,22 @@ def uniqualize_video(src: str, out: str, opts: dict | None = None,
     if abs(speed - 1.0) > 1e-4:
         af.append(f"atempo={speed:.4f}")
     if pitch:
-        k = random.uniform(1.01, 1.03)
+        k = random.uniform(1.01, 1.035)
         af.append(f"aresample=44100,asetrate=44100*{k:.4f},"
                   f"aresample=44100,atempo={1 / k:.4f}")
     af.append(_LOUDNORM)
+    # лёгкий джиттер громкости после нормализации: у каждого файла свой уровень
+    af.append(f"volume={random.uniform(0.95, 1.05):.3f}")
+    af_str = _tiktok_af(*af)
     if progress:
         progress(5, "уникализация…")
     subprocess.run(
         [FFMPEG, "-y", "-v", "error", "-i", src,
          "-vf", ",".join(vf),
-         "-af", ",".join(af),
+         "-af", af_str,
          "-map", "0:v", "-map", "0:a?"] + _rand_meta()
         + _video_codec_args()
-        + ["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", out],
+        + [*_AUDIO_OUT, "-movflags", "+faststart", out],
         timeout=1800, check=True)
     if progress:
         progress(100, "готово")
@@ -3619,6 +3757,7 @@ def render_blur9(src: str, moment: dict, segs, out: str,
     центр — резкий fit (края с вотермарками режутся), зеркало + зум +
     сдвиг цвета против Content ID. Сабы наши, звук оригинала."""
     import cv2
+    import random as _brnd
     from PIL import Image, ImageDraw
     start, end = float(moment["start"]), float(moment["end"])
     cap = cv2.VideoCapture(src)
@@ -3644,17 +3783,28 @@ def render_blur9(src: str, moment: dict, segs, out: str,
     if antidetect:
         vf, af = _antidetect_filters()
         qvf += "," + vf
-        cmd += ["-vf", qvf, "-af", af + "," + _LOUDNORM]
+        cmd += ["-vf", qvf, "-af", _tiktok_af(
+            af, _LOUDNORM, f"volume={_brnd.uniform(0.95, 1.05):.3f}")]
     else:
-        cmd += ["-vf", qvf, "-af", _LOUDNORM]
-    cmd += _video_codec_args() + ["-pix_fmt", "yuv420p", "-fflags", "+bitexact",
-            "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
+        # always-on: лёгкий питч + громкость, иначе звук 1:1 с оригиналом
+        _bk = _brnd.uniform(1.005, 1.012)
+        cmd += ["-vf", qvf, "-af", _tiktok_af(
+            f"aresample=44100,asetrate=44100*{_bk:.4f},"
+            f"aresample=44100,atempo={1 / _bk:.4f}",
+            _LOUDNORM, f"volume={_brnd.uniform(0.95, 1.05):.3f}")]
+    cmd += _video_codec_args() + ["-pix_fmt", "yuv420p",
+            *_AUDIO_OUT, "-movflags", "+faststart",
             "-t", str(round(dur, 2)), out]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
     cap.set(cv2.CAP_PROP_POS_MSEC, start * 1000)
     _warm_start(cap)
     total = max(int(round(dur * fps)), 1)
     last = None
+    # always-on наезд: у каждого рендера свой кроп центра
+    if antidetect:
+        _bzw, _bzh = 1040, 1850
+    else:
+        _bzw, _bzh = _brnd.randint(1000, 1020), _brnd.randint(1780, 1815)
     try:
         for k in range(total):
             ok, fr = cap.read()
@@ -3674,9 +3824,8 @@ def render_blur9(src: str, moment: dict, segs, out: str,
             small = cv2.GaussianBlur(small, (0, 0), 8)
             bg = cv2.resize(small, (1080, 1920), interpolation=cv2.INTER_LINEAR)
             bg = cv2.convertScaleAbs(bg, alpha=0.6)
-            # центр: fit внутрь 1000x1700 (режем края с вотермарками) + наезд
-            zw, zh = (1040, 1850) if antidetect else (1000, 1780)
-            sc = min(zw / max(w, 1), zh / max(h, 1))
+            # центр: fit внутрь (режем края с вотермарками) + свой наезд у каждого
+            sc = min(_bzw / max(w, 1), _bzh / max(h, 1))
             fw, fh = max(int(round(w * sc)), 1), max(int(round(h * sc)), 1)
             fg = cv2.resize(fr, (fw, fh), interpolation=cv2.INTER_LANCZOS4)
             x0, y0 = (1080 - fw) // 2, (1920 - fh) // 2
@@ -3773,11 +3922,18 @@ def render_clip(src: str, moment: dict, segs, out: str, facetrack: bool = True,
     if antidetect:
         vf, af = _antidetect_filters()
         qvf += "," + vf
-        cmd += ["-vf", qvf, "-af", af + "," + _LOUDNORM]
+        cmd += ["-vf", qvf, "-af", _tiktok_af(
+            af, _LOUDNORM, f"volume={_rnd.uniform(0.95, 1.05):.3f}")]
     else:
-        cmd += ["-vf", qvf, "-af", _LOUDNORM]
-    cmd += _video_codec_args() + ["-pix_fmt", "yuv420p", "-fflags", "+bitexact",
-            "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
+        # Базовый always-on слой: даже без чекбокса звук чуть отличается
+        # от оригинала (иначе Content ID по аудио = 0 просмотров).
+        _ck = _rnd.uniform(1.005, 1.012)
+        cmd += ["-vf", qvf, "-af", _tiktok_af(
+            f"aresample=44100,asetrate=44100*{_ck:.4f},"
+            f"aresample=44100,atempo={1 / _ck:.4f}",
+            _LOUDNORM, f"volume={_rnd.uniform(0.95, 1.05):.3f}")]
+    cmd += _video_codec_args() + ["-pix_fmt", "yuv420p",
+            *_AUDIO_OUT, "-movflags", "+faststart",
             "-t", str(round(dur, 2)), out]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
     cap.set(cv2.CAP_PROP_POS_MSEC, start * 1000)
@@ -3785,7 +3941,7 @@ def render_clip(src: str, moment: dict, segs, out: str, facetrack: bool = True,
     total = max(int(round(dur * fps)), 1)
     last = None
     import random as _rnd
-    zm = _rnd.uniform(1.03, 1.06) if antidetect else 1.0  # наезд свой у каждого клипа
+    zm = _rnd.uniform(1.03, 1.06) if antidetect else _rnd.uniform(1.01, 1.02)
     try:
         for k in range(total):
             ok, fr = cap.read()

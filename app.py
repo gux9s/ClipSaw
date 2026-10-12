@@ -760,6 +760,24 @@ def api_clip(job_id, idx):
     return send_file(p, as_attachment=True, download_name=name)
 
 
+@app.get("/api/tiktok-check/<job_id>/<int:idx>")
+def api_tiktok_check(job_id, idx):
+    """Предзаливная проверка клипа: ок ли файл для TikTok.
+    Файл с ok=False почти наверняка получит 0 просмотров."""
+    import re
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", job_id or ""):
+        return jsonify({"ok": False}), 404
+    p = os.path.join(OUT_DIR, f"{job_id}_{idx + 1}.mp4")
+    if not os.path.exists(p):
+        return jsonify({"ok": False, "error": "клип не найден"}), 404
+    try:
+        res = ac.tiktok_safety_check(p)
+        res["ok_api"] = True
+        return jsonify(res)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)[:200]}), 500
+
+
 @app.get("/api/stats")
 def api_stats():
     try:
