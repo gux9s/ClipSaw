@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ClipSaw — дашборд</title>
 <meta name="description" content="ClipSaw — нарезка сериалов в вирусные вертикальные шортсы: ИИ-скоринг, субтитры, сплит с геймплеем.">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%23c9f24b'/%3E%3Cpath d='M13 10.5v11l4.5-2.75v-5.5z' fill='%23141604'/%3E%3Cpath d='M19.7 13.25v5.5L24.2 16z' fill='%23141604'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32' fill='none'%3E%3Ccircle cx='16' cy='16' r='11' fill='%23c9f24b'/%3E%3Ccircle cx='16' cy='16' r='11' fill='none' stroke='%23c9f24b' stroke-width='5' stroke-dasharray='3.1 2.66'/%3E%3Ccircle cx='16' cy='16' r='6.5' fill='%23141604'/%3E%3Cpath d='M14.5 12.8v6.4l5.2-3.2-5.2-3.2z' fill='%23c9f24b'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
 <style>
@@ -116,8 +116,16 @@
     display:flex;align-items:center;justify-content:space-between;gap:8px}
   .csel li:hover{background:rgba(201,242,75,.09);color:var(--fg)}
   .csel li.on{color:var(--acc)}
+  .csel.off{opacity:.45;pointer-events:none}
   .csel li.on::after{content:"";width:7px;height:7px;border-radius:99px;background:var(--acc);flex-shrink:0}
   textarea{resize:vertical;min-height:76px}
+  .urange{position:relative;height:34px;margin-top:6px}
+  .urange .utrack{position:absolute;top:13px;left:0;right:0;height:8px;border-radius:99px;background:#22262e}
+  .urange .ufill{position:absolute;top:13px;height:8px;border-radius:99px;background:rgba(201,242,75,.55)}
+  .urange input{position:absolute;left:0;top:0;width:100%;height:34px;margin:0;padding:0;background:transparent;border:none;outline:none;appearance:none;-webkit-appearance:none;pointer-events:none}
+  .urange input::-webkit-slider-thumb{-webkit-appearance:none;pointer-events:auto;width:18px;height:28px;border-radius:6px;background:var(--acc);border:2px solid #0a0b0e;cursor:pointer}
+  .urange input::-moz-range-thumb{pointer-events:auto;width:14px;height:24px;border-radius:6px;background:var(--acc);border:2px solid #0a0b0e;cursor:pointer}
+  .urange input::-moz-range-track{background:transparent}
   label.lbl{display:block;font-size:11.5px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;
     color:var(--mut);margin:14px 0 7px}
   label.lbl:first-child{margin-top:0}
@@ -316,14 +324,17 @@
 <div class="app">
   <aside>
     <div class="logo">
-      <svg width="26" height="26" viewBox="0 0 32 32" fill="none"><rect width="32" height="32" rx="9" fill="#c9f24b"/><path d="M13 10.5v11l4.5-2.75v-5.5z" fill="#141604"/><path d="M19.7 13.25v5.5L24.2 16z" fill="#141604"/></svg>
+      <svg width="26" height="26" viewBox="0 0 32 32" fill="none"><circle cx="16" cy="16" r="11" fill="#c9f24b"/><circle cx="16" cy="16" r="11" fill="none" stroke="#c9f24b" stroke-width="5" stroke-dasharray="3.1 2.66"/><circle cx="16" cy="16" r="6.5" fill="#141604"/><path d="M14.5 12.8v6.4l5.2-3.2-5.2-3.2z" fill="#c9f24b"/></svg>
       ClipSaw
       <span class="ver">V2</span>
     </div>
     <nav class="nav" id="nav">
       <button data-v="dashboard" class="on"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7.5" height="7.5" rx="2"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="2"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="2"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="2"/></svg><span class="nl">Дашборд</span></button>
       <button data-v="cut"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><path d="M8.2 7.8L20 19M8.2 16.2L20 5"/></svg><span class="nl">Нарезка</span></button>
+      <button data-v="twitch"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 3h16v11H9l-5 4V3z"/><path d="M9 7.5v4M13.5 7.5v4"/></svg><span class="nl">Twitch</span></button>
       <button data-v="clips"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="M10 9.5v5l4.5-2.5L10 9.5z" fill="currentColor" stroke="none"/></svg><span class="nl">Клипы</span></button>
+      <button data-v="uniq"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"/><path d="M19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9L19 15z"/></svg><span class="nl">Уникализатор</span></button>
+      <button data-v="refs"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M16.5 16.5L21 21"/></svg><span class="nl">Разбор</span></button>
       <button data-v="history"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5v5h5"/><path d="M4.5 10a8 8 0 11-.6 4"/></svg><span class="nl">История</span></button>
       <button data-v="settings"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 00-.1-1.2l2-1.5-2-3.4-2.3 1a7 7 0 00-2-1.2L14.2 3H9.8l-.4 2.7a7 7 0 00-2 1.2l-2.3-1-2 3.4 2 1.5A7 7 0 005 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.4 2.3-1a7 7 0 002 1.2l.4 2.7h4.4l.4-2.7a7 7 0 002-1.2l2.3 1 2-3.4-2-1.5c.1-.4.1-.8.1-1.2z"/></svg><span class="nl">Настройки</span></button>
     </nav>
@@ -363,17 +374,17 @@
         <label class="lbl" for="key">DREX API-ключ <span style="text-transform:none;letter-spacing:0">(<a href="https://drex.nace.ai" target="_blank">nace.ai</a> — без него не запустится)</span></label>
         <input id="key" type="password" placeholder="nace_sk… (можно сохранить в настройках)">
         <div class="step"><b>02</b><span>Что нарезать</span></div>
-        <div class="ai-grid">
+        <div class="ai-grid" id="wantLensGrid">
           <div><label class="lbl" for="want">Клипов с видео</label>
             <select id="want"><option>3</option><option>5</option><option selected>8</option><option>10</option><option>15</option><option>20</option><option>30</option><option>50</option></select></div>
           <div><label class="lbl" for="lens">Длина клипа</label>
-            <select id="lens"><option value="15-30">Короткие · 15–30</option><option value="40-60" selected>Стандарт · 40–60</option><option value="40-75">Длинные · 40–75</option><option value="80-118">Макси · 80–118 · 2 баннера</option></select></div>
+            <select id="lens"><option value="15-30">Короткие · 15–30</option><option value="40-59" selected>Стандарт · 40–59 (с баннером)</option><option value="40-75">Длинные · 40–75</option><option value="80-118">Макси · 80–118 · 2 баннера</option></select></div>
         </div>
         <div class="ai-grid">
           <div><label class="lbl" for="limit">Анализ</label>
             <select id="limit"><option value="0" selected>Всё видео</option><option value="10">Первые 10 мин</option><option value="20">Первые 20 мин</option><option value="40">Первые 40 мин</option><option value="60">Первый час</option></select></div>
           <div><label class="lbl" for="mode">Формат</label>
-            <select id="mode"><option value="split" selected>Сплит + Subway</option><option value="blur9">Блюр 9:16 · антиплагиат</option><option value="blur">Размытый фон</option><option value="face">Трек лица</option><option value="fast">Только нарезка</option></select></div>
+            <select id="mode"><option value="split" selected>Сплит + геймплей снизу</option><option value="blur9">Блюр 9:16 · антиплагиат</option><option value="blur">Размытый фон</option><option value="face">Трек лица</option><option value="parts">Части · всё видео кусками 45–59с</option><option value="fast">Только нарезка</option></select></div>
         </div>
         <div class="ai-grid">
           <div><label class="lbl" for="asd">Транскрибация</label>
@@ -386,13 +397,81 @@
         <label class="chk"><input type="checkbox" id="caps" checked> Субтитры с подсветкой слов</label>
         <label class="chk"><input type="checkbox" id="anti"> Анти-детект (цвет · зум · зерно · звук)</label>
         <label class="chk"><input type="checkbox" id="mir"> Зеркало (отразить видео)</label>
-        <label class="chk"><input type="checkbox" id="ban" checked> Баннер МУСОРДРОП в середине</label>
+        <label class="chk"><input type="checkbox" id="ban" checked> Баннер в середине</label>
+        <div><label class="lbl" for="banFile">Какой баннер</label>
+          <select id="banFile"><option value="">По умолчанию</option></select></div>
         <label class="chk"><input type="checkbox" id="manualChk"> Свои таймкоды вместо ИИ</label>
         </div>
         <div id="stampsBox"><textarea id="stamps" placeholder="02:15-03:10&#10;05:40-06:25"></textarea></div>
         <div style="margin-top:14px"><button class="btn" id="go">Нарезать шортсы</button></div>
         <div class="err-line" id="err"></div>
       </div>
+      <h2>Очередь</h2>
+      <div id="queue"><div class="empty">Здесь появятся задачи и готовые клипы</div></div>
+    </section>
+
+    <!-- CLIPS -->
+    <!-- TWITCH -->
+    <section class="view" id="v-twitch">
+      <div class="card">
+        <div class="step"><b>01</b><span>Источник</span></div>
+        <label class="lbl" for="twUrls">Ссылки на VOD/клипы Twitch — по одной на строку, до 5</label>
+        <textarea id="twUrls" placeholder="https://www.twitch.tv/videos/123456789"></textarea>
+        <div class="dim" style="margin-top:6px">Вод целиком качать не надо — хватит первых 10–20 мин. Вебку находит сама: верх 30% — лицо, низ 70% — катка.</div>
+        <label class="lbl" for="twKey">DREX API-ключ</label>
+        <input id="twKey" type="password" placeholder="nace_sk… (можно сохранить в настройках)">
+        <div class="step"><b>02</b><span>Что нарезать</span></div>
+        <div class="ai-grid">
+          <div><label class="lbl" for="twWant">Клипов с видео</label>
+            <select id="twWant"><option>3</option><option>5</option><option selected>8</option><option>10</option><option>15</option></select></div>
+          <div><label class="lbl" for="twLens">Длина клипа</label>
+            <select id="twLens"><option value="15-30">Короткие · 15–30</option><option value="40-59" selected>Стандарт · 40–59</option></select></div>
+        </div>
+        <div class="ai-grid">
+          <div><label class="lbl" for="twLimit">Анализ</label>
+            <select id="twLimit"><option value="0">Всё видео</option><option value="10" selected>Первые 10 мин</option><option value="20">Первые 20 мин</option><option value="40">Первые 40 мин</option><option value="60">Первый час</option></select></div>
+        </div>
+        <div class="chkgrid">
+          <label class="chk"><input type="checkbox" id="twAnti"> Анти-детект (цвет · зум · зерно · звук)</label>
+          <label class="chk"><input type="checkbox" id="twMir"> Зеркало (отразить видео)</label>
+          <label class="chk"><input type="checkbox" id="twBan" checked> Баннер в середине</label>
+          <div><label class="lbl" for="twBanFile">Какой баннер</label>
+            <select id="twBanFile"><option value="">По умолчанию</option></select></div>
+        </div>
+        <div style="margin-top:14px"><button class="btn" id="twGo">Нарезать со стрима</button></div>
+        <div class="err-line" id="twErr"></div>
+      </div>
+      <h2>Очередь</h2>
+      <div id="twQueue"><div class="empty">Здесь появятся задачи и готовые клипы</div></div>
+    </section>
+
+    <section class="view" id="v-clips">
+      <input id="fSearch" type="text" placeholder="Поиск по клипам…" style="margin-bottom:12px">
+      <div class="libbar"><button class="btn sm ghost" id="selAll">Выбрать все</button><button class="btn sm" id="delSel" disabled>Удалить выбранные</button><span class="dim" id="selCount"></span></div>
+      <div class="chips" id="scoreChips"><button data-s="0" class="on">Все</button><button data-s="75">Скор 75+</button><button data-s="50">Скор 50+</button></div>
+      <div class="fgrid" id="fGrid"><div class="empty">Загрузка…</div></div>
+    </section>
+
+    <!-- HISTORY -->
+    <!-- UNIQ -->
+    <section class="view" id="v-uniq">
+      <div class="card">
+        <div class="step"><b>01</b><span>Ссылки</span></div>
+        <label class="lbl" for="uqUrls">Ссылки на TikTok — по одной на строку, до 5</label>
+        <textarea id="uqUrls" placeholder="https://www.tiktok.com/@user/video/123…"></textarea>
+        <div class="dim" style="margin-top:6px">Качает в максимальном качестве, затем меняет баннер и уникализирует. Вотермарку TikTok не вырезаем.</div>
+        <div><label class="lbl" for="uqBanFile">Какой баннер</label>
+          <select id="uqBanFile"><option value="">По умолчанию</option></select></div>
+        <button class="btn" id="uqGo">Скачать, заменить баннер и уникализировать</button>
+        <div class="dim" style="margin-top:8px">Качает в максимальном качестве и чистит тишину → выбираешь отрезок чужого баннера ползунком под видео → вырезаем, ставим Мусордроп, уникализируем.</div>
+        <div id="uqResult" style="margin-top:10px"></div>
+      </div>
+      <h2>Готовые</h2>
+      <div id="uqLib"><div class="empty">Пока пусто</div></div>
+    </section>
+
+    <!-- REFS -->
+    <section class="view" id="v-refs">
       <h2>Референсы конкурентов</h2>
       <div class="card">
         <label class="lbl" for="refUrl">Ссылка на залётное видео</label>
@@ -405,19 +484,8 @@
         <div class="dim" id="refHuntSt" style="margin-top:8px"></div>
         <div id="refList" style="margin-top:10px"><div class="empty">Пока пусто — кинь ссылку, ИИ разберёт хук, темп и топ-момент</div></div>
       </div>
-      <h2>Очередь</h2>
-      <div id="queue"><div class="empty">Здесь появятся задачи и готовые клипы</div></div>
     </section>
 
-    <!-- CLIPS -->
-    <section class="view" id="v-clips">
-      <input id="fSearch" type="text" placeholder="Поиск по клипам…" style="margin-bottom:12px">
-      <div class="libbar"><button class="btn sm ghost" id="selAll">Выбрать все</button><button class="btn sm" id="delSel" disabled>Удалить выбранные</button><span class="dim" id="selCount"></span></div>
-      <div class="chips" id="scoreChips"><button data-s="0" class="on">Все</button><button data-s="75">Скор 75+</button><button data-s="50">Скор 50+</button></div>
-      <div class="fgrid" id="fGrid"><div class="empty">Загрузка…</div></div>
-    </section>
-
-    <!-- HISTORY -->
     <section class="view" id="v-history">
       <div class="card" style="padding:6px 14px">
         <table><thead><tr><th>Видео</th><th>Статус</th><th>Клипов</th><th>Когда</th></tr></thead>
@@ -436,13 +504,13 @@
           <div><label class="lbl" for="sWant">Клипов по умолчанию</label>
             <select id="sWant"><option>3</option><option>5</option><option>8</option><option>10</option><option>20</option><option>30</option><option>50</option></select></div>
           <div><label class="lbl" for="sLens">Длина по умолчанию</label>
-            <select id="sLens"><option value="15-30">15–30</option><option value="40-60">40–60</option><option value="40-75">40–75</option><option value="80-118">80–118 · 2 баннера</option></select></div>
+            <select id="sLens"><option value="15-30">15–30</option><option value="40-59">40–59</option><option value="40-75">40–75</option><option value="80-118">80–118 · 2 баннера</option></select></div>
           <div><label class="lbl" for="sLimit">Анализ по умолчанию</label>
             <select id="sLimit"><option value="0">Всё</option><option value="10">10 мин</option><option value="20">20 мин</option><option value="40">40 мин</option><option value="60">Час</option></select></div>
         </div>
         <div class="ai-grid">
           <div><label class="lbl" for="sVmode">Формат по умолчанию</label>
-            <select id="sVmode"><option value="split">Сплит + Subway</option><option value="blur9">Блюр 9:16 · антиплагиат</option><option value="blur">Размытый фон</option><option value="face">Трек лица</option><option value="fast">Только нарезка</option></select></div>
+            <select id="sVmode"><option value="split">Сплит + Subway</option><option value="blur9">Блюр 9:16 · антиплагиат</option><option value="blur">Размытый фон</option><option value="face">Трек лица</option><option value="parts">Части · всё видео кусками 45–59с</option><option value="fast">Только нарезка</option></select></div>
           <div><label class="lbl" for="sAsd">Транскрибация</label>
             <select id="sAsd"><option value="base">Быстро · Base</option><option value="small">Точно · Small</option><option value="giga">GigaAM v3 · топ для русского</option></select></div>
         </div>
@@ -478,8 +546,8 @@
 
 <script>
 const $=id=>document.getElementById(id);
-const TITLES={dashboard:'Дашборд',cut:'Нарезка',clips:'Клипы',history:'История',settings:'Настройки'};
-const SUBS={dashboard:'пачка вертикальных шортсов из серий',cut:'ссылки → сценки → серии',clips:'готовое с постерами и скором',history:'все запуски и их движки',settings:'ключи, дефолты, воркеры'};
+const TITLES={dashboard:'Дашборд',cut:'Нарезка',twitch:'Twitch',clips:'Клипы',uniq:'Уникализатор',refs:'Разбор',history:'История',settings:'Настройки'};
+const SUBS={dashboard:'пачка вертикальных шортсов из серий',cut:'ссылки → сценки → серии',twitch:'стримы: вебка сверху, катка снизу',clips:'готовое с постерами и скором',uniq:'залил видео → получил уникальное',refs:'залётные конкуренты → хуки в обучение',history:'все запуски и их движки',settings:'ключи, дефолты, воркеры'};
 let SETTINGS={};
 let live=new Map();
 let HIST=[];
@@ -498,7 +566,10 @@ function show(v){
   if(v==='clips')loadClips();
   if(v==='history')loadHistory();
   if(v==='settings'){loadSettings();loadLearn();}
-  if(v==='cut')loadRefs();
+  if(v==='refs')loadRefs();
+  if(v==='uniq'){loadUniq();loadBanners();}
+  if(v==='twitch'){fillKeys();loadBanners();}
+  if(v==='cut')loadBanners();
 }
 document.querySelectorAll('#nav button').forEach(b=>b.onclick=()=>show(b.dataset.v));
 document.querySelectorAll('[data-go]').forEach(b=>b.onclick=()=>show(b.dataset.go));
@@ -559,12 +630,20 @@ setInterval(async ()=>{
 
 function showErr(m){const e=$('err');e.textContent=m;e.style.display='block'}
 function hideErr(){$('err').style.display='none'}
+function fillKeys(){const v=localStorage.getItem('cs_drex')||SETTINGS.drex_key||'';if(!v)return;if($('key')&&!$('key').value)$('key').value=v;if($('twKey')&&!$('twKey').value)$('twKey').value=v;}
+function watchKeys(){[$('key'),$('twKey')].forEach(el=>{if(!el||el._kw)return;el._kw=1;el.addEventListener('change',()=>{const v=el.value.trim();if(v)localStorage.setItem('cs_drex',v);fillKeys();});});}
 if(localStorage.getItem('cs_drex'))$('key').value=localStorage.getItem('cs_drex');
-$('key').addEventListener('change',()=>localStorage.setItem('cs_drex',$('key').value.trim()));
+watchKeys();
 $('manualChk').addEventListener('change',()=>{$('stampsBox').style.display=$('manualChk').checked?'block':'none'});
 $('mode').addEventListener('change',()=>{
   const fast=$('mode').value==='fast';
   $('caps').disabled=fast;
+  const parts=$('mode').value==='parts';
+  $('wantLensGrid').style.display=parts?'none':'';
+  const sp=($('mode').value==='split'||$('mode').value==='parts');
+  $('game').disabled=!sp;
+  const gw=$('game').nextElementSibling;
+  if(gw&&gw.classList&&gw.classList.contains('csel'))gw.classList.toggle('off',!sp);
 });
 
 $('go').onclick=async ()=>{
@@ -582,7 +661,7 @@ $('go').onclick=async ()=>{
         min_len:+$('lens').value.split('-')[0],max_len:+$('lens').value.split('-')[1],
         limit_min:+$('limit').value,
         captions:$('caps').checked&&mode!=='fast',facetrack:mode==='face'||mode==='split',
-        antidetect:$('anti').checked,mirror:$('mir').checked,banner:$('ban').checked,asr_model:$('asd').value,gameplay:$('game').value,fast:mode==='fast',vmode:mode==='fast'?'blur':mode,
+        antidetect:$('anti').checked,mirror:$('mir').checked,banner:$('ban').checked,banner_file:$('banFile').value,asr_model:$('asd').value,gameplay:$('game').value,fast:mode==='fast',vmode:mode==='fast'?'blur':mode,
         stamps:$('manualChk').checked?$('stamps').value:''})});
     const j=await r.json();
     if(!j.ok)throw new Error(j.error||'Не получилось');
@@ -649,13 +728,20 @@ function makeCustom(id){
   const lab=document.createElement('span');btn.appendChild(lab);
   btn.insertAdjacentHTML('beforeend','<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>');
   const ul=document.createElement('ul');ul.setAttribute('role','listbox');
-  const items=[...sel.options].map(o=>{
-    const li=document.createElement('li');li.textContent=o.text;li.setAttribute('role','option');
-    li.dataset.v=o.value||o.text;
-    li.onclick=ev=>{ev.stopPropagation();sel.value=li.dataset.v;sel.dispatchEvent(new Event('change',{bubbles:true}));sync();close();};
-    ul.appendChild(li);return li;
-  });
-  function sync(){const o=sel.options[sel.selectedIndex];lab.textContent=o?o.text:'';
+  let items=[];
+  function build(){
+    ul.innerHTML='';
+    items=[...sel.options].map(o=>{
+      const li=document.createElement('li');li.textContent=o.text;li.setAttribute('role','option');
+      li.dataset.v=o.value||o.text;
+      li.onclick=ev=>{ev.stopPropagation();sel.value=li.dataset.v;sel.dispatchEvent(new Event('change',{bubbles:true}));sync();close();};
+      ul.appendChild(li);return li;
+    });
+  }
+  build();
+  function sync(){
+    if(ul.childElementCount!==sel.options.length)build();
+    const o=sel.options[sel.selectedIndex];lab.textContent=o?o.text:'';
     items.forEach(li=>li.classList.toggle('on',li.dataset.v===sel.value));}
   function close(){box.classList.remove('open');}
   btn.onclick=e=>{e.stopPropagation();
@@ -670,7 +756,7 @@ function makeCustom(id){
   sel._cs={sync};sync();
 }
 function refreshCustom(){document.querySelectorAll('select').forEach(s=>{if(s._cs)s._cs.sync();});}
-['want','game','lens','limit','mode','asd','sWant','sLens','sLimit','sVmode','sAsd','sGame','sW'].forEach(makeCustom);
+  ['want','game','lens','limit','mode','asd','sWant','sLens','sLimit','sVmode','sAsd','sGame','sW','twWant','twLens','twLimit','banFile','twBanFile','uqBanFile'].forEach(makeCustom);
 
 /* ---------- клипы ---------- */
 let LIB=[];
@@ -698,6 +784,53 @@ $('delSel').onclick=async ()=>{
   if(j.ok){[...SEL.keys()].forEach(k=>{const f=SEL.get(k);if(!(j.failed||[]).includes(f.name))SEL.delete(k);});
     toast('Удалено: '+j.removed,'ok');}
   loadClips();loadDashQuiet();
+};
+const twLive=new Map();
+let twPoll=null;
+async function twTick(){
+  if(!twLive.size){if(twPoll){clearInterval(twPoll);twPoll=null;}return;}
+  const box=$('twQueue');
+  for(const [id] of [...twLive]){
+    try{
+      const s=await (await fetch('/api/job/'+id)).json();
+      let row=document.getElementById('twrow-'+id);
+      if(!row){
+        row=document.createElement('div');row.id='twrow-'+id;row.className='card';row.style.marginTop='8px';
+        row.innerHTML='<div class="n" style="font-weight:600">…</div><div class="bar live" style="margin-top:8px"><i style="width:0%"></i></div><div class="dim st" style="margin-top:6px"></div>';
+        box.prepend(row);
+        const emp=box.querySelector('.empty');if(emp)emp.remove();
+      }
+      if(s.title)row.querySelector('.n').textContent=s.title;
+      row.querySelector('.bar i').style.width=(s.pct||0)+'%';
+      row.querySelector('.st').textContent=(s.stage||s.status)+' · '+(s.pct||0)+'%';
+      if(s.status==='done'||s.status==='error'){
+        twLive.delete(id);
+        if(s.status!=='done'){row.querySelector('.st').textContent='Ошибка: '+(s.error||'');continue;}
+        row.querySelector('.st').textContent='Готово: '+(s.clips||[]).length+' клипов — смотри во вкладке Клипы';
+        loadClips();
+      }
+    }catch(e){}
+  }
+  if(!twLive.size)toast('Готово','ok');
+}
+$('twGo').onclick=async ()=>{
+  const urls=$('twUrls').value.split('\n').map(s=>s.trim()).filter(Boolean).slice(0,5);
+  if(!urls.length){toast('Вставь ссылку на Twitch','err');return;}
+  const mm=$('twLens').value.split('-');
+  $('twErr').textContent='';
+  try{
+    const r=await fetch('/api/twitch/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+      urls:urls.join('\n'),api_key:$('twKey').value.trim(),
+      want:+$('twWant').value,min_len:+mm[0],max_len:+mm[1],
+      limit_min:+$('twLimit').value,
+      antidetect:$('twAnti').checked,mirror:$('twMir').checked,banner:$('twBan').checked,banner_file:$('twBanFile').value})});
+    const j=await r.json();
+    if(!j.ok)throw new Error(j.error||'Не вышло');
+    for(const id of (j.jobs||[]))twLive.set(id,{});
+    if(twPoll)clearInterval(twPoll);
+    twPoll=setInterval(twTick,2000);
+    twTick();
+  }catch(e){$('twErr').textContent=e.message;toast(e.message,'err');}
 };
 async function loadClips(){
   try{
@@ -887,10 +1020,159 @@ $('refBulkGo').onclick=async ()=>{
     poll();
   }catch(e){toast(e.message,'err');$('refBulkGo').disabled=false;}
 };
+const uqLive=new Set();
+let uqPoll=null;
+function uqRow(id){
+  let row=document.getElementById('uqrow-'+id);
+  if(!row){
+    row=document.createElement('div');row.id='uqrow-'+id;row.className='card';row.style.marginTop='8px';
+    row.innerHTML='<div class="n" style="font-weight:600">Обработка</div><div class="bar live" style="margin-top:8px"><i style="width:0%"></i></div><div class="dim st" style="margin-top:6px"></div><div class="res" style="margin-top:8px"></div>';
+    $('uqResult').appendChild(row);
+  }
+  return row;
+}
+function uqSelector(row, s){
+  const res=row.querySelector('.res');res.innerHTML='';
+  row.querySelector('.bar').style.display='none';
+  row.querySelector('.st').textContent='Выбери отрезок чужого баннера ползунком — вырежем, вставим свой и уникализируем';
+  const v=document.createElement('video');
+  v.controls=true;v.preload='metadata';v.style.width='100%';v.style.maxHeight='40vh';v.style.borderRadius='12px';v.src=s.src_url;
+  const lab=document.createElement('div');lab.className='dim';lab.style.marginTop='6px';lab.textContent='…';
+  const dw=document.createElement('div');dw.className='urange';
+  const tr=document.createElement('div');tr.className='utrack';
+  const fill=document.createElement('div');fill.className='ufill';
+  const r1=document.createElement('input');r1.type='range';r1.min='0';r1.step='0.5';r1.value='0';
+  const r2=document.createElement('input');r2.type='range';r2.min='0';r2.step='0.5';r2.value='0';
+  dw.appendChild(tr);dw.appendChild(fill);dw.appendChild(r1);dw.appendChild(r2);
+  let dur=+(s.src_dur||0);
+  const paint=()=>{
+    if(!dur){fill.style.display='none';lab.textContent='гружу длительность…';return;}
+    fill.style.display='';
+    let a=+r1.value, b=+r2.value;
+    if(a>b-0.5){if(document.activeElement===r1){a=b-0.5;}else{b=a+0.5;}}
+    if(a<0){a=0;b=Math.max(b,0.5);}
+    r1.value=a;r2.value=b;
+    fill.style.left=(a/dur*100)+'%';
+    fill.style.width=((b-a)/dur*100)+'%';
+    lab.textContent=a.toFixed(1)+' – '+b.toFixed(1)+' · '+fmtDur(b-a);
+  };
+  const syncMax=()=>{const d=dur||v.duration||0;r1.max=d;r2.max=d;if(!+r2.value&&d)r2.value=Math.min(d,4);paint();};
+  v.onloadedmetadata=()=>{if(!dur)dur=v.duration||0;syncMax();};
+  r1.oninput=()=>{v.currentTime=+r1.value;paint();};
+  r2.oninput=()=>{paint();};
+  syncMax();
+  const goRow=document.createElement('div');goRow.className='chatrow';goRow.style.marginTop='8px';
+  const goCut=document.createElement('button');goCut.textContent='Вырезать и вставить свой';goCut.className='btn';
+  const goAuto=document.createElement('button');goAuto.textContent='Дальше сам';goAuto.className='btn ghost';
+  goRow.appendChild(goCut);goRow.appendChild(goAuto);
+  const send=async cut=>{
+    goCut.disabled=true;goAuto.disabled=true;
+    try{
+      const body={src:s.src_url.split('/').pop()};
+      if(cut){body.s=+r1.value;body.e=+r2.value;}
+      const r=await fetch('/api/uniq-finish',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+      const j=await r.json();
+      if(!j.ok)throw new Error(j.error||'Не вышло');
+      uqLive.add(j.id);
+      if(uqPoll)clearInterval(uqPoll);
+      uqPoll=setInterval(uqTick,2000);
+      toast('Погнали','ok');
+    }catch(e){toast(e.message,'err');goCut.disabled=false;goAuto.disabled=false;}
+  };
+  goCut.onclick=()=>{
+    if(+r2.value-+r1.value<0.5){toast('Отрезок короче 0.5с — растяни ползунок','err');return;}
+    send(true);
+  };
+  goAuto.onclick=()=>send(false);
+  res.appendChild(v);res.appendChild(lab);res.appendChild(dw);res.appendChild(goRow);
+}
+async function uqTick(){
+  if(!uqLive.size){if(uqPoll){clearInterval(uqPoll);uqPoll=null;}return;}
+  for(const id of [...uqLive]){
+    try{
+      const s=await (await fetch('/api/uniq/'+id)).json();
+      const row=uqRow(id);
+      if(s.title)row.querySelector('.n').textContent=s.title;
+      row.querySelector('.bar i').style.width=(s.pct||0)+'%';
+      let st=(s.stage||s.status)+' · '+(s.pct||0)+'%';
+      if(s.status==='done'&&s.removed&&s.removed.length)st+=' · вырезано чужих вставок: '+s.removed.map(x=>x[0]+'-'+x[1]+'с').join(', ');
+      if(s.status==='done'&&s.covered&&s.covered.length)st+=' · накрыто: '+s.covered.map(x=>x.s+'-'+x.e+'с').join(', ');
+      row.querySelector('.st').textContent=st;
+      if(s.status==='ready'){
+        uqLive.delete(id);
+        uqSelector(row, s);
+        continue;
+      }
+      if(s.status==='done'||s.status==='error'){
+        uqLive.delete(id);
+        if(s.status!=='done'){toast('Ошибка: '+(s.error||''),'err');continue;}
+        const res=row.querySelector('.res');res.innerHTML='';
+        const v=document.createElement('video');
+        v.controls=true;v.style.width='100%';v.style.maxHeight='40vh';v.style.borderRadius='12px';v.src=s.url;
+        const a=document.createElement('a');a.textContent='Скачать MP4';a.href=s.url;a.setAttribute('download','');a.className='btn';a.style.marginTop='8px';a.style.display='inline-block';
+        res.appendChild(v);res.appendChild(a);
+        loadUniq();
+      }
+    }catch(e){}
+  }
+  if(!uqLive.size){loadUniq();toast('Готово','ok');}
+}
+$('uqGo').onclick=async ()=>{
+  const urls=$('uqUrls').value.split('\n').map(s=>s.trim()).filter(Boolean).slice(0,5);
+  if(!urls.length){toast('Вставь ссылку на TikTok','err');return;}
+  try{
+    const r=await fetch('/api/uniq-link',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({urls,banner_file:$('uqBanFile').value})});
+    const j=await r.json();
+    if(!j.ok)throw new Error(j.error||'Не вышло');
+    for(const dlid of (j.jobs||[]))uqLive.add(dlid);
+    if(uqPoll)clearInterval(uqPoll);
+    uqPoll=setInterval(uqTick,2000);
+    uqTick();
+  }catch(e){toast(e.message,'err');}
+};
+async function loadBanners(){
+  try{
+    const j=await (await fetch('/api/banners')).json();
+    for(const id of ['banFile','twBanFile','uqBanFile']){
+      const sel=$(id);
+      if(!sel)continue;
+      const cur=sel.value;
+      sel.innerHTML='<option value="">По умолчанию</option>'+(j.banners||[]).map(b=>'<option value="'+esc(b.id)+'">'+esc(b.name)+' · '+Math.round(b.dur||0)+'с</option>').join('');
+      if([...sel.options].some(o=>o.value===cur))sel.value=cur;
+    }
+    ['banFile','twBanFile','uqBanFile'].forEach(makeCustom);
+    refreshCustom();
+  }catch(e){}
+}
+async function loadUniq(){
+  try{
+    const j=await (await fetch('/api/uniq-lib')).json();
+    const g=$('uqLib');g.innerHTML='';
+    const items=j.files||[];
+    if(!items.length){g.innerHTML='<div class="empty">Пока пусто</div>';return;}
+    items.forEach(f=>{
+      const d=document.createElement('div');d.className='fcard';
+      const inn=document.createElement('div');inn.className='in';
+      const nm=document.createElement('div');nm.className='n';nm.textContent=f.name;
+      const z=document.createElement('div');z.className='z';z.textContent=fmtSize(f.size)+' · '+ago(f.mtime);
+      const row=document.createElement('div');row.className='row';
+      const a=document.createElement('a');a.textContent='MP4';a.href=f.url;a.setAttribute('download','');
+      const del=document.createElement('button');del.textContent='Удалить';
+      del.onclick=async ev=>{ev.stopPropagation();
+        if(!confirm('Удалить файл?'))return;
+        await fetch('/api/uniq/'+encodeURIComponent(f.name),{method:'DELETE'});
+        loadUniq();toast('Удалено')};
+      row.appendChild(a);row.appendChild(del);
+      inn.appendChild(nm);inn.appendChild(z);inn.appendChild(row);
+      d.appendChild(inn);g.appendChild(d);
+    });
+  }catch(e){}
+}
+
 async function loadLearn(){
   try{
     const j=await (await fetch('/api/learn')).json();
-    $('learnBox').textContent='Меток: '+j.labeled+' (хороших: '+j.pos+', брак: '+j.neg+', референсов: '+(j.refs||0)+') · '+(j.trained?'ранкер ОБУЧЕН и работает':'для обучения нужно 10+ с просмотрами и 3+ удалённых');
+    $('learnBox').textContent='Меток: '+j.labeled+' (хороших: '+j.pos+', брак: '+j.neg+', референсов: '+(j.refs||0)+') · '+(j.trained?('ранкер ОБУЧЕН, точность '+(j.acc||'?')+' · работает'):'отбор — чистый DREX · для обучения нужно 6+ с просмотрами и 2+ удалённых');
   }catch(e){}
 }
 $('learnGo').onclick=async ()=>{
@@ -928,7 +1210,7 @@ async function loadSettings(){
     SETTINGS={...SETTINGS,...j.settings};
     $('sDrex').value=SETTINGS.drex_key||'';
     $('sWant').value=String(SETTINGS.want||8);
-    $('sLens').value=SETTINGS.lens||'40-60';
+    $('sLens').value=SETTINGS.lens||'40-59';
     $('sLimit').value=String(SETTINGS.limit_min ?? 0);
     $('sVmode').value=SETTINGS.vmode||'split';
     $('sAsd').value=SETTINGS.asr_model||'base';
@@ -958,9 +1240,10 @@ $('sClean').onclick=async ()=>{
 };
 function applyDefaults(){
   if($('key')&&!$('key').value&&SETTINGS.drex_key)$('key').value=SETTINGS.drex_key;
+  if($('twKey')&&!$('twKey').value&&SETTINGS.drex_key)$('twKey').value=SETTINGS.drex_key;
   $('want').value=String(SETTINGS.want||8);
-  const lens=SETTINGS.lens||'40-60';
-  $('lens').value=['15-30','40-60','40-75','80-118'].includes(lens)?lens:'40-60';
+  const lens=SETTINGS.lens||'40-59';
+  $('lens').value=['15-30','40-59','40-75','80-118'].includes(lens)?lens:'40-59';
   $('limit').value=String(SETTINGS.limit_min ?? 0);
   $('mode').value=SETTINGS.vmode||'split';
   $('asd').value=SETTINGS.asr_model||'base';
@@ -975,12 +1258,14 @@ function applyDefaults(){
 /* ---------- init ---------- */
 (async function init(){
   if(localStorage.getItem('cs_drex'))$('key').value=localStorage.getItem('cs_drex');
-  $('key').addEventListener('change',()=>localStorage.setItem('cs_drex',$('key').value.trim()));
+  watchKeys();
   try{
     const j=await (await fetch('/api/settings')).json();
     SETTINGS={...SETTINGS,...j.settings};
     if(!localStorage.getItem('cs_drex')&&SETTINGS.drex_key)$('key').value=SETTINGS.drex_key;
+    fillKeys();
     applyDefaults();
+    $('mode').dispatchEvent(new Event('change'));
   }catch(e){}
   loadDash();
 })();
