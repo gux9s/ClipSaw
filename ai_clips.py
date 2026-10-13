@@ -3714,7 +3714,8 @@ def uniqualize_video(src: str, out: str, opts: dict | None = None,
     """Уникализатор: делает копию видео с другим хешем и отпечатком.
     Дефолтный вызов из цепочки (скачал чужое -> баннер -> сюда) идёт
     ЖЁСТКИМ пресетом: скорость 4-6.5%, зум 4-7%, Ken Burns-проезд камеры,
-    питч 2-4.5%, зерно, виньетка, подрезка краёв. Глаз смотрит спокойно,
+    питч 2-4.5%, зерно, виньетка, подрезка краёв, хук-титр (opts["hook"])
+    первые 2.5с + прогресс-бар. Глаз смотрит спокойно,
     а robust-хеш оригинала (переживает ресайз/реколор/зерно) — не сходится.
     Явные настройки из формы уважаются как есть (без Ken Burns)."""
     import random
@@ -3773,12 +3774,14 @@ def uniqualize_video(src: str, out: str, opts: dict | None = None,
     if abs(speed - 1.0) > 1e-4:
         vf.append(f"setpts={1.0 / speed:.4f}*PTS")  # видео догоняет звук
     z = 1.0 + zoom_pct / 100.0
+    _dout = None
+    if _auto:
+        _dout = max((te - th) / max(speed, 1e-3), 1.0) if th > 0 \
+            else max(_dur / max(speed, 1e-3), 1.0)
     if z > 1.0001 and _w > 0 and _h > 0:
         if _auto:
             # Ken Burns: медленный проезд камеры за время ролика — у каждого
             # файла своя траектория, композиция плывёт и robust-хеш не сходится
-            _dout = max((te - th) / max(speed, 1e-3), 1.0) if th > 0 \
-                else max(_dur / max(speed, 1e-3), 1.0)
             _sx0, _sy0 = random.random(), random.random()
             _sx1, _sy1 = random.random(), random.random()
             if abs(_sx1 - _sx0) < 0.25:
@@ -3807,6 +3810,24 @@ def uniqualize_video(src: str, out: str, opts: dict | None = None,
            else (f",noise=alls={random.randint(cc[8], cc[9])}:allf=t" if grain else "")))
     if _auto:
         vf.append("vignette=PI/5")  # лёгкое затемнение углов: глаз ок, хешам больно
+        # прогресс-бар снизу: новые пиксели каждый кадр + нативный вид ленты
+        _bar_col = random.choice(["FFD60A", "3DDC97", "FF6B6B", "4DABF7"])
+        vf.append(f"drawbox=x=0:y=ih-10:w='iw*t/{_dout:.2f}':h=10:"
+                  f"color=0x{_bar_col}:t=fill")
+        # хук-титр первые 2.5с: открытие — самое взвешенное место отпечатка,
+        # у нас там свой текст вместо чужого кадра
+        _hook = re.sub(r"\s+", " ", str(opts.get("hook") or "")).strip()[:60]
+        if _hook and _dout and _dout > 6:
+            _ff = "/System/Library/Fonts/Supplemental/Arial Bold.ttf"
+            if not os.path.exists(_ff):
+                _ff = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+            _tx = _hook.replace("\\", "/").replace(":", "\\:").replace(
+                "'", "\\'").replace(",", "\\,")
+            vf.append("drawbox=x=0:y=0:w=iw:h=ih:color=black@0.25:t=fill:"
+                      "enable='between(t,0,2.5)'")
+            vf.append(f"drawtext=fontfile={_ff}:text='{_tx}':fontsize=64:"
+                      f"fontcolor=white:borderw=2:bordercolor=black:"
+                      f"x=(w-text_w)/2:y=120:enable='between(t,0,2.5)'")
     vf.append("scale=trunc(iw/2)*2:trunc(ih/2)*2")
     af = []
     if th > 0:
