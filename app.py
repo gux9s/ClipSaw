@@ -1441,8 +1441,6 @@ def _finish_worker(jid: str, path: str, base: str, cut, banner_path=None,
         if mirror:
             opts["mirror"] = True
         opts["caps"] = caps
-        # хук-титр для первых секунд: берём из имени (там заголовок видоса)
-        opts["hook"] = base
         ac.uniqualize_video(swapped, out, opts,
                             progress=lambda p, s="уникализация…": prog(min(50 + int(p * 0.5), 100), s))
         try:
