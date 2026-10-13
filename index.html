@@ -456,6 +456,8 @@
     <!-- HISTORY -->
     <!-- UNIQ -->
     <section class="view" id="v-uniq">
+      <div class="chips" id="uqTabs"><button data-t="link" class="on">Ссылка + баннер</button><button data-t="cs2">КС2 «но я...»</button></div>
+      <div id="uqPaneLink">
       <div class="card">
         <div class="step"><b>01</b><span>Ссылки</span></div>
         <label class="lbl" for="uqUrls">Ссылки на TikTok — по одной на строку, до 5</label>
@@ -466,6 +468,24 @@
         <button class="btn" id="uqGo">Скачать, заменить баннер и уникализировать</button>
         <div class="dim" style="margin-top:8px">Качает в максимальном качестве и чистит тишину → выбираешь отрезок чужого баннера ползунком под видео → вырезаем, ставим Мусордроп, уникализируем.</div>
         <div id="uqResult" style="margin-top:10px"></div>
+      </div>
+      </div>
+      <div id="uqPaneCs2" style="display:none">
+      <div class="card">
+        <div class="step"><b>01</b><span>Видео и заголовок</span></div>
+        <label class="lbl" for="cs2File">Видео с чёрными полосами (обычно 9:16 с контентом 1:1)</label>
+        <input id="cs2File" type="file" accept="video/*" style="padding:10px 12px">
+        <label class="lbl" for="cs2Title">Заголовок в белую пилюлю</label>
+        <input id="cs2Title" type="text" placeholder="КС 2, но я MiyaGi" autocomplete="off" maxlength="120">
+        <div class="dim" style="margin-top:6px">Чёрные полосы сверху/снизу заменим блюром как у кинонарезок, а заголовок положим пилюлей поверх верхнего блюра. Эмодзи рисуются ч/б — цветные лучше дописать в TikTok при заливке.</div>
+        <div class="ai-grid">
+          <div><label class="lbl" for="cs2Color">Цветокор</label>
+            <select id="cs2Color"><option value="light">Лёгкий</option><option value="medium" selected>Средний</option><option value="strong">Сильный</option></select></div>
+        </div>
+        <label class="chk"><input type="checkbox" id="cs2Mir"> Зеркало (отразить видео)</label>
+        <div style="margin-top:14px"><button class="btn" id="cs2Go">Рестайл + уникализация</button></div>
+        <div id="cs2Result" style="margin-top:10px"></div>
+      </div>
       </div>
       <h2>Готовые</h2>
       <div id="uqLib"><div class="empty">Пока пусто</div></div>
@@ -1023,12 +1043,13 @@ $('refBulkGo').onclick=async ()=>{
 };
 const uqLive=new Set();
 let uqPoll=null;
-function uqRow(id){
+function uqRow(id, box){
+  box=box||'uqResult';
   let row=document.getElementById('uqrow-'+id);
   if(!row){
     row=document.createElement('div');row.id='uqrow-'+id;row.className='card';row.style.marginTop='8px';
     row.innerHTML='<div class="n" style="font-weight:600">Обработка</div><div class="bar live" style="margin-top:8px"><i style="width:0%"></i></div><div class="dim st" style="margin-top:6px"></div><div class="res" style="margin-top:8px"></div>';
-    $('uqResult').appendChild(row);
+    $(box).appendChild(row);
   }
   return row;
 }
@@ -1130,6 +1151,35 @@ $('uqGo').onclick=async ()=>{
     uqPoll=setInterval(uqTick,2000);
     uqTick();
   }catch(e){toast(e.message,'err');}
+};
+document.querySelectorAll('#uqTabs button').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('#uqTabs button').forEach(x=>x.classList.toggle('on',x===b));
+  $('uqPaneLink').style.display=b.dataset.t==='link'?'':'none';
+  $('uqPaneCs2').style.display=b.dataset.t==='cs2'?'':'none';
+});
+$('cs2Go').onclick=async ()=>{
+  const fl=$('cs2File').files;
+  if(!fl||!fl.length){toast('Приложи видеофайл','err');return;}
+  const title=$('cs2Title').value.trim();
+  if(!title){toast('Впиши заголовок для пилюли','err');return;}
+  const fd=new FormData();
+  fd.append('file',fl[0]);
+  fd.append('title',title);
+  fd.append('mirror',$('cs2Mir').checked?'1':'0');
+  fd.append('color',$('cs2Color').value);
+  $('cs2Go').disabled=true;
+  try{
+    const r=await fetch('/api/cs2',{method:'POST',body:fd});
+    const j=await r.json();
+    if(!j.ok)throw new Error(j.error||'Не вышло');
+    uqRow(j.id,'cs2Result');
+    uqLive.add(j.id);
+    if(uqPoll)clearInterval(uqPoll);
+    uqPoll=setInterval(uqTick,2000);
+    uqTick();
+    toast('Погнали','ok');
+  }catch(e){toast(e.message,'err');}
+  $('cs2Go').disabled=false;
 };
 async function loadBanners(){
   try{

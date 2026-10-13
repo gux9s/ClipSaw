@@ -1591,6 +1591,81 @@ def api_uniq():
     return jsonify({"ok": True, "id": jid})
 
 
+def _cs2_worker(jid: str, path: str, title: str, opts: dict):
+    """Рестайл «КС 2, но я...»: чёрные полосы -> блюр, пилюля, уникализация."""
+
+    def prog(pct, stage="рестайл…"):
+        st = UNIQ_JOBS.get(jid)
+        if st is not None:
+            st.update(pct=int(pct), stage=stage)
+
+    try:
+        base = UNIQ_JOBS.get(jid, {}).get("base", "video")
+        out = os.path.join(UNIQ_OUT, f"{jid}_{base}_cs2.mp4")
+        info = ac.restyle_cs2(
+            path, out, title,
+            mirror=bool(opts.get("mirror", False)),
+            color=str(opts.get("color", "medium")),
+            progress=lambda p, s="рестайл…": prog(int(p * 100), s))
+        st = UNIQ_JOBS.get(jid)
+        if st is not None:
+            box = info.get("box") or [0, 0]
+            bar = "полосы вырезаны" if box[0] > 2 else "полос не было — весь кадр контент"
+            st.update(status="done", pct=100, stage="готово",
+                      url="/dluniq/" + os.path.basename(out),
+                      size=os.path.getsize(out),
+                      removed=[f"верх {box[0]}пх", f"низ {box[1]}пх", bar])
+    except Exception as e:
+        st = UNIQ_JOBS.get(jid)
+        if st is not None:
+            st.update(status="error", error=str(e)[:300])
+    finally:
+        try:
+            if path and os.path.exists(path):
+                os.remove(path)
+        except OSError:
+            pass
+
+
+@app.post("/api/cs2")
+def api_cs2():
+    """Загрузка видео + заголовок пилюли -> рестайл «КС 2, но я...»."""
+    import re
+    f = request.files.get("file")
+    if f is None or not (f.filename or ""):
+        return jsonify({"ok": False, "error": "Приложи видеофайл"}), 400
+    name = re.sub(r"[^\w\-. ]+", "", (f.filename or "").strip())[:60] or "video.mp4"
+    if "." not in name or name.rsplit(".", 1)[1].lower() not in (
+            "mp4", "mov", "mkv", "webm", "m4v"):
+        return jsonify({"ok": False, "error": "Нужно видео: mp4/mov/mkv/webm"}), 400
+    form = request.form or {}
+    title = re.sub(r"\s+", " ", (form.get("title") or "")).strip()[:120]
+    if not title:
+        return jsonify({"ok": False, "error": "Впиши заголовок для пилюли"}), 400
+    jid = uuid.uuid4().hex[:8]
+    path = os.path.join(UNIQ_IN, f"{jid}_{name}")
+    try:
+        f.save(path)
+    except Exception:
+        return jsonify({"ok": False, "error": "Не сохранилось"}), 400
+    try:
+        if os.path.getsize(path) > 800 * 1024 * 1024:
+            os.remove(path)
+            return jsonify({"ok": False, "error": "Файл больше 800 МБ"}), 400
+    except OSError:
+        pass
+    opts = {"mirror": form.get("mirror") == "1",
+            "color": form.get("color", "medium") if form.get("color") in (
+                "light", "medium", "strong") else "medium"}
+    base = (name.rsplit(".", 1)[0] or "video")[:40]
+    UNIQ_JOBS[jid] = {"id": jid, "base": base, "kind": "cs2",
+                      "status": "work", "pct": 0, "stage": "старт…",
+                      "started": time.time(), "title": title}
+    threading.Thread(target=_cs2_worker,
+                     args=(jid, path, title, opts), daemon=True).start()
+    return jsonify({"ok": True, "id": jid})
+
+
 @app.get("/api/uniq/<jid>")
 def api_uniq_status(jid):
     st = UNIQ_JOBS.get(jid)

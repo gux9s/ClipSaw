@@ -3816,6 +3816,271 @@ def uniqualize_video(src: str, out: str, opts: dict | None = None,
     return out
 
 
+def _emoji_font(size: int):
+    """Apple Color Emoji — sbix-битмап, рабочих размеров всего несколько:
+    берём запрошенный либо ближайший доступный (иначе tofu-квадраты)."""
+    from PIL import ImageFont
+    p = "/System/Library/Fonts/Apple Color Emoji.ttc"
+    if not os.path.exists(p):
+        return None
+    for s in dict.fromkeys((size, 64, 96, 48, 128, 32, 160, 40, 80)):
+        try:
+            return ImageFont.truetype(p, s)
+        except Exception:
+            continue
+    return None
+
+
+_EMOJI_RE = re.compile(
+    "([\U0001F1E6-\U0001F1FF\U0001F300-\U0001FAFF"
+    "\u2600-\u27BF\u2B00-\u2BFF\uFE0F])")
+
+
+def _pill_rgba(text: str, max_w: int = 980):
+    """Белая пилюля с заголовком как у КС-мемов: белый стадион, чёрный болд.
+    Эмодзи дорисовываются шрифтом Apple Color Emoji (ч/б, но узнаваемо) —
+    иначе были бы tofu-квадраты. Возвращает PIL RGBA либо None."""
+    from PIL import Image, ImageDraw
+    t = re.sub(r"\s+", " ", (text or "")).strip()
+    if not t:
+        return None
+    base = _font(72)
+    emo = _emoji_font(72)
+    parts = _EMOJI_RE.split(t)
+    runs = [(p, True) if _EMOJI_RE.fullmatch(p) else (p, False)
+            for p in parts if p]
+    if emo is None:
+        runs = [(p, False) for p, e in runs if not e]
+        if not runs:
+            return None
+    size = 72
+    while size > 44:
+        b = _font(size)
+        e = _emoji_font(int(size * 1.05)) if emo else None
+        tmp = Image.new("RGB", (8, 8))
+        dr = ImageDraw.Draw(tmp)
+        w = sum(dr.textlength(p, font=(e if is_emo and e else b))
+                for p, is_emo in runs)
+        if w <= max_w:
+            break
+        size -= 4
+    else:
+        b = _font(44)
+        e = _emoji_font(46) if emo else None
+    pad_x, pad_y = 46, 26
+    tmp = Image.new("RGB", (8, 8))
+    dr = ImageDraw.Draw(tmp)
+    widths = [dr.textlength(p, font=(e if is_emo and e else b))
+              for p, is_emo in runs]
+    total = sum(widths)
+    bb = dr.textbbox((0, 0), "КСу", font=b)
+    th = bb[3] - bb[1]
+    pw, ph = int(total + pad_x * 2), int(th + pad_y * 2)
+    pill = Image.new("RGBA", (pw, ph), (0, 0, 0, 0))
+    dr = ImageDraw.Draw(pill)
+    dr.rounded_rectangle([0, 0, pw - 1, ph - 1], radius=ph // 2,
+                         fill=(255, 255, 255, 255))
+    x = float(pad_x)
+    cy = ph / 2
+    for (p, is_emo), wdt in zip(runs, widths):
+        f = (e if is_emo and e else b)
+        dr.text((x, cy), p, font=f, fill=(0, 0, 0, 255), anchor="lm")
+        x += wdt
+    return pill
+
+
+def _detect_bars(path: str):
+    """Ищет чёрные полосы сверху/снизу (мемы 1:1 в ленте 9:16).
+    Смотрит КРАЯ строк (по 15% слева/справа): титр в пилюле по центру
+    не мешает. Возвращает (y0, y1) контента в пикселях либо None."""
+    import cv2
+    import numpy as np
+    W, H, N, FPS = _probe_wh_fps(path)
+    if W <= 0 or H <= 0 or N <= 0:
+        return None
+    dur = N / max(FPS, 1)
+    PROBE_W = 120
+    acc, cnt, ph = None, 0, 0
+    for f in (0.08, 0.2, 0.35, 0.5, 0.65, 0.8, 0.92):
+        r = subprocess.run(
+            [FFMPEG, "-y", "-v", "error", "-ss", f"{dur * f:.2f}",
+             "-i", path, "-frames:v", "1",
+             "-vf", f"scale={PROBE_W}:-2,format=gray",
+             "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+            capture_output=True, timeout=60)
+        if not r.stdout:
+            continue
+        h = len(r.stdout) // PROBE_W
+        if h <= 0:
+            continue
+        g = np.frombuffer(r.stdout[:h * PROBE_W],
+                          dtype=np.uint8).reshape(h, PROBE_W)
+        # края по 5%: широкая пилюля титра (до 90% ширины) не мешает
+        e = max(PROBE_W * 5 // 100, 4)
+        edge = np.concatenate([g[:, :e], g[:, -e:]], axis=1).mean(axis=1)
+        black = edge < 12.0
+        if acc is None:
+            acc = np.zeros(h, dtype=float)
+            ph = h
+        if len(black) != ph:
+            continue
+        acc += black.astype(float)
+        cnt += 1
+    if cnt == 0:
+        return None
+    rows = acc / cnt >= 0.7
+    inside = np.where(~rows)[0]
+    if len(inside) == 0:
+        return None
+    y0 = int(inside[0] / ph * H)
+    y1 = int((inside[-1] + 1) / ph * H)
+    y0, y1 = max(y0, 0), min(y1, H)
+    if y0 < H * 0.02 and y1 > H * 0.98:
+        return None  # полос нет — весь кадр контент
+    if (y1 - y0) < H * 0.3 or (y1 - y0) > H * 0.97:
+        return None
+    return (y0, y1)
+
+
+def restyle_cs2(src: str, out: str, title: str = "",
+                mirror: bool = False, color: str = "medium",
+                progress=None) -> dict:
+    """Рестайл «КС 2, но я...»: чёрные полосы сверху/снизу выкидываются,
+    вместо них — блюр-фон как у кинонарезок, заголовок — белой пилюлей
+    поверх верхнего блюра. Плюс лёгкая уникализация (зум/цвет/зерно/питч)
+    и тикток-совместимый выхлоп 1080x1920/30fps/48кГц. Скорость не трогаем —
+    тайминги оригинала сохраняются."""
+    import cv2
+    import random
+    from PIL import Image
+    import numpy as np
+    t = re.sub(r"\s+", " ", (title or "")).strip()
+    if not t:
+        raise RuntimeError("Впиши заголовок для пилюли")
+    W, H, N, FPS = _probe_wh_fps(src)
+    if W <= 0 or H <= 0 or N <= 0 or FPS <= 0:
+        raise RuntimeError("не читается видео")
+    fps = round(min(float(FPS), 30), 2)
+    dur = N / max(float(FPS), 1)
+    box = _detect_bars(src) or (0, H)
+    by0, by1 = box
+    # запас от квантования детекта: иначе по краям контента остаются
+    # тонкие чёрные кромки от полос
+    _m = int(H * 0.01)
+    by0, by1 = by0 + _m, by1 - _m
+    if by1 - by0 < H * 0.3:
+        by0, by1 = box
+    cw, ch = W, max(by1 - by0, 1)
+    Z = random.uniform(1.01, 1.03)
+    jx = random.uniform(-0.015, 0.015)
+    jy = random.uniform(-0.015, 0.015)
+    if 1080 * ch / max(cw, 1) <= 1920:
+        cw_out, ch_out = 1080, int(round(1080 * ch / max(cw, 1)))
+    else:
+        ch_out, cw_out = 1920, int(round(1920 * cw / max(ch, 1)))
+    x0, y0 = (1080 - cw_out) // 2, (1920 - ch_out) // 2
+    pill = _pill_rgba(t)
+    pill_np, pill_xy = None, (0, 90)
+    if pill is not None:
+        pw, ph = pill.size
+        pw = min(pw, 1000)
+        if pw != pill.size[0]:
+            pill = pill.resize((pw, int(round(pill.size[1] * pw / pill.size[0]))),
+                               Image.LANCZOS)
+        pw, ph = pill.size
+        top_space = y0
+        py = (top_space - ph) // 2 if top_space > ph + 60 else 80
+        pill_np = np.asarray(pill)
+        pill_xy = ((1080 - pw) // 2, max(py, 20))
+    if color == "light":
+        cc = (1.02, 1.04, 1.05, 1.09, 0.004, 0.010, -2, 2, 2, 3)
+    elif color == "strong":
+        cc = (1.07, 1.12, 1.14, 1.20, 0.012, 0.025, -7, 7, 4, 7)
+    else:
+        cc = (1.04, 1.08, 1.09, 1.15, 0.008, 0.018, -4, 4, 2, 5)
+    eq = (f"eq=contrast={random.uniform(cc[0], cc[1]):.3f}:"
+          f"saturation={random.uniform(cc[2], cc[3]):.3f}:"
+          f"brightness={random.uniform(cc[4], cc[5]):.3f},"
+          f"hue=h={random.uniform(cc[6], cc[7]):.1f},"
+          f"noise=alls={random.randint(cc[8], cc[9])}:allf=t")
+    _ck = random.uniform(1.005, 1.012)
+    af = _tiktok_af(
+        f"aresample=44100,asetrate=44100*{_ck:.4f},"
+        f"aresample=44100,atempo={1 / _ck:.4f}",
+        _LOUDNORM, f"volume={random.uniform(0.95, 1.05):.3f}")
+    cmd = [FFMPEG, "-y", "-v", "error",
+           "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "1080x1920",
+           "-r", str(fps), "-i", "pipe:0",
+           "-t", str(round(dur, 2)), "-i", src,
+           "-map", "0:v", "-map", "1:a?"] + _rand_meta()
+    cmd += ["-vf", _quality_vf() + "," + eq, "-af", af]
+    cmd += _video_codec_args() + ["-pix_fmt", "yuv420p",
+            *_AUDIO_OUT, "-movflags", "+faststart",
+            "-t", str(round(dur, 2)), out]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+    cap = cv2.VideoCapture(src)
+    total = max(int(round(dur * fps)), 1)
+    last = None
+    try:
+        for k in range(total):
+            ok, fr = cap.read()
+            if not ok:
+                if last is None:
+                    break
+                fr = last
+            else:
+                if mirror:
+                    fr = cv2.flip(fr, 1)
+                fr = cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)
+            last = fr
+            h, w = fr.shape[:2]
+            # фон: блюр-копия всего кадра на 1080x1920, затемнён
+            small = cv2.resize(fr, (135, 240), interpolation=cv2.INTER_AREA)
+            small = cv2.GaussianBlur(small, (0, 0), 8)
+            bg = cv2.resize(small, (1080, 1920), interpolation=cv2.INTER_LINEAR)
+            bg = cv2.convertScaleAbs(bg, alpha=0.6)
+            # контент: кроп бокса с лёгким наездом, fit по ширине
+            kx = (Z - 1.0) / 2
+            inset_x = int(round(cw * kx + jx * cw))
+            inset_y = int(round(ch * kx + jy * ch))
+            inset_x = min(max(inset_x, 0), max(cw // 2 - 1, 0))
+            inset_y = min(max(inset_y, 0), max(ch // 2 - 1, 0))
+            scl = h / max(H, 1)
+            sy0 = int(round(by0 * scl)) + inset_y
+            sy1 = int(round(by1 * scl)) - inset_y
+            sx0 = inset_x
+            sx1 = w - inset_x
+            if sy1 - sy0 < 10 or sx1 - sx0 < 10:
+                sy0, sy1, sx0, sx1 = int(round(by0 * scl)), int(round(by1 * scl)), 0, w
+            crop = fr[sy0:sy1, sx0:sx1]
+            fg = cv2.resize(crop, (cw_out, ch_out),
+                            interpolation=cv2.INTER_LANCZOS4)
+            frame = bg
+            frame[y0:y0 + ch_out, x0:x0 + cw_out] = fg
+            if pill_np is not None:
+                ph, pw = pill_np.shape[:2]
+                px, py = pill_xy
+                a = (pill_np[:, :, 3:4].astype(np.float32) / 255.0)
+                rgb = pill_np[:, :, :3].astype(np.float32)
+                roi = frame[py:py + ph, px:px + pw].astype(np.float32)
+                frame[py:py + ph, px:px + pw] = np.clip(
+                    roi * (1 - a) + rgb * a, 0, 255).astype(np.uint8)
+            proc.stdin.write(frame.tobytes())
+            if progress and k % 30 == 0:
+                progress(k / total)
+    finally:
+        cap.release()
+        try:
+            proc.stdin.close()
+        except Exception:
+            pass
+        proc.wait(timeout=900)
+    if proc.returncode != 0 or not _has_video(out):
+        raise RuntimeError("рестайл не удался")
+    return {"box": [by0, by1], "dur": round(dur, 1),
+            "size": os.path.getsize(out)}
+
+
 def compute_parts(segs, min_len: float = 45.0, max_len: float = 59.0):
     """Режет ВСЁ видео на последовательные части 45–59с по границам слов.
     Возвращает [{start, end}] без пропусков и наложений."""
