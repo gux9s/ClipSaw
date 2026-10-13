@@ -129,13 +129,20 @@ def _has_videotoolbox() -> bool:
 _VT = _has_videotoolbox()
 
 
-def _video_codec_args() -> list:
+def _video_codec_args(hq: bool = False) -> list:
     """Железо (VideoToolbox) даёт скорость: клип 50с кодируется ~1 мин.
     Битрейт держим TikTok-дружелюбным 6-8 Мбит VBR: файл 50с весит
     ~35-50 МБ вместо 90-110, быстрее грузится и не застревает
     в транскодинге TikTok (одна из причин вечных 0 просмотров).
-    Джиттер битрейта + случайный GOP — плюс к уникальности отпечатков."""
+    Джиттер битрейта + случайный GOP — плюс к уникальности отпечатков.
+    hq=True: софтверный x264 slow CRF21 — максимум резкости на бит
+    (для цепочки уникализатора, где качество решает жалобу
+    'низкое качество'); медленнее, но идёт в фоне."""
     import random as _r
+    if hq:
+        return ["-c:v", "libx264", "-pix_fmt", "yuv420p",
+                "-preset", "slow", "-crf", "21", "-tune", "film",
+                "-g", str(_r.randint(48, 72))]
     if _VT:
         br = _r.randint(6, 8)
         return ["-c:v", "h264_videotoolbox", "-pix_fmt", "yuv420p",
@@ -2444,6 +2451,67 @@ def _ass_captions(segs, start: float, spd: float, wins, b_eff: float,
     return True
 
 
+def _uniq_ass(segs, path: str) -> bool:
+    """Караоке-субтитры для цепочки уникализатора: низ по центру,
+    белый -> жёлтый активный. segs уже на выходной шкале времени.
+    Возвращает True если есть хоть реплика (иначе жечь нечего)."""
+    def _ts(t: float) -> str:
+        t = max(t, 0.0)
+        return f"{int(t // 3600)}:{int((t % 3600) // 60):02d}:{t % 60:05.2f}"
+    head = ["[Script Info]",
+            "ScriptType: v4.00+",
+            "PlayResX: 1080",
+            "PlayResY: 1920",
+            "ScaledBorderAndShadow: yes",
+            "[V4+ Styles]",
+            "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+            "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
+            "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+            "Alignment, MarginL, MarginR, MarginV, Encoding",
+            "Style: Hook,Arial,64,&H00FFFFFF,&H000AD6FF,&H80000000,&H80000000,"
+            "-1,0,0,0,100,100,0,0,1,3,1,5,40,40,40,1",
+            "[Events]",
+            "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, "
+            "Effect, Text"]
+    body, dlgs = [], []
+    for s in segs:
+        ws = [w for w in (s.get("words") or []) if w.get("w")]
+        if len(ws) < 2:
+            continue
+        chunks, cur = [], []
+        for w in ws:
+            cur.append(w)
+            if len(cur) >= 5 or re.search(r"[.!?…]$", str(w.get("w", ""))):
+                chunks.append(cur)
+                cur = []
+        if cur:
+            chunks.append(cur)
+        for ch in chunks:
+            cs0 = float(ch[0]["s"])
+            ce0 = float(ch[-1]["e"]) + 0.3
+            if ce0 - cs0 < 0.3:
+                continue
+            txt = "".join("{\\k%d}%s " % (
+                max(1, int(round((float(w["e"]) - float(w["s"])) * 100))),
+                str(w["w"]).replace("{", "(").replace("}", ")")) for w in ch)
+            dlgs.append([cs0, ce0,
+                         f"{{\\an5\\pos(540,1450)}}{txt.strip()}"])
+    dlgs.sort(key=lambda d: d[0])
+    n_dlgs = 0
+    for i, (s0, e0, tx) in enumerate(dlgs):
+        if i + 1 < len(dlgs):
+            e0 = min(e0, dlgs[i + 1][0] - 0.01)
+        if e0 - s0 < 0.2:
+            continue
+        body.append(f"Dialogue: 0,{_ts(s0)},{_ts(e0)},Hook,,0,0,0,,{tx}")
+        n_dlgs += 1
+    if n_dlgs == 0:
+        return False
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(head) + "\n" + "\n".join(body) + "\n")
+    return True
+
+
 def _run_ffmpeg_progress(cmd, total_dur: float, progress=None) -> int:
     """Запуск ffmpeg с живым прогрессом по out_time_ms. Возвращает returncode."""
     import threading
@@ -3709,6 +3777,20 @@ def swap_banner(src: str, out: str, banner_path: str | None = None,
                          "dur": round(dur, 2)}}
 
 
+def _real_dur(path: str) -> float:
+    """Реальная длительность через ffmpeg (cv2 врёт на -c copy склейках:
+    N из заголовка не совпадает с пакетами — оценка _dout уезжала)."""
+    try:
+        r = subprocess.run([FFMPEG, "-i", path],
+                           capture_output=True, text=True, timeout=30)
+        m = re.search(r"Duration: (\d+):(\d+):([\d.]+)", r.stderr or "")
+        if m:
+            return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+    except Exception:
+        pass
+    return 0.0
+
+
 def uniqualize_video(src: str, out: str, opts: dict | None = None,
                      progress=None) -> str:
     """Уникализатор: делает копию видео с другим хешем и отпечатком.
@@ -3759,6 +3841,12 @@ def uniqualize_video(src: str, out: str, opts: dict | None = None,
         _tlo, _thi = (0.5, 1.2) if _auto else (0.3, 0.8)
         th = round(random.uniform(_tlo, _thi), 2)
         te = round(_dur - random.uniform(_tlo, _thi), 2)
+        _rd = _real_dur(src)
+        if _rd > 5:
+            # te за реальный конец (врёт cv2-проба) = обрезанное видео
+            # и уехавшие оценки; клампим
+            te = min(te, round(_rd - 0.05, 2))
+            _dur = min(_dur, _rd)
     # сила цветокора по пресету + лёгкий джиттер (каждый прогон уникален)
     if color == "light":
         cc = (1.02, 1.04, 1.05, 1.09, 0.004, 0.010, -2, 2, 2, 3)
@@ -3841,16 +3929,75 @@ def uniqualize_video(src: str, out: str, opts: dict | None = None,
     # лёгкий джиттер громкости после нормализации: у каждого файла свой уровень
     af.append(f"volume={random.uniform(0.95, 1.05):.3f}")
     af_str = _tiktok_af(*af)
+    # субтитры цепочки: жгём поверх (динамика текста = трансформативность).
+    # Тайминги сдвигаем на выходную шкалу (подрезка + скорость), иначе уплывут.
+    caps = bool(opts.get("caps", True))
+    asspath = out + ".uniq.ass"
+    ass_ok = False
+    if caps and _dur > 5:
+        try:
+            _cprog = (lambda p, s: progress(min(15, 5 + p * 0.3), "транскрибация…")) \
+                if progress else None
+            _segs, _lang = transcribe(src, 0, progress=_cprog,
+                                      model_name="base")
+            _adj = []
+            for _s in _segs:
+                _ws = []
+                for _w in (_s.get("words") or []):
+                    _a, _b = float(_w["s"]) - th, float(_w["e"]) - th
+                    if _b <= 0:
+                        continue
+                    _ws.append({"w": _w["w"], "s": max(_a / speed, 0.0),
+                                "e": max(_b / speed, 0.0)})
+                if len(_ws) < 2:
+                    continue
+                _a0 = max(float(_s["start"]) - th, 0.0) / speed
+                _a1 = max(float(_s["end"]) - th, 0.0) / speed
+                if _a1 - _a0 < 0.3:
+                    continue
+                _adj.append({"start": _a0, "end": _a1,
+                             "text": _s.get("text", ""), "words": _ws})
+            # петли галлюцинаций на музыке: дубли подряд выкидываем
+            _adj2, _prev = [], ""
+            for _s in _adj:
+                _tx = re.sub(r"\s+", " ", _s["text"]).strip().lower()
+                if _tx and _tx != _prev:
+                    _adj2.append(_s)
+                _prev = _tx or _prev
+            if sum(len(_s["words"]) for _s in _adj2) >= 8:
+                ass_ok = _uniq_ass(_adj2, asspath)
+        except Exception:
+            ass_ok = False
+    if ass_ok:
+        vf.append(f"subtitles={_fesc(asspath)}")
+    if _auto and (_dout or 0) > 8:
+        # CTA в хвост: ещё порция своих пикселей + драйвер подписок.
+        # Окно с запасом (D-3.5, D): оценка длительности грубая, зато
+        # CTA гарантированно виден минимум секунду даже при промахе оценки
+        _cff = "/System/Library/Fonts/Supplemental/Arial Bold.ttf"
+        if not os.path.exists(_cff):
+            _cff = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+        vf.append(f"drawtext=fontfile={_fesc(_cff)}:text='ПОДПИШИСЬ':"
+                  f"fontsize=62:fontcolor=#FFD60A:borderw=3:bordercolor=black:"
+                  f"x=(w-text_w)/2:y=160:"
+                  f"enable='between(t,{_dout - 3.5:.2f},{_dout:.2f})'")
     if progress:
         progress(5, "уникализация…")
-    subprocess.run(
-        [FFMPEG, "-y", "-v", "error", "-i", src,
-         "-vf", ",".join(vf),
-         "-af", af_str,
-         "-map", "0:v", "-map", "0:a?"] + _rand_meta()
-        + _video_codec_args()
-        + [*_AUDIO_OUT, "-movflags", "+faststart", out],
-        timeout=1800, check=True)
+    try:
+        subprocess.run(
+            [FFMPEG, "-y", "-v", "error", "-i", src,
+             "-vf", ",".join(vf),
+             "-af", af_str,
+             "-map", "0:v", "-map", "0:a?"] + _rand_meta()
+            + (_video_codec_args(hq=True) if _auto else _video_codec_args())
+            + [*_AUDIO_OUT, "-movflags", "+faststart", out],
+            timeout=1800, check=True)
+    finally:
+        try:
+            if os.path.exists(asspath):
+                os.remove(asspath)
+        except OSError:
+            pass
     if progress:
         progress(100, "готово")
     if not _has_video(out):

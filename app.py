@@ -1418,7 +1418,7 @@ def _link_worker(dlid: str, url: str):
 
 
 def _finish_worker(jid: str, path: str, base: str, cut, banner_path=None,
-                   mirror: bool = False):
+                   mirror: bool = False, caps: bool = True):
     """Шаг 2: вырезать выбранный отрезок (или авто), вставить свой баннер,
     уникализировать -> готовый файл."""
 
@@ -1440,6 +1440,7 @@ def _finish_worker(jid: str, path: str, base: str, cut, banner_path=None,
         opts = dict(UNIQ_OPTIMAL)
         if mirror:
             opts["mirror"] = True
+        opts["caps"] = caps
         # хук-титр для первых секунд: берём из имени (там заголовок видоса)
         opts["hook"] = base
         ac.uniqualize_video(swapped, out, opts,
@@ -1493,11 +1494,12 @@ def api_uniq_finish():
     parent = UNIQ_JOBS.get(src.split("_")[0]) or {}
     banner_path = parent.get("banner_path")
     mirror = bool(parent.get("mirror", False))
+    caps = bool(parent.get("caps", True))
     UNIQ_JOBS[jid] = {"id": jid, "base": base, "kind": "finish",
                       "status": "work", "pct": 0, "stage": "старт…",
                       "started": time.time()}
     threading.Thread(target=_finish_worker,
-                     args=(jid, path, base, cut, banner_path, mirror),
+                     args=(jid, path, base, cut, banner_path, mirror, caps),
                      daemon=True).start()
     return jsonify({"ok": True, "id": jid})
 
@@ -1515,13 +1517,15 @@ def api_uniq_link():
         return jsonify({"ok": False, "error": "Вставь ссылку на TikTok"}), 400
     banner_path = resolve_banner(data.get("banner_file", ""))
     mirror = bool(data.get("mirror", False))
+    caps = bool(data.get("caps", True))
     made = []
     for url in urls:
         dlid = uuid.uuid4().hex[:8]
         UNIQ_JOBS[dlid] = {"id": dlid, "kind": "link", "url": url,
                            "status": "work", "pct": 0, "stage": "в очереди…",
                            "started": time.time(), "children": [],
-                           "banner_path": banner_path, "mirror": mirror}
+                           "banner_path": banner_path, "mirror": mirror,
+                           "caps": caps}
         threading.Thread(target=_link_worker, args=(dlid, url),
                          daemon=True).start()
         made.append(dlid)
