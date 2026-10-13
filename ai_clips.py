@@ -2122,14 +2122,18 @@ def _rand_meta() -> list:
 
 def _antidetect_filters():
     """Усиленный антидетект: ВСЕ параметры случайные в диапазоне —
-    каждый рендер уникален: сдвиг цвета + лёгкое зерно (видео),
-    подъём питча на 1-4% без смены длительности (аудио)."""
+    каждый рендер уникален. Давим в невидимых осях: гамма по каналам
+    и микро-зерно (качество не страдает), плюс подъём питча на 1-4%
+    без смены длительности (аудио)."""
     import random
     vf = (f"eq=contrast={random.uniform(1.05, 1.09):.3f}:"
           f"saturation={random.uniform(1.10, 1.14):.3f}:"
-          f"brightness={random.uniform(0.010, 0.020):.3f},"
+          f"brightness={random.uniform(0.010, 0.020):.3f}:"
+          f"gamma_r={random.uniform(0.97, 1.03):.3f}:"
+          f"gamma_g={random.uniform(0.97, 1.03):.3f}:"
+          f"gamma_b={random.uniform(0.97, 1.03):.3f},"
           f"hue=h={random.uniform(-4, 4):.1f},"
-          f"noise=alls={random.randint(2, 5)}:allf=t")
+          f"noise=alls={random.randint(1, 2)}:allf=t")
     k = random.uniform(1.01, 1.04)
     af = (f"aresample=44100,asetrate=44100*{k:.4f},"
           f"aresample=44100,atempo={1 / k:.4f}")
@@ -3888,11 +3892,14 @@ def uniqualize_video(src: str, out: str, opts: dict | None = None,
             vf.append(f"scale=iw*{z:.3f}:ih*{z:.3f}:flags=lanczos,"
                       f"crop={_w}:{_h}:x='(in_w-{_w})/2+({jx:.4f}*in_w)':"
                       f"y='(in_h-{_h})/2+({jy:.4f}*in_h)'")
-    _ns = random.randint(2, 4) if (_auto and grain) else None
+    _ns = random.randint(1, 2) if (_auto and grain) else None
     vf.append(
         f"eq=contrast={random.uniform(cc[0], cc[1]):.3f}:"
         f"saturation={random.uniform(cc[2], cc[3]):.3f}:"
-        f"brightness={random.uniform(cc[4], cc[5]):.3f},"
+        f"brightness={random.uniform(cc[4], cc[5]):.3f}:"
+        f"gamma_r={random.uniform(0.97, 1.03):.3f}:"
+        f"gamma_g={random.uniform(0.97, 1.03):.3f}:"
+        f"gamma_b={random.uniform(0.97, 1.03):.3f},"
         f"hue=h={random.uniform(cc[6], cc[7]):.1f}"
         + (f",noise=alls={_ns}:allf=t" if _ns is not None
            else (f",noise=alls={random.randint(cc[8], cc[9])}:allf=t" if grain else "")))
@@ -3970,17 +3977,6 @@ def uniqualize_video(src: str, out: str, opts: dict | None = None,
             ass_ok = False
     if ass_ok:
         vf.append(f"subtitles={_fesc(asspath)}")
-    if _auto and (_dout or 0) > 8:
-        # CTA в хвост: ещё порция своих пикселей + драйвер подписок.
-        # Окно с запасом (D-3.5, D): оценка длительности грубая, зато
-        # CTA гарантированно виден минимум секунду даже при промахе оценки
-        _cff = "/System/Library/Fonts/Supplemental/Arial Bold.ttf"
-        if not os.path.exists(_cff):
-            _cff = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-        vf.append(f"drawtext=fontfile={_fesc(_cff)}:text='ПОДПИШИСЬ':"
-                  f"fontsize=62:fontcolor=#FFD60A:borderw=3:bordercolor=black:"
-                  f"x=(w-text_w)/2:y=160:"
-                  f"enable='between(t,{_dout - 3.5:.2f},{_dout:.2f})'")
     if progress:
         progress(5, "уникализация…")
     try:
