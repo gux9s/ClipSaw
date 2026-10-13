@@ -3789,7 +3789,7 @@ def uniqualize_video(src: str, out: str, opts: dict | None = None,
             if abs(_sy1 - _sy0) < 0.15:
                 _sy1 = 1.0 - _sy0
             vf.append(
-                f"scale=iw*{z:.3f}:ih*{z:.3f},"
+                f"scale=iw*{z:.3f}:ih*{z:.3f}:flags=lanczos,"
                 f"crop={_w}:{_h}:"
                 f"x='(in_w-{_w})*({_sx0:.3f}+({_sx1 - _sx0:.3f})*t/{_dout:.2f})':"
                 f"y='(in_h-{_h})*({_sy0:.3f}+({_sy1 - _sy0:.3f})*t/{_dout:.2f})'")
@@ -3797,10 +3797,10 @@ def uniqualize_video(src: str, out: str, opts: dict | None = None,
             # случайный центр кропа (±3%): одинаковый исходник даёт разный кадр
             jx = random.uniform(-0.03, 0.03)
             jy = random.uniform(-0.03, 0.03)
-            vf.append(f"scale=iw*{z:.3f}:ih*{z:.3f},"
+            vf.append(f"scale=iw*{z:.3f}:ih*{z:.3f}:flags=lanczos,"
                       f"crop={_w}:{_h}:x='(in_w-{_w})/2+({jx:.4f}*in_w)':"
                       f"y='(in_h-{_h})/2+({jy:.4f}*in_h)'")
-    _ns = random.randint(5, 8) if (_auto and grain) else None
+    _ns = random.randint(2, 4) if (_auto and grain) else None
     vf.append(
         f"eq=contrast={random.uniform(cc[0], cc[1]):.3f}:"
         f"saturation={random.uniform(cc[2], cc[3]):.3f}:"
@@ -3810,10 +3810,6 @@ def uniqualize_video(src: str, out: str, opts: dict | None = None,
            else (f",noise=alls={random.randint(cc[8], cc[9])}:allf=t" if grain else "")))
     if _auto:
         vf.append("vignette=PI/5")  # лёгкое затемнение углов: глаз ок, хешам больно
-        # прогресс-бар снизу: новые пиксели каждый кадр + нативный вид ленты
-        _bar_col = random.choice(["FFD60A", "3DDC97", "FF6B6B", "4DABF7"])
-        vf.append(f"drawbox=x=0:y=ih-10:w='iw*t/{_dout:.2f}':h=10:"
-                  f"color=0x{_bar_col}:t=fill")
         # хук-титр первые 2.5с: открытие — самое взвешенное место отпечатка,
         # у нас там свой текст вместо чужого кадра
         _hook = re.sub(r"\s+", " ", str(opts.get("hook") or "")).strip()[:60]
@@ -3828,6 +3824,8 @@ def uniqualize_video(src: str, out: str, opts: dict | None = None,
             vf.append(f"drawtext=fontfile={_ff}:text='{_tx}':fontsize=64:"
                       f"fontcolor=white:borderw=2:bordercolor=black:"
                       f"x=(w-text_w)/2:y=120:enable='between(t,0,2.5)'")
+    # лёгкая точка после апскейла: возвращает деталь, съеденную зумом+кодеком
+    vf.append("unsharp=5:5:0.5:5:5:0.0")
     vf.append("scale=trunc(iw/2)*2:trunc(ih/2)*2")
     af = []
     if th > 0:
