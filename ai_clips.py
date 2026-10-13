@@ -3711,12 +3711,12 @@ def swap_banner(src: str, out: str, banner_path: str | None = None,
 
 def uniqualize_video(src: str, out: str, opts: dict | None = None,
                      progress=None) -> str:
-    """Уникализатор: делает копию видео с другим хешем и отпечатком —
-    лёгкие необратимые правки картинки и звука против Content ID и
-    антиплагиата соцсетей. Глаз разницы почти не видит.
-    По умолчанию уже злое: скорость +1%, питч, подрезка краёв.
-    ВАЖНО для TikTok: каждый прогон ОБЯЗАН отличаться (скорость/зум/цвет
-    рандомятся), иначе повторная заливка чужого видео с вотермаркой = 0."""
+    """Уникализатор: делает копию видео с другим хешем и отпечатком.
+    Дефолтный вызов из цепочки (скачал чужое -> баннер -> сюда) идёт
+    ЖЁСТКИМ пресетом: скорость 4-6.5%, зум 4-7%, Ken Burns-проезд камеры,
+    питч 2-4.5%, зерно, виньетка, подрезка краёв. Глаз смотрит спокойно,
+    а robust-хеш оригинала (переживает ресайз/реколор/зерно) — не сходится.
+    Явные настройки из формы уважаются как есть (без Ken Burns)."""
     import random
     opts = opts or {}
     try:
@@ -3732,21 +3732,21 @@ def uniqualize_video(src: str, out: str, opts: dict | None = None,
     _auto = (abs(_spd0 - 1.01) < 1e-9 or abs(_spd0 - 1.0) < 1e-9) and abs(_zm0 - 2.0) < 1e-9
     speed = _spd0
     if _auto:
-        # цепочка (скачал чужое -> вставил баннер -> уникализировал):
-        # скорость обязана гулять, иначе все файлы одной пачки с тем же темпом
-        speed = round(random.uniform(1.015, 1.04), 3)
+        # ЖЁСТКИЙ пресет цепочки: 4-6.5% быстрее — мемы такое терпят,
+        # а покадровый отпечаток оригинала разъезжается
+        speed = round(random.uniform(1.04, 1.065), 3)
     speed = min(1.05, max(0.95, speed))
     mirror = bool(opts.get("mirror", False))
     color = str(opts.get("color", "medium"))
     zoom_pct = _zm0
     if _auto:
-        # зум гуляет шире: заодно подъедает края с тикток-вотермаркой оригинала
-        zoom_pct = round(random.uniform(2.5, 4.5), 1)
-    zoom_pct = min(6.0, max(0.0, zoom_pct))
+        # зум 4-7%: края с тикток-вотермаркой подъедаются, композиция своя
+        zoom_pct = round(random.uniform(4.0, 7.0), 1)
+    zoom_pct = min(9.0, max(0.0, zoom_pct))
     grain = bool(opts.get("grain", True))
     pitch = bool(opts.get("pitch", True))
     # подрезка краёв: ломает точное совпадение длины и стартовых кадров.
-    # Расширили до 0.3-0.8с с каждой стороны: длительность гуляет ±1.5с.
+    # Жёстко: по 0.5-1.2с с каждой стороны (интро/аутро — самые заезженные).
     th, te = 0.0, 0.0
     _w, _h = 0, 0
     try:
@@ -3755,8 +3755,9 @@ def uniqualize_video(src: str, out: str, opts: dict | None = None,
     except Exception:
         _dur = 0
     if _dur > 5:
-        th = round(random.uniform(0.3, 0.8), 2)
-        te = round(_dur - random.uniform(0.3, 0.8), 2)
+        _tlo, _thi = (0.5, 1.2) if _auto else (0.3, 0.8)
+        th = round(random.uniform(_tlo, _thi), 2)
+        te = round(_dur - random.uniform(_tlo, _thi), 2)
     # сила цветокора по пресету + лёгкий джиттер (каждый прогон уникален)
     if color == "light":
         cc = (1.02, 1.04, 1.05, 1.09, 0.004, 0.010, -2, 2, 2, 3)
@@ -3773,18 +3774,39 @@ def uniqualize_video(src: str, out: str, opts: dict | None = None,
         vf.append(f"setpts={1.0 / speed:.4f}*PTS")  # видео догоняет звук
     z = 1.0 + zoom_pct / 100.0
     if z > 1.0001 and _w > 0 and _h > 0:
-        # случайный центр кропа (±3%): одинаковый исходник даёт разный кадр
-        jx = random.uniform(-0.03, 0.03)
-        jy = random.uniform(-0.03, 0.03)
-        vf.append(f"scale=iw*{z:.3f}:ih*{z:.3f},"
-                  f"crop={_w}:{_h}:x='(in_w-{_w})/2+({jx:.4f}*in_w)':"
-                  f"y='(in_h-{_h})/2+({jy:.4f}*in_h)'")
+        if _auto:
+            # Ken Burns: медленный проезд камеры за время ролика — у каждого
+            # файла своя траектория, композиция плывёт и robust-хеш не сходится
+            _dout = max((te - th) / max(speed, 1e-3), 1.0) if th > 0 \
+                else max(_dur / max(speed, 1e-3), 1.0)
+            _sx0, _sy0 = random.random(), random.random()
+            _sx1, _sy1 = random.random(), random.random()
+            if abs(_sx1 - _sx0) < 0.25:
+                _sx1 = 1.0 - _sx0
+            if abs(_sy1 - _sy0) < 0.15:
+                _sy1 = 1.0 - _sy0
+            vf.append(
+                f"scale=iw*{z:.3f}:ih*{z:.3f},"
+                f"crop={_w}:{_h}:"
+                f"x='(in_w-{_w})*({_sx0:.3f}+({_sx1 - _sx0:.3f})*t/{_dout:.2f})':"
+                f"y='(in_h-{_h})*({_sy0:.3f}+({_sy1 - _sy0:.3f})*t/{_dout:.2f})'")
+        else:
+            # случайный центр кропа (±3%): одинаковый исходник даёт разный кадр
+            jx = random.uniform(-0.03, 0.03)
+            jy = random.uniform(-0.03, 0.03)
+            vf.append(f"scale=iw*{z:.3f}:ih*{z:.3f},"
+                      f"crop={_w}:{_h}:x='(in_w-{_w})/2+({jx:.4f}*in_w)':"
+                      f"y='(in_h-{_h})/2+({jy:.4f}*in_h)'")
+    _ns = random.randint(5, 8) if (_auto and grain) else None
     vf.append(
         f"eq=contrast={random.uniform(cc[0], cc[1]):.3f}:"
         f"saturation={random.uniform(cc[2], cc[3]):.3f}:"
         f"brightness={random.uniform(cc[4], cc[5]):.3f},"
         f"hue=h={random.uniform(cc[6], cc[7]):.1f}"
-        + (f",noise=alls={random.randint(cc[8], cc[9])}:allf=t" if grain else ""))
+        + (f",noise=alls={_ns}:allf=t" if _ns is not None
+           else (f",noise=alls={random.randint(cc[8], cc[9])}:allf=t" if grain else "")))
+    if _auto:
+        vf.append("vignette=PI/5")  # лёгкое затемнение углов: глаз ок, хешам больно
     vf.append("scale=trunc(iw/2)*2:trunc(ih/2)*2")
     af = []
     if th > 0:
@@ -3792,7 +3814,8 @@ def uniqualize_video(src: str, out: str, opts: dict | None = None,
     if abs(speed - 1.0) > 1e-4:
         af.append(f"atempo={speed:.4f}")
     if pitch:
-        k = random.uniform(1.01, 1.035)
+        _klo, _khi = (1.02, 1.045) if _auto else (1.01, 1.035)
+        k = random.uniform(_klo, _khi)
         af.append(f"aresample=44100,asetrate=44100*{k:.4f},"
                   f"aresample=44100,atempo={1 / k:.4f}")
     af.append(_LOUDNORM)

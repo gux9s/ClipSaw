@@ -465,6 +465,7 @@
         <div class="dim" style="margin-top:6px">Качает в максимальном качестве, затем меняет баннер и уникализирует. ⚠️ Перезалив чужого видео с вотермаркой TikTok сам по себе режется в 0 — зум подъедает края, но лучше брать исходники без вотермарки. Заливай не чаще 1 в 60–120 мин.</div>
         <div><label class="lbl" for="uqBanFile">Какой баннер</label>
           <select id="uqBanFile"><option value="">По умолчанию</option></select></div>
+        <label class="chk"><input type="checkbox" id="uqMir"> Зеркало (только если в видео нет текста — текст станет нечитаемым)</label>
         <button class="btn" id="uqGo">Скачать, заменить баннер и уникализировать</button>
         <div class="dim" style="margin-top:8px">Качает в максимальном качестве и чистит тишину → выбираешь отрезок чужого баннера ползунком под видео → вырезаем, ставим Мусордроп, уникализируем.</div>
         <div id="uqResult" style="margin-top:10px"></div>
@@ -1139,7 +1140,7 @@ $('uqGo').onclick=async ()=>{
   const urls=$('uqUrls').value.split('\n').map(s=>s.trim()).filter(Boolean).slice(0,5);
   if(!urls.length){toast('Вставь ссылку на TikTok','err');return;}
   try{
-    const r=await fetch('/api/uniq-link',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({urls,banner_file:$('uqBanFile').value})});
+    const r=await fetch('/api/uniq-link',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({urls,banner_file:$('uqBanFile').value,mirror:$('uqMir').checked})});
     const j=await r.json();
     if(!j.ok)throw new Error(j.error||'Не вышло');
     for(const dlid of (j.jobs||[]))uqLive.add(dlid);

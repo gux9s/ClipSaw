@@ -1417,7 +1417,8 @@ def _link_worker(dlid: str, url: str):
             pass
 
 
-def _finish_worker(jid: str, path: str, base: str, cut, banner_path=None):
+def _finish_worker(jid: str, path: str, base: str, cut, banner_path=None,
+                   mirror: bool = False):
     """Шаг 2: вырезать выбранный отрезок (или авто), вставить свой баннер,
     уникализировать -> готовый файл."""
 
@@ -1436,7 +1437,10 @@ def _finish_worker(jid: str, path: str, base: str, cut, banner_path=None):
             info = ac.swap_banner(path, swapped, banner_path=banner_path, remove=True,
                                   progress=lambda p, s="режу…": prog(int(p * 0.5), s))
         out = os.path.join(UNIQ_OUT, f"{jid}_{base}_final.mp4")
-        ac.uniqualize_video(swapped, out, dict(UNIQ_OPTIMAL),
+        opts = dict(UNIQ_OPTIMAL)
+        if mirror:
+            opts["mirror"] = True
+        ac.uniqualize_video(swapped, out, opts,
                             progress=lambda p, s="уникализация…": prog(min(50 + int(p * 0.5), 100), s))
         try:
             with open(os.path.join(UNIQ_OUT, f"{jid}_{base}_analysis.json"),
@@ -1486,11 +1490,12 @@ def api_uniq_finish():
     base = re.sub(r"^[a-f0-9]{8}_", "", base)[:40] or "video"
     parent = UNIQ_JOBS.get(src.split("_")[0]) or {}
     banner_path = parent.get("banner_path")
+    mirror = bool(parent.get("mirror", False))
     UNIQ_JOBS[jid] = {"id": jid, "base": base, "kind": "finish",
                       "status": "work", "pct": 0, "stage": "старт…",
                       "started": time.time()}
     threading.Thread(target=_finish_worker,
-                     args=(jid, path, base, cut, banner_path),
+                     args=(jid, path, base, cut, banner_path, mirror),
                      daemon=True).start()
     return jsonify({"ok": True, "id": jid})
 
@@ -1507,13 +1512,14 @@ def api_uniq_link():
     if not urls:
         return jsonify({"ok": False, "error": "Вставь ссылку на TikTok"}), 400
     banner_path = resolve_banner(data.get("banner_file", ""))
+    mirror = bool(data.get("mirror", False))
     made = []
     for url in urls:
         dlid = uuid.uuid4().hex[:8]
         UNIQ_JOBS[dlid] = {"id": dlid, "kind": "link", "url": url,
                            "status": "work", "pct": 0, "stage": "в очереди…",
                            "started": time.time(), "children": [],
-                           "banner_path": banner_path}
+                           "banner_path": banner_path, "mirror": mirror}
         threading.Thread(target=_link_worker, args=(dlid, url),
                          daemon=True).start()
         made.append(dlid)
