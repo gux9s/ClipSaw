@@ -1605,7 +1605,6 @@ def _cs2_worker(jid: str, path: str, title: str, opts: dict):
         info = ac.restyle_cs2(
             path, out, title,
             mirror=bool(opts.get("mirror", False)),
-            color=str(opts.get("color", "medium")),
             progress=lambda p, s="рестайл…": prog(int(p * 100), s))
         st = UNIQ_JOBS.get(jid)
         if st is not None:
@@ -1654,9 +1653,7 @@ def api_cs2():
             return jsonify({"ok": False, "error": "Файл больше 800 МБ"}), 400
     except OSError:
         pass
-    opts = {"mirror": form.get("mirror") == "1",
-            "color": form.get("color", "medium") if form.get("color") in (
-                "light", "medium", "strong") else "medium"}
+    opts = {"mirror": form.get("mirror") == "1"}
     base = (name.rsplit(".", 1)[0] or "video")[:40]
     UNIQ_JOBS[jid] = {"id": jid, "base": base, "kind": "cs2",
                       "status": "work", "pct": 0, "stage": "старт…",

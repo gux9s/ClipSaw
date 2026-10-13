@@ -3816,63 +3816,33 @@ def uniqualize_video(src: str, out: str, opts: dict | None = None,
     return out
 
 
-def _emoji_font(size: int):
-    """Apple Color Emoji — sbix-битмап, рабочих размеров всего несколько:
-    берём запрошенный либо ближайший доступный (иначе tofu-квадраты)."""
-    from PIL import ImageFont
-    p = "/System/Library/Fonts/Apple Color Emoji.ttc"
-    if not os.path.exists(p):
-        return None
-    for s in dict.fromkeys((size, 64, 96, 48, 128, 32, 160, 40, 80)):
-        try:
-            return ImageFont.truetype(p, s)
-        except Exception:
-            continue
-    return None
-
-
-_EMOJI_RE = re.compile(
-    "([\U0001F1E6-\U0001F1FF\U0001F300-\U0001FAFF"
-    "\u2600-\u27BF\u2B00-\u2BFF\uFE0F])")
+def _strip_emoji(text: str) -> str:
+    """Вырезает эмодзи из заголовка: в пилюле только текст."""
+    t = re.sub(r"[\U0001F1E6-\U0001F1FF\U0001F300-\U0001FAFF"
+               r"\u2600-\u27BF\u2B00-\u2BFF\uFE0F\u200D]", "", text or "")
+    return re.sub(r"\s+", " ", t).strip()
 
 
 def _pill_rgba(text: str, max_w: int = 980):
     """Белая пилюля с заголовком как у КС-мемов: белый стадион, чёрный болд.
-    Эмодзи дорисовываются шрифтом Apple Color Emoji (ч/б, но узнаваемо) —
-    иначе были бы tofu-квадраты. Возвращает PIL RGBA либо None."""
+    Эмодзи вырезаны — только текст. Возвращает PIL RGBA либо None."""
     from PIL import Image, ImageDraw
-    t = re.sub(r"\s+", " ", (text or "")).strip()
+    t = _strip_emoji(text)
     if not t:
         return None
-    base = _font(72)
-    emo = _emoji_font(72)
-    parts = _EMOJI_RE.split(t)
-    runs = [(p, True) if _EMOJI_RE.fullmatch(p) else (p, False)
-            for p in parts if p]
-    if emo is None:
-        runs = [(p, False) for p, e in runs if not e]
-        if not runs:
-            return None
     size = 72
+    tmp = Image.new("RGB", (8, 8))
+    dr = ImageDraw.Draw(tmp)
     while size > 44:
         b = _font(size)
-        e = _emoji_font(int(size * 1.05)) if emo else None
-        tmp = Image.new("RGB", (8, 8))
-        dr = ImageDraw.Draw(tmp)
-        w = sum(dr.textlength(p, font=(e if is_emo and e else b))
-                for p, is_emo in runs)
-        if w <= max_w:
+        if dr.textlength(t, font=b) <= max_w:
             break
         size -= 4
     else:
-        b = _font(44)
-        e = _emoji_font(46) if emo else None
+        size = 44
+    b = _font(size)
     pad_x, pad_y = 46, 26
-    tmp = Image.new("RGB", (8, 8))
-    dr = ImageDraw.Draw(tmp)
-    widths = [dr.textlength(p, font=(e if is_emo and e else b))
-              for p, is_emo in runs]
-    total = sum(widths)
+    total = dr.textlength(t, font=b)
     bb = dr.textbbox((0, 0), "КСу", font=b)
     th = bb[3] - bb[1]
     pw, ph = int(total + pad_x * 2), int(th + pad_y * 2)
@@ -3880,12 +3850,8 @@ def _pill_rgba(text: str, max_w: int = 980):
     dr = ImageDraw.Draw(pill)
     dr.rounded_rectangle([0, 0, pw - 1, ph - 1], radius=ph // 2,
                          fill=(255, 255, 255, 255))
-    x = float(pad_x)
-    cy = ph / 2
-    for (p, is_emo), wdt in zip(runs, widths):
-        f = (e if is_emo and e else b)
-        dr.text((x, cy), p, font=f, fill=(0, 0, 0, 255), anchor="lm")
-        x += wdt
+    dr.text((float(pad_x), ph / 2), t, font=b, fill=(0, 0, 0, 255),
+            anchor="lm")
     return pill
 
 
@@ -3943,12 +3909,13 @@ def _detect_bars(path: str):
 
 
 def restyle_cs2(src: str, out: str, title: str = "",
-                mirror: bool = False, color: str = "medium",
+                mirror: bool = False,
                 progress=None) -> dict:
     """Рестайл «КС 2, но я...»: чёрные полосы сверху/снизу выкидываются,
     вместо них — блюр-фон как у кинонарезок, заголовок — белой пилюлей
-    поверх верхнего блюра. Плюс лёгкая уникализация (зум/цвет/зерно/питч)
-    и тикток-совместимый выхлоп 1080x1920/30fps/48кГц. Скорость не трогаем —
+    поверх верхнего блюра (эмодзи вырезаются). Сам контент НЕ трогаем:
+    никакого цветокора, только перекомпоновка кадра.
+    Выхлоп тикток-совместимый 1080x1920/30fps/48кГц. Скорость не трогаем —
     тайминги оригинала сохраняются."""
     import cv2
     import random
@@ -3992,17 +3959,7 @@ def restyle_cs2(src: str, out: str, title: str = "",
         py = (top_space - ph) // 2 if top_space > ph + 60 else 80
         pill_np = np.asarray(pill)
         pill_xy = ((1080 - pw) // 2, max(py, 20))
-    if color == "light":
-        cc = (1.02, 1.04, 1.05, 1.09, 0.004, 0.010, -2, 2, 2, 3)
-    elif color == "strong":
-        cc = (1.07, 1.12, 1.14, 1.20, 0.012, 0.025, -7, 7, 4, 7)
-    else:
-        cc = (1.04, 1.08, 1.09, 1.15, 0.008, 0.018, -4, 4, 2, 5)
-    eq = (f"eq=contrast={random.uniform(cc[0], cc[1]):.3f}:"
-          f"saturation={random.uniform(cc[2], cc[3]):.3f}:"
-          f"brightness={random.uniform(cc[4], cc[5]):.3f},"
-          f"hue=h={random.uniform(cc[6], cc[7]):.1f},"
-          f"noise=alls={random.randint(cc[8], cc[9])}:allf=t")
+    # БЕЗ цветокора: контент идёт как есть, только перекомпоновка кадра.
     _ck = random.uniform(1.005, 1.012)
     af = _tiktok_af(
         f"aresample=44100,asetrate=44100*{_ck:.4f},"
@@ -4013,7 +3970,7 @@ def restyle_cs2(src: str, out: str, title: str = "",
            "-r", str(fps), "-i", "pipe:0",
            "-t", str(round(dur, 2)), "-i", src,
            "-map", "0:v", "-map", "1:a?"] + _rand_meta()
-    cmd += ["-vf", _quality_vf() + "," + eq, "-af", af]
+    cmd += ["-vf", _quality_vf(), "-af", af]
     cmd += _video_codec_args() + ["-pix_fmt", "yuv420p",
             *_AUDIO_OUT, "-movflags", "+faststart",
             "-t", str(round(dur, 2)), out]

@@ -477,11 +477,7 @@
         <input id="cs2File" type="file" accept="video/*" style="padding:10px 12px">
         <label class="lbl" for="cs2Title">Заголовок в белую пилюлю</label>
         <input id="cs2Title" type="text" placeholder="КС 2, но я MiyaGi" autocomplete="off" maxlength="120">
-        <div class="dim" style="margin-top:6px">Чёрные полосы сверху/снизу заменим блюром как у кинонарезок, а заголовок положим пилюлей поверх верхнего блюра. Эмодзи рисуются ч/б — цветные лучше дописать в TikTok при заливке.</div>
-        <div class="ai-grid">
-          <div><label class="lbl" for="cs2Color">Цветокор</label>
-            <select id="cs2Color"><option value="light">Лёгкий</option><option value="medium" selected>Средний</option><option value="strong">Сильный</option></select></div>
-        </div>
+        <div class="dim" style="margin-top:6px">Чёрные полосы сверху/снизу заменим блюром как у кинонарезок, а заголовок положим пилюлей поверх верхнего блюра. Сам контент не трогаем — никакого цветокора. Эмодзи из заголовка вырезаются.</div>
         <label class="chk"><input type="checkbox" id="cs2Mir"> Зеркало (отразить видео)</label>
         <div style="margin-top:14px"><button class="btn" id="cs2Go">Рестайл + уникализация</button></div>
         <div id="cs2Result" style="margin-top:10px"></div>
@@ -1166,7 +1162,6 @@ $('cs2Go').onclick=async ()=>{
   fd.append('file',fl[0]);
   fd.append('title',title);
   fd.append('mirror',$('cs2Mir').checked?'1':'0');
-  fd.append('color',$('cs2Color').value);
   $('cs2Go').disabled=true;
   try{
     const r=await fetch('/api/cs2',{method:'POST',body:fd});
