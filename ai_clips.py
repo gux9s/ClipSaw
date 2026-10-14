@@ -898,11 +898,13 @@ _HEUR_BROKEN_END = {"и", "а", "но", "что", "как", "не", "на", "в"
                     "к", "от", "для", "или", "если", "когда", "потому",
                     "чтобы", "это", "же", "ли", "уже"}
 
-# Переключатели отбора. По умолчанию — чистый DREX: эвристика и MMR-дедуп
-# НЕ влияют на скор и отбор. Функции heuristic_moment_score /
+# Переключатели отбора. По умолчанию — чистый DREX: эвристика
+# НЕ влияет на скор (68/32 подмес выключен). Но MMR-дедуп включён:
+# дубли одной шутки в пачке каннибализируют друг друга, near-дубли
+# давим по Жаккару. Функции heuristic_moment_score /
 # moment_similarity / fuse_scores остаются для анализа и тестов.
 ENABLE_HEURISTIC = False  # True — подмешивать эвристику к DREX (68/32)
-ENABLE_MMR = False        # True — давить near-дубли по Жаккару
+ENABLE_MMR = True         # True — давить near-дубли по Жаккару
 # DREX сам метит границы моментов на строках транскрипта (open/close),
 # код только режет там, где DREX указал. Сетка окон — лишь страховка,
 # если прямых меток мало. DREX не умеет генерировать текст с таймкодами
@@ -1073,6 +1075,23 @@ def _tournament_order(pool, segs, key, top_n: int = 12):
     return [m for m, _ in scored] + list(pool[len(top):])
 
 
+def _apply_hook_guard(pool) -> None:
+    """Штрафует в пуле моменты с плохим открытием (филлер/середина фразы).
+    Мутирует _fused на месте, возвращает None. Хорошие не трогает."""
+    for m in pool or []:
+        try:
+            _htxt = f"{m.get('title', '')} {m.get('_full', '')}"
+            _dur = max(float(m["end"]) - float(m["start"]), 1.0)
+            _, _hp = heuristic_moment_score(_htxt, _dur, None)
+            _hhook = float(_hp.get("hook", 12.0))
+            if _hhook < 4:
+                m["_fused"] = int(m.get("_fused", m.get("score", 0))) - 14
+            elif _hhook < 8:
+                m["_fused"] = int(m.get("_fused", m.get("score", 0))) - 7
+        except Exception:
+            pass
+
+
 def _polish_picks(picked, segs, key):
     """На каждый взятый клип: DREX-choice заголовка (кликбейт) + noul
     клиффхэнгера (часть 2). Молчание DREX = оставляем как было."""
@@ -1184,12 +1203,23 @@ def pick_moments(segs, lang: str, key: str, want: int, min_len: int, max_len: in
             m["_fused"] = fuse_scores(m.get("score", 0), _h)
         pool = sorted(cands, key=lambda m: -m.get("_fused", m.get("score", 0)))
     else:
-        # чистый DREX: исходный порядок по скору модели, без подмесов
+        # чистый DREX: исходный порядок по скору модели, без подмесов.
+        # _full заполняем всё равно — нужен MMR-дедупу для Жаккара.
         for m in cands:
             m["_heur"] = None
-            m["_full"] = ""
+            try:
+                m["_full"] = _segs_text(
+                    segs, float(m["start"]), float(m["end"]))
+            except Exception:
+                m["_full"] = str(m.get("title", ""))
             m["_fused"] = int(m.get("score", 0))
         pool = sorted(cands, key=lambda m: -m.get("score", 0))
+    # Hook-сторож (тикток-механика, слепая зона DREX): момент с филлером
+    # на входе ("ну", "короче", приветствия) или с середины фразы
+    # свайпают в первые 2 секунды — давим такие в пуле штрафом,
+    # хорошие не трогаем (их порядок остаётся чисто DREX).
+    _apply_hook_guard(pool)
+    pool = sorted(pool, key=lambda m: -m.get("_fused", m.get("score", 0)))
     if not pool:
         raise RuntimeError("DREX вернул пусто — попробуй ещё раз")
     if TOURNAMENT and len(pool) >= 3:
@@ -1320,11 +1350,18 @@ def pick_moments(segs, lang: str, key: str, want: int, min_len: int, max_len: in
             except Exception:
                 pass
             used.add(mi)
+            try:
+                _opener = " ".join(
+                    _segs_text(segs, s, e).split()[:8])
+            except Exception:
+                _opener = ""
+            _hook = (_opener[:40] if _opener
+                     else str(m.get("hook", "") or m.get("title", ""))[:40])
             picked.append({"start": float(round(s, 1)), "end": float(round(e, 1)),
                            "score": sc, "title": m.get("title", ""),
                            "verdict": str(m.get("verdict", ""))[:240],
                            "_full": str(m.get("_full", ""))[:500],
-                           "hook": str(m.get("hook", "") or m.get("title", ""))[:40]})
+                           "hook": _hook})
             if len(picked) >= want:
                 break
     if picked and key and (TITLE_PICK or CTA_PART2):
