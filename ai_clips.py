@@ -89,10 +89,14 @@ def _transcribe_giga(path: str, limit_min: int = 0, progress=None):
     return segs, "ru"
 GAMEPLAY_DIR = os.path.join(BASE, "gameplay")
 GAMEPLAYS = {
+    # subway: захардкожен проверенный ландшафт 1080p60 (ytsearch отдавал
+    # вертикалку 384x854 — низ выглядел как 144p после апскейла в 2.8 раза)
     "subway": {"file": "subway.mp4",
-               "query": "ytsearch1:subway surfers gameplay 1 hour no commentary"},
+               "query": "https://www.youtube.com/watch?v=7ghSziUQnhs",
+               "format": "299/298/bv*[height<=1080]+ba/b[height<=1080]/b"},
     "minecraft": {"file": "minecraft.mp4",
-                  "query": "ytsearch1:minecraft parkour gameplay no commentary"},
+                   "query": "ytsearch1:minecraft parkour gameplay no commentary",
+                   "format": "bv*[height<=1080]+ba/b[height<=1080]/b"},
 }
 GAMEPLAY_FILE = os.path.join(GAMEPLAY_DIR, "subway.mp4")
 
@@ -1947,36 +1951,55 @@ def tiktok_safety_check(path: str) -> dict:
     return {"ok": not problems, "problems": problems, "info": info}
 
 
+def _gameplay_ok(path: str) -> bool:
+    """Геймплей годен для низа сплита: читается, >10МБ и не мельче 720p
+    по короткой стороне (иначе апскейл в низ 1080x1152 даст мыло)."""
+    try:
+        if not os.path.exists(path) or os.path.getsize(path) <= 10 << 20:
+            return False
+        if not _readable_video(path):
+            return False
+        w, h, _, _ = _probe_wh_fps(path)
+        return min(w, h) >= 700 and max(w, h) >= 1200
+    except Exception:
+        return False
+
+
 def ensure_gameplay(name: str = "subway") -> str | None:
     """Возвращает путь к закэшированному геймплею; если нет — качает с YouTube."""
     meta = GAMEPLAYS.get(name) or GAMEPLAYS["subway"]
     dest = os.path.join(GAMEPLAY_DIR, meta["file"])
-    if os.path.exists(dest):
-        # битый/недокачанный геймплей — не сносим сразу (мимолетный сбой чтения
-        # убивал бы гигабайты): переименовываем в .bad, докачаем заново
-        if os.path.getsize(dest) > 10 << 20 and _readable_video(dest):
-            return dest
+
+    def _to_bad(p):
         try:
-            bad = dest + ".bad"
+            bad = p + ".bad"
             if os.path.exists(bad):
                 os.remove(bad)
-            os.rename(dest, bad)
+            os.rename(p, bad)
         except OSError:
             pass
+
+    if os.path.exists(dest):
+        # мелкий/вертикальный мусор (был 384x854) — в .bad, молча не принимаем
+        if _gameplay_ok(dest):
+            return dest
+        _to_bad(dest)
     os.makedirs(GAMEPLAY_DIR, exist_ok=True)
     try:
         subprocess.run(
             ["yt-dlp", "--no-playlist",
-              "-f", "bv*[height<=1080]+ba/b[height<=1080]/b",
+             "-f", meta.get("format") or "bv*[height<=1080]+ba/b[height<=1080]/b",
              "--merge-output-format", "mp4",
              "-o", os.path.join(GAMEPLAY_DIR, meta["file"].rsplit(".", 1)[0] + ".%(ext)s"),
              meta["query"]],
-            timeout=1200, check=True,
+            timeout=3600, check=True,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         return None
-    if os.path.exists(dest) and _readable_video(dest):
+    if _gameplay_ok(dest):
         return dest
+    if os.path.exists(dest):
+        _to_bad(dest)
     return None
 
 
@@ -2764,7 +2787,8 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
     # --- низ: геймплей кольцом. Случайный флип низа у каждого клипа:
     # одинаковый subway сверху разных моментов даёт разный низ-хеш ---
     _gflip = ",hflip" if random.random() < 0.5 else ""
-    fc.append(f"[1:v]fps=30{_gflip},scale=1080:1152:force_original_aspect_ratio=increase,"
+    fc.append(f"[1:v]fps=30{_gflip},scale=1080:1152:flags=lanczos:"
+              f"force_original_aspect_ratio=increase,"
               f"crop=1080:1152:x='(in_w-out_w)/2+({jx:.4f}*in_w)':"
               f"y='(in_h-out_h)/2+({jy:.4f}*in_h)',setsar=1[vbot]")
     fc.append("[vtop][vbot]vstack=inputs=2[vbase]")
