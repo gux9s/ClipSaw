@@ -1703,7 +1703,7 @@ def render_twitch_clip(src: str, moment: dict, segs, out: str,
                 f"aresample=44100,atempo={1 / _tk:.4f}")
         spd_af.append(f"volume={random.uniform(0.95, 1.05):.3f}")
         cmd += ["-vf", qvf, "-af", _tiktok_af(*spd_af)]
-    cmd += _video_codec_args() + ["-pix_fmt", "yuv420p",
+    cmd += _video_codec_args(hq=True) + ["-pix_fmt", "yuv420p",
             *_AUDIO_OUT, "-movflags", "+faststart",
             "-t", str(round(out_dur, 2)), out]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
@@ -2902,7 +2902,7 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
     if use_banner:
         cmd += ["-i", bpath]
     cmd += ["-filter_complex", ";".join(fc),
-            "-map", "[vout]"] + amap + _rand_meta() + _video_codec_args() + [
+            "-map", "[vout]"] + amap + _rand_meta() + _video_codec_args(hq=True) + [
                 "-pix_fmt", "yuv420p", "-r", "30",
                 *_AUDIO_OUT, "-movflags", "+faststart",
                 "-t", str(round(out_dur, 2)), out]
@@ -4193,7 +4193,7 @@ def restyle_cs2(src: str, out: str, title: str = "",
            "-t", str(round(dur, 2)), "-i", src,
            "-map", "0:v", "-map", "1:a?"] + _rand_meta()
     cmd += ["-vf", _quality_vf(), "-af", af]
-    cmd += _video_codec_args() + ["-pix_fmt", "yuv420p",
+    cmd += _video_codec_args(hq=True) + ["-pix_fmt", "yuv420p",
             *_AUDIO_OUT, "-movflags", "+faststart",
             "-t", str(round(dur, 2)), out]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
@@ -4341,7 +4341,7 @@ def render_blur9(src: str, moment: dict, segs, out: str,
             f"aresample=44100,asetrate=44100*{_bk:.4f},"
             f"aresample=44100,atempo={1 / _bk:.4f}",
             _LOUDNORM, f"volume={_brnd.uniform(0.95, 1.05):.3f}")]
-    cmd += _video_codec_args() + ["-pix_fmt", "yuv420p",
+    cmd += _video_codec_args(hq=True) + ["-pix_fmt", "yuv420p",
             *_AUDIO_OUT, "-movflags", "+faststart",
             "-t", str(round(dur, 2)), out]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
@@ -4481,7 +4481,7 @@ def render_clip(src: str, moment: dict, segs, out: str, facetrack: bool = True,
             f"aresample=44100,asetrate=44100*{_ck:.4f},"
             f"aresample=44100,atempo={1 / _ck:.4f}",
             _LOUDNORM, f"volume={_rnd.uniform(0.95, 1.05):.3f}")]
-    cmd += _video_codec_args() + ["-pix_fmt", "yuv420p",
+    cmd += _video_codec_args(hq=True) + ["-pix_fmt", "yuv420p",
             *_AUDIO_OUT, "-movflags", "+faststart",
             "-t", str(round(dur, 2)), out]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
