@@ -1847,11 +1847,12 @@ def _banner_dir():
 
 
 def list_banners():
-    """Доступные баннеры из assets/*.mp4: [{id, name, dur, size}]."""
+    """Доступные баннеры из assets/*.{mp4,webm}: [{id, name, dur, size, green}]."""
     import glob
     items = []
     try:
-        files = sorted(glob.glob(os.path.join(BASE, "assets", "*.mp4")))
+        files = sorted(glob.glob(os.path.join(BASE, "assets", "*.mp4"))
+                       + glob.glob(os.path.join(BASE, "assets", "*.webm")))
     except Exception:
         files = []
     for p in files:
@@ -1870,6 +1871,8 @@ def list_banners():
             green = False
         if green:
             name += " · хромакей"
+        else:
+            name += " · целиком"
         try:
             size = os.path.getsize(p)
         except OSError:
@@ -1882,7 +1885,9 @@ def list_banners():
 def resolve_banner(name):
     """Имя файла -> путь в assets или None (= дефолтный Мусордроп)."""
     base = os.path.basename(str(name or "").strip())
-    if not base or ".." in base or "/" in base or not base.endswith(".mp4"):
+    if not base or ".." in base or "/" in base:
+        return None
+    if not base.endswith((".mp4", ".webm")):
         return None
     p = os.path.join(BASE, "assets", base)
     return p if os.path.isfile(p) else None

@@ -1786,12 +1786,15 @@ def render_twitch_clip(src: str, moment: dict, segs, out: str,
                         break
                 if bok and bfr is not None:
                     _bh0, _bw0 = bfr.shape[:2]
-                    _bh = int(round(_bh0 * min(1022, OUT_W2) / max(_bw0, 1)))
+                    _boxw = 650 if _bh0 > _bw0 else min(1022, OUT_W2)
+                    _bh = int(round(_bh0 * _boxw / max(_bw0, 1)))
                     _bh = min(_bh, OUT_H2)
                     _by = (OUT_H2 - _bh) // 2 + random.randint(-15, 15)
                     frame = _banner_overlay(
-                        frame, bfr, y_top=_by,
-                        zoom=1.0, bj=bj, opacity=0.95, key_green=tw_key)
+                        frame, bfr, y_top=_by, box_w=_boxw,
+                        zoom=1.0, bj=bj,
+                        opacity=0.95 if tw_key else 1.0,
+                        key_green=tw_key)
                     banner_on = True
             if captions and not banner_on:
                 words = _active_words(segs, t)
@@ -2221,6 +2224,35 @@ def _banner_key_vf(path: str | None = None) -> str:
         return (f"chromakey=0x00FF00:{_KEY_SIM}:{_KEY_BLEND},"
                 f"despill=type=green,")
     return ""
+
+
+def _banner_fmt(bpath: str | None = None) -> str:
+    """Форматная цепочка баннера: хромакей-файлы — ключ + лёгкая
+    прозрачность, готовые креативы (типа Trading) — целиком,
+    без прозрачности. Вставлять ПЕРЕД setpts."""
+    _key = _banner_key_vf(bpath)
+    if _key:
+        return f"{_key}format=yuva420p,colorchannelmixer=aa=0.95"
+    return "format=yuv420p"
+
+
+def _banner_box(bpath: str, out_h: int = 1920):
+    """Ширина/верх бокса баннера: горизонтальные — широко внизу по центру
+    (как раньше), вертикальные (Trading 720x1280) — компактно по центру
+    экрана (~60% высоты), иначе перекроют всё видео."""
+    import random
+    try:
+        bw0, bh0, _, _ = _probe_wh_fps(bpath)
+    except Exception:
+        bw0, bh0 = 0, 0
+    if bh0 > bw0 > 0:
+        w = random.randint(620, 680)
+        h = int(round(bh0 * w / max(bw0, 1)))
+        if h > 1200:
+            h = 1200
+            w = max(int(round(bw0 * h / max(bh0, 1))), 1)
+        return w, (out_h - h) // 2 + random.randint(-15, 15)
+    return random.randint(1000, 1022), random.randint(758, 794)
 
 
 def _green_alpha_bgr(fg_bgr):
@@ -2759,11 +2791,9 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
         order.append(f"[p{len(wins)}a]")
         # баннер: ширина и вертикаль гуляют у каждого рендера, иначе
         # баннерный кусок пиксель-в-пиксель одинаков во всех клипах пачки
-        _bn_w = random.randint(1000, 1022)
-        _bn_y = random.randint(758, 794)
-        _bn_key = _banner_key_vf(bpath)
-        fc.append(f"[2:v]scale={_bn_w}:-2,fps=30,{_bn_key}format=yuva420p,"
-                  f"colorchannelmixer=aa=0.95,setpts=PTS/{BANNER_SPEED:.3f}[bn0]")
+        _bn_w, _bn_y = _banner_box(bpath)
+        fc.append(f"[2:v]scale={_bn_w}:-2,fps=30,{_banner_fmt(bpath)},"
+                  f"setpts=PTS/{BANNER_SPEED:.3f}[bn0]")
         fc.append(f"[bn0]split={len(wins)}" + "".join(f"[bb{i}]" for i in range(len(wins))))
         for wi, (oA, oB, cA) in enumerate(wins):
             fc.append(f"[f{wi}][bb{wi}]overlay=(W-w)/2:{_bn_y}:eof_action=pass[m{wi}]")
@@ -3673,8 +3703,8 @@ def swap_banner(src: str, out: str, banner_path: str | None = None,
     vparts.append(f"[1:v]trim=start=0:end={b_eff:.3f},setpts=PTS-STARTPTS[vf]")
     vparts.append(f"[2:v]split={1 + len(covf)}"
                   + "".join(f"[cbs{i}]" for i in range(1 + len(covf))))
-    _sw_key = _banner_key_vf(bpath)
-    bfs = f"[cbs0]scale={sw}:{sh},fps={fps_i},{_sw_key}format=yuva420p,colorchannelmixer=aa=0.95"
+    _sw_fmt = _banner_fmt(bpath)
+    bfs = f"[cbs0]scale={sw}:{sh},fps={fps_i},{_sw_fmt}"
     bfs += ",setpts=PTS/{:.3f}[vb]".format(BANNER_SPEED)
     vparts.append(bfs)
     vparts.append(f"[vf][vb]overlay={ox}:{oy}:eof_action=pass[vmid]")
@@ -3705,8 +3735,7 @@ def swap_banner(src: str, out: str, banner_path: str | None = None,
             f"{cur}drawbox=x={rx}:y={ry}:w={rw}:h={rh}:color=black@0.85:t=fill:"
             f"enable='between(t,{s:.3f},{e:.3f})'[d{ci}]")
         vparts.append(
-            f"[cbs{ci + 1}]scale={csw}:{csh},fps={fps_i},{_sw_key}format=yuva420p,"
-            f"colorchannelmixer=aa=0.95,"
+            f"[cbs{ci + 1}]scale={csw}:{csh},fps={fps_i},{_sw_fmt},"
             f"setpts=PTS-STARTPTS+{s:.3f}/TB[cb{ci}]")
         vparts.append(
             f"[d{ci}][cb{ci}]overlay={ox2}:{oy2}:eof_action=pass:"
