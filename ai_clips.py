@@ -1974,11 +1974,19 @@ def tiktok_safety_check(path: str) -> dict:
         info["dur"] = round(dur, 1)
         if dur < 5:
             problems.append("короче 5с — неINFOрмативно для ленты")
-    # первый кадр не чёрный (обложка решает CTR)
+    # первый кадр не чёрный (обложка решает CTR). Смотрим кадр на ~1с:
+    # fade-in 0.3-0.5с гасит самый старт штатно, это не брак
     try:
         import cv2
         import numpy as np
         c = cv2.VideoCapture(path)
+        try:
+            fps = c.get(cv2.CAP_PROP_FPS) or 30
+            n = int(c.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
+            if n > 0 and fps > 0:
+                c.set(cv2.CAP_PROP_POS_FRAMES, min(int(fps * 1.0), n - 1))
+        except Exception:
+            pass
         ok, fr = c.read()
         c.release()
         if ok and fr is not None and float(np.mean(fr)) < 10:
@@ -3890,6 +3898,7 @@ def uniqualize_video(src: str, out: str, opts: dict | None = None,
     """Уникализатор: делает копию видео с другим хешем и отпечатком.
     Дефолтный вызов из цепочки (скачал чужое -> баннер -> сюда) идёт
     ЖЁСТКИМ пресетом: скорость 4-6.5%, зум 4-7%, Ken Burns-проезд камеры,
+    микро-поворот ±0.2-0.4°, fade in/out 0.3-0.5с,
     питч 2-4.5%, зерно минимум, виньетка, подрезка краёв, жжёные субтитры.
     Глаз смотрит спокойно,
     а robust-хеш оригинала (переживает ресайз/реколор/зерно) — не сходится.
@@ -3960,6 +3969,10 @@ def uniqualize_video(src: str, out: str, opts: dict | None = None,
     if _auto:
         _dout = max((te - th) / max(speed, 1e-3), 1.0) if th > 0 \
             else max(_dur / max(speed, 1e-3), 1.0)
+        # микро-поворот ±0.2-0.4°: глаз не видит (залитые углы срезаются
+        # кропом за счёт зума 4%+), попиксельный отпечаток — уже нет
+        _ang = random.uniform(0.0035, 0.007) * random.choice((-1.0, 1.0))
+        vf.append(f"rotate={_ang:.4f}:fillcolor=black")
     if z > 1.0001 and _w > 0 and _h > 0:
         if _auto:
             # Ken Burns: медленный проезд камеры за время ролика — у каждого
@@ -3996,6 +4009,14 @@ def uniqualize_video(src: str, out: str, opts: dict | None = None,
     if _auto:
         vf.append("vignette=PI/5")  # лёгкое затемнение углов: глаз ок, хешам больно
     vf.append("scale=trunc(iw/2)*2:trunc(ih/2)*2")
+    _fd = 0.0
+    if _auto and (_dout or 0) > 2:
+        # fade in/out: начало и конец — самые взвешенные места отпечатка,
+        # а выглядит как обычная нативная склейка
+        _fd = round(random.uniform(0.3, 0.5), 2)
+        _fout = max(round(_dout - _fd, 2), 0.0)
+        vf.append(f"fade=t=in:st=0:d={_fd:.2f}")
+        vf.append(f"fade=t=out:st={_fout:.2f}:d={_fd:.2f}")
     af = []
     if th > 0:
         af.append(f"atrim=start={th:.2f}:end={te:.2f},asetpts=PTS-STARTPTS")
@@ -4009,6 +4030,11 @@ def uniqualize_video(src: str, out: str, opts: dict | None = None,
     af.append(_LOUDNORM)
     # лёгкий джиттер громкости после нормализации: у каждого файла свой уровень
     af.append(f"volume={random.uniform(0.95, 1.05):.3f}")
+    if _fd > 0:
+        # аудио-фейды под видео-фейды: без щелчков на склейках
+        _fout = max(round((_dout or 0) - _fd, 2), 0.0)
+        af.append(f"afade=t=in:st=0:d={_fd:.2f},"
+                  f"afade=t=out:st={_fout:.2f}:d={_fd:.2f}")
     af_str = _tiktok_af(*af)
     # субтитры цепочки: жгём поверх (динамика текста = трансформативность).
     # Тайминги сдвигаем на выходную шкалу (подрезка + скорость), иначе уплывут.
