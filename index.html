@@ -768,6 +768,7 @@ function makeCustom(id){
     items.forEach(li=>li.classList.toggle('on',li.dataset.v===sel.value));}
   function close(){box.classList.remove('open');}
   btn.onclick=e=>{e.stopPropagation();
+    try{sync();}catch(_){}
     const was=box.classList.contains('open');
     document.querySelectorAll('.csel.open').forEach(x=>x.classList.remove('open'));
     if(!was)box.classList.add('open');};
@@ -1190,11 +1191,19 @@ async function loadBanners(){
       if(!sel)continue;
       const cur=sel.value;
       sel.innerHTML='<option value="">По умолчанию</option>'+(j.banners||[]).map(b=>'<option value="'+esc(b.id)+'">'+esc(b.name)+' · '+Math.round(b.dur||0)+'с</option>').join('');
-      if([...sel.options].some(o=>o.value===cur))sel.value=cur;
+      if(Array.from(sel.options).some(o=>o.value===cur))sel.value=cur;
+      // кастомный селект кеширует пункты при построении — сносим и строим
+      // заново, иначе залипает старый список («только По умолчанию»)
+      if(sel._cs){
+        const box=sel.nextElementSibling;
+        if(box&&box.classList&&box.classList.contains('csel'))box.remove();
+        delete sel._cs;
+        sel.style.display='';
+      }
     }
     ['banFile','twBanFile','uqBanFile'].forEach(makeCustom);
     refreshCustom();
-  }catch(e){}
+  }catch(e){console.error('banners:',e);}
 }
 async function loadUniq(){
   try{

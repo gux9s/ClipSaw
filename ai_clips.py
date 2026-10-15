@@ -139,13 +139,21 @@ def _video_codec_args(hq: bool = False) -> list:
     ~35-50 МБ вместо 90-110, быстрее грузится и не застревает
     в транскодинге TikTok (одна из причин вечных 0 просмотров).
     Джиттер битрейта + случайный GOP — плюс к уникальности отпечатков.
-    hq=True: софтверный x264 slow CRF21 — максимум резкости на бит
-    (для цепочки уникализатора, где качество решает жалобу
-    'низкое качество'); медленнее, но идёт в фоне."""
+    hq=True: то же железо, но жирный битрейт 9-11М — резкость почти как
+    у x264 slow, а скорость та же (~1 мин/клип). Софтверный slow убит:
+    он давал 3-5 мин на клип, два параллельных рендера клали машину
+    и задача вечно висела на «рендер… 2/8».
+    Без железа — libx264 veryfast CRF19 (быстро и резко)."""
     import random as _r
     if hq:
+        if _VT:
+            br = _r.randint(9, 11)
+            return ["-c:v", "h264_videotoolbox", "-pix_fmt", "yuv420p",
+                    "-b:v", f"{br}M", "-maxrate", f"{br + 3}M",
+                    "-bufsize", f"{2 * br}M", "-allow_sw", "1",
+                    "-g", str(_r.randint(48, 72))]
         return ["-c:v", "libx264", "-pix_fmt", "yuv420p",
-                "-preset", "slow", "-crf", "21", "-tune", "film",
+                "-preset", "veryfast", "-crf", "19", "-tune", "film",
                 "-g", str(_r.randint(48, 72))]
     if _VT:
         br = _r.randint(6, 8)
@@ -1933,7 +1941,7 @@ def render_twitch_clip(src: str, moment: dict, segs, out: str,
                              fill="#FFD60A", stroke_width=4, stroke_fill="black")
                     hy += (bbox[3] - bbox[1]) + 10
                 frame = __import__("numpy").asarray(imgh)
-            proc.stdin.write(frame.tobytes())
+            _pipe_write(proc, frame)
             if progress and k % 15 == 0:
                 progress(k / total)
     finally:
@@ -1944,7 +1952,7 @@ def render_twitch_clip(src: str, moment: dict, segs, out: str,
             proc.stdin.close()
         except Exception:
             pass
-        proc.wait(timeout=600)
+        _wait_pipe(proc)
         if mix_tmp:
             try:
                 if os.path.exists(mix_tmp):
@@ -2749,12 +2757,34 @@ def _uniq_ass(segs, path: str) -> bool:
     return True
 
 
-def _run_ffmpeg_progress(cmd, total_dur: float, progress=None) -> int:
-    """Запуск ffmpeg с живым прогрессом по out_time_ms. Возвращает returncode."""
+def _run_ffmpeg_progress(cmd, total_dur: float, progress=None,
+                         stall_sec: float = 240.0, timeout: float = 1800.0) -> int:
+    """Запуск ffmpeg с живым прогрессом по out_time_ms. Возвращает returncode.
+    Сторож: нет прогресса stall_sec секунд — процесс убивается и кидается
+    RuntimeError (раньше такой зависший ffmpeg вечно держал задачу на
+    «рендер… 2/8 · 87%»). stderr пишется во временный лог: при неуспехе
+    хвост ошибки уходит в server.log, а не в /dev/null."""
+    import tempfile
     import threading
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                            stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
+    import time
+    err_tmp = os.path.join(tempfile.gettempdir(),
+                           f"ff_{os.getpid()}_{int(time.time() * 1000) % 1000000}.log")
+    try:
+        ef = open(err_tmp, "wb")
+    except OSError:
+        ef = subprocess.DEVNULL
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                stderr=ef, stdin=subprocess.DEVNULL)
+    except Exception:
+        try:
+            if ef is not subprocess.DEVNULL:
+                ef.close()
+        except Exception:
+            pass
+        raise
     total_ms = max(total_dur * 1000.0, 1.0)
+    last = {"t": time.time()}
 
     def _watch():
         try:
@@ -2768,12 +2798,14 @@ def _run_ffmpeg_progress(cmd, total_dur: float, progress=None) -> int:
                         ms = int(line.split("=", 1)[1])
                     except ValueError:
                         ms = 0
+                    last["t"] = time.time()
                     if progress:
                         try:
                             progress(min(0.99, ms / total_ms))
                         except Exception:
                             pass
                 elif line.strip() == "progress=end":
+                    last["t"] = time.time()
                     if progress:
                         try:
                             progress(1.0)
@@ -2785,33 +2817,124 @@ def _run_ffmpeg_progress(cmd, total_dur: float, progress=None) -> int:
 
     th = threading.Thread(target=_watch, daemon=True)
     th.start()
+    deadline = time.time() + timeout
+    rc = None
     try:
-        rc = proc.wait(timeout=1800)
+        while True:
+            rc = proc.poll()
+            if rc is not None:
+                break
+            now = time.time()
+            if now >= deadline:
+                raise RuntimeError(
+                    f"рендер упёрся в таймаут {int(timeout // 60)} мин — убит")
+            if now - last["t"] > stall_sec:
+                raise RuntimeError(
+                    f"рендер завис (нет прогресса {int(stall_sec)}с) — убит, "
+                    f"попробуй ещё раз")
+            time.sleep(2)
     finally:
+        if proc.poll() is None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=15)
+            except Exception:
+                pass
         try:
             th.join(timeout=5)
         except Exception:
             pass
-    return rc
+        try:
+            if ef is not subprocess.DEVNULL:
+                ef.close()
+        except Exception:
+            pass
+    if rc != 0:
+        tail = ""
+        try:
+            with open(err_tmp, "rb") as f:
+                f.seek(max(os.path.getsize(err_tmp) - 2000, 0))
+                tail = f.read().decode("utf-8", "ignore").strip()[-600:]
+        except Exception:
+            pass
+        if tail:
+            print(f"[ffmpeg] rc={rc}: {tail}", flush=True)
+    try:
+        if os.path.exists(err_tmp):
+            os.remove(err_tmp)
+    except OSError:
+        pass
+    return rc if rc is not None else -9
+
+
+def _wait_pipe(proc, timeout: float = 900.0) -> int:
+    """Ожидание pipe-рендера (сырые кадры через stdin): завис — убить
+    и кинуть RuntimeError, а не висеть вечно как раньше."""
+    try:
+        return proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=15)
+        except Exception:
+            pass
+        raise RuntimeError(
+            f"рендер завис (>{int(timeout // 60)} мин без завершения) — убит")
+
+
+def _pipe_write(proc, frame) -> None:
+    """Запись кадра в stdin ffmpeg: процесс сдох на старте (битый фильтр,
+    кодек) — сразу понятная ошибка, а не BrokenPipeError на 87%."""
+    if proc.poll() is not None:
+        raise RuntimeError(f"рендер не удался (ffmpeg умер, rc={proc.returncode})")
+    try:
+        proc.stdin.write(frame.tobytes())
+    except BrokenPipeError:
+        raise RuntimeError("рендер не удался (ffmpeg оборвал трубу)")
 
 
 def _fesc(p: str) -> str:
     return p.replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
 
 
-def _prev_keyframe(src: str, t: float) -> float:
-    """Время ближайшего ключевого кадра <= t (для точного быстрого сика)."""
+_KEYFRAMES: dict = {}
+
+
+def _keyframe_list(src: str) -> list:
+    """Все кейфреймы файла одним проходом, с кэшем: раньше каждый из 8
+    клипов заново сканировал весь исходник (до 3 мин тишины на клип —
+    отсюда и «вис» на рендере)."""
+    if src in _KEYFRAMES:
+        return _KEYFRAMES[src]
+    if len(_KEYFRAMES) > 20:  # исходники одноразовые — кэш не растим вечно
+        _KEYFRAMES.clear()
+    pts = []
     try:
         r = subprocess.run(
             [FFMPEG, "-v", "info", "-skip_frame", "nokey", "-i", src,
              "-vf", "select='eq(pict_type\\,I)',showinfo", "-f", "null", "-"],
-            capture_output=True, text=True, timeout=180)
-        best = 0.0
-        for m in re.finditer(r"pts_time:([\d.]+)", r.stderr or ""):
-            v = float(m.group(1))
-            if v <= t + 0.05:
-                best = v
-        return best
+            capture_output=True, text=True, timeout=90)
+        pts = sorted(float(m.group(1))
+                     for m in re.finditer(r"pts_time:([\d.]+)", r.stderr or ""))
+    except Exception:
+        pts = []
+    _KEYFRAMES[src] = pts
+    return pts
+
+
+def _prev_keyframe(src: str, t: float) -> float:
+    """Время ближайшего ключевого кадра <= t (для точного быстрого сика)."""
+    try:
+        import bisect
+        pts = _keyframe_list(src)
+        i = bisect.bisect_right(pts, t + 0.05) - 1
+        return pts[i] if i >= 0 else 0.0
     except Exception:
         return 0.0
 
@@ -4443,7 +4566,7 @@ def restyle_cs2(src: str, out: str, title: str = "",
                 roi = frame[py:py + ph, px:px + pw].astype(np.float32)
                 frame[py:py + ph, px:px + pw] = np.clip(
                     roi * (1 - a) + rgb * a, 0, 255).astype(np.uint8)
-            proc.stdin.write(frame.tobytes())
+            _pipe_write(proc, frame)
             if progress and k % 30 == 0:
                 progress(k / total)
     finally:
@@ -4452,7 +4575,7 @@ def restyle_cs2(src: str, out: str, title: str = "",
             proc.stdin.close()
         except Exception:
             pass
-        proc.wait(timeout=900)
+        _wait_pipe(proc)
     if proc.returncode != 0 or not _has_video(out):
         raise RuntimeError("рестайл не удался")
     return {"box": [by0, by1], "dur": round(dur, 1),
@@ -4611,7 +4734,7 @@ def render_blur9(src: str, moment: dict, segs, out: str,
                         frame = __import__("numpy").asarray(img)
             if moment.get("cta") and t > end - 2.5:
                 frame = _with_part2_cta(frame, font)
-            proc.stdin.write(frame.tobytes())
+            _pipe_write(proc, frame)
             if progress and k % 15 == 0:
                 progress(k / total)
     finally:
@@ -4620,7 +4743,7 @@ def render_blur9(src: str, moment: dict, segs, out: str,
             proc.stdin.close()
         except Exception:
             pass
-        proc.wait(timeout=600)
+        _wait_pipe(proc)
     if proc.returncode != 0 or not _has_video(out):
         raise RuntimeError("рендер не удался")
     return out
@@ -4756,7 +4879,7 @@ def render_clip(src: str, moment: dict, segs, out: str, facetrack: bool = True,
                         frame = __import__("numpy").asarray(img)
             if moment.get("cta") and t > end - 2.5:
                 frame = _with_part2_cta(frame, font)
-            proc.stdin.write(frame.tobytes())
+            _pipe_write(proc, frame)
             if progress and k % 15 == 0:
                 progress(k / total)
     finally:
@@ -4765,7 +4888,7 @@ def render_clip(src: str, moment: dict, segs, out: str, facetrack: bool = True,
             proc.stdin.close()
         except Exception:
             pass
-        proc.wait(timeout=600)
+        _wait_pipe(proc)
     if proc.returncode != 0 or not _has_video(out):
         raise RuntimeError("рендер не удался")
     return out

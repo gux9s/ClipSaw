@@ -238,7 +238,8 @@ def free_slot():
         active = max(0, active - 1)
 
 
-def fetch_source(url: str, progress=None, limit_min: int = 0) -> str:
+def fetch_source(url: str, progress=None, limit_min: int = 0,
+                 sections: list | None = None) -> str:
     from yt_dlp import YoutubeDL
 
     def hook(d):
@@ -270,14 +271,19 @@ def fetch_source(url: str, progress=None, limit_min: int = 0) -> str:
                        "/bv*[height<=1440]+ba/b[height<=1440]"),
             "format_sort": ["vbr"],
             "merge_output_format": "mp4", "outtmpl": tmp}
-    try:
-        limit_min = max(0, int(limit_min or 0))
-    except (TypeError, ValueError):
-        limit_min = 0
-    if limit_min > 0:
-        # нужен только кусок: тянем секцию, а не всё видео
-        # (HLS/DASH — только нужные фрагменты, остальное как раньше)
-        opts["download_sections"] = [f"*00:00-{limit_min:02d}:00"]
+    if sections:
+        # точечные куски (ручные таймкоды): тянем только нужные секции,
+        # а не всё видео (на DASH/HLS — только нужные фрагменты)
+        opts["download_sections"] = list(sections)
+    else:
+        try:
+            limit_min = max(0, int(limit_min or 0))
+        except (TypeError, ValueError):
+            limit_min = 0
+        if limit_min > 0:
+            # нужен только кусок: тянем секцию, а не всё видео
+            # (HLS/DASH — только нужные фрагменты, остальное как раньше)
+            opts["download_sections"] = [f"*00:00-{limit_min:02d}:00"]
     with YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True)
         title = (info or {}).get("title", "видео")
@@ -296,6 +302,173 @@ def fetch_source(url: str, progress=None, limit_min: int = 0) -> str:
     return path, title
 
 
+def _fmt_ts(t: float) -> str:
+    """Секунды -> ЧЧ:ММ:СС для download_sections и подписей."""
+    t = max(0, int(t))
+    return f"{t // 3600:02d}:{(t % 3600) // 60:02d}:{t % 60:02d}"
+
+
+def _ffmpeg_cut(src: str, s: float, dur: float, out: str) -> str:
+    """Точный вырез куска с перекодом (границы по кадру, а не по кейфрейму —
+    иначе тайминги субтитров уплывут)."""
+    import subprocess as _sp
+    _sp.run([FFMPEG, "-y", "-v", "error",
+             "-ss", str(round(max(s, 0.0), 2)), "-t", str(round(max(dur, 1.0), 2)),
+             "-i", src, "-map", "0:v", "-map", "0:a?"] + ac._rand_meta()
+            + ac._video_codec_args()
+            + ["-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
+               "-movflags", "+faststart", out],
+            timeout=600, check=True)
+    if not ac._readable_video(out):
+        raise RuntimeError("вырез куска не удался")
+    return out
+
+
+def fetch_moment_section(url: str, start: float, end: float, pad: float = 8.0,
+                         progress=None):
+    """Качает ТОЛЬКО момент [start-pad, end+pad], а не всё видео.
+    Возвращает (path, title); файл начинается со start-pad, тайминги
+    внутри — локальные. Секции не зашли / файл битый — фолбэк:
+    всё видео + точный вырез (старое поведение, но только для этого куска)."""
+    s = max(0.0, float(start) - pad)
+    e = float(end) + pad
+    section = f"*{_fmt_ts(s)}-{_fmt_ts(e)}"
+    try:
+        path, title = fetch_source(url, progress=progress, sections=[section])
+    except Exception:
+        path, title = None, ""
+    if path and ac._readable_video(path):
+        try:
+            dur = ac.media_duration(path) or 0
+        except Exception:
+            dur = 0
+        if dur and dur <= (e - s) + 30:
+            return path, title  # секции сработали — файл уже только момент
+        # секции проигнорированы и приехало всё видео — вырезаем кусок
+        cut = os.path.join(TMP_DIR, uuid.uuid4().hex + ".mp4")
+        try:
+            _ffmpeg_cut(path, s, e - s, cut)
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            return cut, title
+        except Exception:
+            try:
+                if os.path.exists(cut):
+                    os.remove(cut)
+            except OSError:
+                pass
+            if dur:
+                return path, title  # резать не вышло — отдаём как есть
+    # фолбэк: качаем всё и режем кусок
+    full, title = fetch_source(url, progress=progress)
+    try:
+        cut = os.path.join(TMP_DIR, uuid.uuid4().hex + ".mp4")
+        _ffmpeg_cut(full, s, e - s, cut)
+        return cut, title
+    finally:
+        try:
+            if os.path.exists(full):
+                os.remove(full)
+        except OSError:
+            pass
+
+
+def run_manual_job(job_id: str, url: str, opts: dict, stamps: list, prog) -> list:
+    """Ручные таймкоды — умный путь без DREX, сцен и полной транскрибации:
+    каждый момент качается ОТДЕЛЬНО (а не всё видео), паузы внутри
+    чистятся, субтитры — транскрибация только этих минут.
+    Возвращает clips-мета для log_job."""
+    total = len(stamps)
+    mode = opts.get("vmode", "split")
+    # --- фаза 1: точечная скачка (2→30%) ---
+    raws = []
+    for i, m in enumerate(stamps):
+        s, e = float(m["start"]), float(m["end"])
+        prog(int(2 + 28 * i / total), f"качаю момент {i + 1}/{total}…")
+
+        def _dp(k, st, _i=i):
+            prog(int(2 + 28 * (_i + max(0.0, min(1.0, k))) / total),
+                 f"качаю момент {_i + 1}/{total}…")
+
+        p, vt = fetch_moment_section(url, s, e, pad=8.0, progress=_dp)
+        raws.append((p, vt))
+    with lock:
+        if job_id in jobs and raws:
+            jobs[job_id].update(title=raws[0][1])
+    # --- фаза 2: паузы -> субтитры минут -> рендер (30→99%) ---
+    clips = []
+    for i, ((p, _vt), m) in enumerate(zip(raws, stamps)):
+        f0 = 30 + 69 * i / total
+        f1 = 30 + 69 * (i + 1) / total
+
+        def _pp(q, _a=f0, _b=f1, _i=i):
+            with lock:
+                if job_id in jobs:
+                    npct = int(_a + max(0.0, min(1.0, q)) * (_b - _a))
+                    if npct > jobs[job_id].get("pct", 0):
+                        jobs[job_id].update(
+                            stage=f"момент {_i + 1}/{total}…", pct=npct)
+
+        s, e = float(m["start"]), float(m["end"])
+        # паузы внутри момента — вон (файл-слайс начинается с s-pad)
+        clean = os.path.join(TMP_DIR, uuid.uuid4().hex + ".mp4")
+        try:
+            got = ac.remove_silence(
+                p, clean, progress=lambda q, st: _pp(q * 0.10, ))
+        except Exception:
+            got = p
+        stage_in = got
+        # субтитры: транскрибация ТОЛЬКО этих минут, а не всего видео
+        try:
+            segs_i, _lang = ac.transcribe(
+                stage_in, 0, progress=lambda q, st: _pp(0.10 + q * 0.25),
+                model_name=opts.get("asr_model", "base"))
+        except Exception:
+            segs_i = []
+        dur = ac.media_duration(stage_in) or round(e - s + 16.0, 1)
+        title_m = f"Момент {i + 1} · {_fmt_ts(s)}–{_fmt_ts(e)}"
+        mm = {"start": 0.0, "end": dur, "score": 100, "title": title_m,
+              "verdict": f"Вручную {_fmt_ts(s)}–{_fmt_ts(e)}",
+              "hook": title_m[:40]}
+        out = os.path.join(OUT_DIR, f"{job_id}_{i + 1}.mp4")
+        if mode == "fast":
+            ac.fast_cut(stage_in, {"start": 0.0, "end": dur}, out)
+        else:
+            ac.render_clip(
+                stage_in, mm, segs_i, out,
+                facetrack=opts.get("facetrack", True),
+                captions=opts.get("captions", True),
+                vmode=mode, antidetect=opts.get("antidetect", False),
+                mirror=opts.get("mirror", False),
+                banner=opts.get("banner", True),
+                banner_path=opts.get("banner_path"),
+                gameplay=opts.get("gameplay", "subway"),
+                max_total=float(opts.get("max_len", 60) or 60),
+                progress=lambda q: _pp(0.35 + max(0.0, min(1.0, q)) * 0.65))
+        clips.append({
+            "i": i, "title": title_m, "score": 100,
+            "verdict": f"Вручную {_fmt_ts(s)}–{_fmt_ts(e)}",
+            "hook": title_m[:40], "story": 0, "part": 0, "of": 1,
+            "dur": ac.media_duration(out) or round(dur, 1),
+            "size": os.path.getsize(out) if os.path.exists(out) else 0})
+        _pp(1.0)
+        # слайсы отъели своё — удаляем сразу, а не копим в tmp
+        for f in {p, stage_in}:
+            try:
+                if f and os.path.exists(f):
+                    os.remove(f)
+            except OSError:
+                pass
+        try:
+            if os.path.exists(clean) and clean not in (p, stage_in):
+                os.remove(clean)
+        except OSError:
+            pass
+    return clips
+
+
 def run_job(job_id: str, url: str, opts: dict):
     def prog(pct, stage):
         with lock:
@@ -309,6 +482,20 @@ def run_job(job_id: str, url: str, opts: dict):
         free_gb = shutil.disk_usage(BASE).free / 1e9
         if free_gb < 1.5:
             raise RuntimeError(f"Нет места на диске ({free_gb:.1f} ГБ) — почисти Библиотеку")
+        mode = opts.get("vmode", "blur")
+        stamps = ac.parse_stamps(opts.get("stamps", ""))
+        if mode != "parts" and stamps:
+            # ручной путь: DREX/сцены/полное видео не нужны вообще —
+            # качаем только моменты, субтитры только на эти минуты
+            with lock:
+                jobs[job_id].update(status="work", stage="качаю моменты…", pct=1)
+            clips = run_manual_job(job_id, url, opts, stamps[:20], prog)
+            with lock:
+                jobs[job_id].update(status="done", pct=100, stage="готово",
+                                    clips=clips, scorer="manual")
+                title = jobs[job_id].get("title", url)
+            log_job(job_id, title, url, "done", clips, "manual")
+            return
         with lock:
             jobs[job_id].update(status="work", stage="качаю видео…", pct=1)
         src, title = fetch_source(
@@ -366,14 +553,9 @@ def run_job(job_id: str, url: str, opts: dict):
             segs, lang = ac.transcribe(src, opts.get("limit_min", 0),
                                         progress=lambda p, s: prog(int(10 + p * 0.7), s),
                                         model_name=opts.get("asr_model", "base"))
-        stamps = ac.parse_stamps(opts.get("stamps", ""))
-        if mode == "parts":
-            pass  # моменты-части уже готовы выше
-        elif stamps:
-            scorer = "manual"
-            moments = [{**m, "title": m.get("title") or f"Момент {k + 1}"}
-                       for k, m in enumerate(stamps[:20])]
-        else:
+        # Ручные таймкоды сюда уже не доходят: их увёл ранний возврат
+        # в run_manual_job (точечная скачка, без DREX/сцен/полного видео).
+        if mode != "parts":
             prog(82, "оценка моментов…")
             domain = ac.pick_domain(segs, opts.get("domain", "auto"))
             moments, scorer = ac.pick_moments(
@@ -446,11 +628,18 @@ def run_job(job_id: str, url: str, opts: dict):
                     "dur": ac.media_duration(out) or round(float(m["end"]) - float(m["start"]), 1),
                     "size": os.path.getsize(out)}
 
-        # 2 клипа параллельно — на M2 даёт ~x1.7 к скорости (кодирует железо,
-        # Python-цикл один поток не насыщает все ядра)
-        with ThreadPoolExecutor(max_workers=1 if fast else 2) as ex:
-            for c in ex.map(one, list(enumerate(moments))):
-                clips.append(c)
+        # 2 клипа параллельно — кодирует железо, ffprobe/ffmpeg одного
+        # потока все ядра не насыщают. as_completed вместо map: зависший
+        # клип больше не блокирует выдачу готовых (map ждал по порядку —
+        # один вставший ffmpeg держал всю пачку на «рендер… 2/8»).
+        from concurrent.futures import as_completed as _ac
+        ex = ThreadPoolExecutor(max_workers=1 if fast else 2)
+        try:
+            futs = {ex.submit(one, (i, m)): i for i, m in enumerate(moments)}
+            for fut in _ac(futs):
+                clips.append(fut.result())
+        finally:
+            ex.shutdown(wait=False, cancel_futures=True)
         clips.sort(key=lambda c: c["i"])
         with lock:
             jobs[job_id].update(status="done", pct=100, stage="готово", clips=clips)
@@ -479,7 +668,9 @@ def run_job(job_id: str, url: str, opts: dict):
 
 @app.get("/")
 def index():
-    return send_file(os.path.join(BASE, "index.html"))
+    r = send_file(os.path.join(BASE, "index.html"))
+    r.headers["Cache-Control"] = "no-store"  # фронт правим часто — без залипшего кэша
+    return r
 
 
 @app.post("/api/start")
@@ -670,9 +861,14 @@ def run_twitch_job(job_id: str, url: str, opts: dict):
                     "dur": ac.media_duration(out) or round(float(m["end"]) - float(m["start"]), 1),
                     "size": os.path.getsize(out)}
 
-        with ThreadPoolExecutor(max_workers=2) as ex:
-            for c in ex.map(one, list(enumerate(moments))):
-                clips.append(c)
+        from concurrent.futures import as_completed as _ac2
+        ex = ThreadPoolExecutor(max_workers=2)
+        try:
+            futs = {ex.submit(one, (i, m)): i for i, m in enumerate(moments)}
+            for fut in _ac2(futs):
+                clips.append(fut.result())
+        finally:
+            ex.shutdown(wait=False, cancel_futures=True)
         clips.sort(key=lambda c: c["i"])
         with lock:
             jobs[job_id].update(status="done", pct=100, stage="готово", clips=clips)
