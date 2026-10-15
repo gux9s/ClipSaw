@@ -392,6 +392,10 @@
           <div><label class="lbl" for="game">Геймплей снизу</label>
             <select id="game"><option value="subway" selected>Subway Surfers</option><option value="minecraft">Minecraft паркур</option></select></div>
         </div>
+        <div class="ai-grid">
+          <div><label class="lbl" for="domain">Контент источника</label>
+            <select id="domain"><option value="auto" selected>Авто: сериал / игра</option><option value="series">Сериал / шоу / блог</option><option value="streams">Игра / стрим / катка</option></select></div>
+        </div>
         <div class="step"><b>03</b><span>Оформление</span></div>
         <div class="chkgrid">
         <label class="chk"><input type="checkbox" id="caps" checked> Субтитры с подсветкой слов</label>
@@ -680,7 +684,7 @@ $('go').onclick=async ()=>{
         min_len:+$('lens').value.split('-')[0],max_len:+$('lens').value.split('-')[1],
         limit_min:+$('limit').value,
         captions:$('caps').checked&&mode!=='fast',facetrack:mode==='face'||mode==='split',
-        antidetect:$('anti').checked,mirror:$('mir').checked,banner:$('ban').checked,banner_file:$('banFile').value,asr_model:$('asd').value,gameplay:$('game').value,fast:mode==='fast',vmode:mode==='fast'?'blur':mode,
+        antidetect:$('anti').checked,mirror:$('mir').checked,banner:$('ban').checked,banner_file:$('banFile').value,asr_model:$('asd').value,gameplay:$('game').value,fast:mode==='fast',vmode:mode==='fast'?'blur':mode,domain:$('domain').value,
         stamps:$('manualChk').checked?$('stamps').value:''})});
     const j=await r.json();
     if(!j.ok)throw new Error(j.error||'Не получилось');

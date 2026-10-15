@@ -316,6 +316,9 @@ def run_job(job_id: str, url: str, opts: dict):
             limit_min=opts.get("limit_min", 0))
         with lock:
             jobs[job_id].update(title=title)
+        # белая полоса снизу (poki у геймплейных рипов) — срезаем сразу,
+        # дальше все режимы работают с чистым кадром
+        src = ac.strip_bar_file(src)
         mode = opts.get("vmode", "blur")
         if mode == "parts":
             # режим частей: сцены и DREX не нужны вообще.
@@ -372,11 +375,13 @@ def run_job(job_id: str, url: str, opts: dict):
                        for k, m in enumerate(stamps[:20])]
         else:
             prog(82, "оценка моментов…")
+            domain = ac.pick_domain(segs, opts.get("domain", "auto"))
             moments, scorer = ac.pick_moments(
                 segs, lang, opts.get("api_key", ""),
                 opts.get("want", 8),
                 opts.get("min_len", 20), opts.get("max_len", 60),
-                scenes=scenes, min_gap=opts.get("min_gap", 45))
+                scenes=scenes, min_gap=opts.get("min_gap", 45),
+                domain=domain)
         with lock:
             if job_id in jobs:
                 jobs[job_id]["scorer"] = scorer
@@ -522,7 +527,8 @@ def api_start():
             "gameplay": data.get("gameplay", "subway") if data.get("gameplay") in ("subway", "minecraft") else "subway",
             "asr_model": data.get("asr_model", "base") if data.get("asr_model") in ("base", "small", "giga") else "base",
             "fast": bool(data.get("fast", False)),
-            "vmode": data.get("vmode", "blur"), "stamps": stamps}), daemon=True).start()
+            "vmode": data.get("vmode", "blur"), "stamps": stamps,
+            "domain": data.get("domain", "auto") if data.get("domain") in ("auto", "series", "streams") else "auto"}), daemon=True).start()
         ids.append(job_id)
     return jsonify({"ok": True, "jobs": ids})
 
@@ -600,6 +606,8 @@ def run_twitch_job(job_id: str, url: str, opts: dict):
             limit_min=opts.get("limit_min", 0))
         with lock:
             jobs[job_id].update(title=title)
+        # белая полоса снизу — срезаем сразу, дальше все режимы с чистым кадром
+        src = ac.strip_bar_file(src)
         prog(6, "ищу сцены…")
         try:
             scenes = ac.detect_scenes(src)

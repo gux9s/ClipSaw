@@ -298,6 +298,9 @@ def _base_questions(tag: str, domain: str = "series") -> dict:
                              "Enjoyable with zero context."),
                     "false": ("Lobby waiting, load screens, settings menus, buying phase, "
                               "quiet looting with nothing happening, stream starting soon screens, "
+                              "death cam / respawn waiting, scoreboard or map tab open, "
+                              "silent walking or rotation with no contact, replay or killcam "
+                              "watching, AFK or base sitting, repetitive farming with no events, "
                               "or a moment only fans of this streamer get.")}},
             "hook": {
                 "type": "noul",
@@ -306,7 +309,8 @@ def _base_questions(tag: str, domain: str = "series") -> dict:
                     "true": ("First seconds explode: kill feed pops, clutch begins, fail unfolds, "
                              "streamer screams or laughs — impossible to scroll past."),
                     "false": ("Starts with menu navigation, load screens, quiet looting, "
-                              "streamer silent and nothing happening, or mid-round calm.")}},
+                              "death screen, buy menu, silent rotation, streamer silent "
+                              "and nothing happening, or mid-round calm.")}},
             "whole": {
                 "type": "noul",
                 "instructions": f"Moment {tag} is a complete mini-story, not cut off mid-sentence.",
@@ -322,6 +326,7 @@ def _base_questions(tag: str, domain: str = "series") -> dict:
                     "true": ("Peak moment: multi-kill, 1vX clutch, insane flick, epic fail, "
                              "or a cut right before the outcome — viewer must watch part 2."),
                     "false": ("Flat round with no kills, no fails, nothing happens, "
+                              "long quiet stretch, repetitive routine play, "
                               "everything routine.")}},
         }
     return {
@@ -457,6 +462,11 @@ def _drex_score(segs, key: str, want: int, min_len: int, max_len: int,
             wins.append((s0, e0, i, j))
     if not wins:
         return []
+    # кап сетки: на часовых транскриптах окон десятки тысяч —
+    # прореживаем шагом, покрытие то же, вызовов в разы меньше
+    if len(wins) > 2500:
+        step = len(wins) / 2500
+        wins = [wins[int(k * step)] for k in range(2500)]
     # --- 2. перекрывающиеся чанки контекста (18к символов, нахлёст 5к) ---
     def _slen(s):
         return len(f"[{s['start']:.1f}-{s['end']:.1f}] {s['text']}")
@@ -563,12 +573,38 @@ def _drex_score(segs, key: str, want: int, min_len: int, max_len: int,
 
 
 def _drex_direct(segs, key: str, want: int, min_len: int, max_len: int,
-                 scenes=None):
+                 scenes=None, domain: str = "series"):
     """Прямой режим: DREX читает пронумерованные строки транскрипта и сам
     метит границы — open (здесь начинается виральное) и close (здесь резать).
-    Код не предлагает окна, а только режет там, где указал DREX."""
+    Код не предлагает окна, а только режет там, где указал DREX.
+    domain=streams — критерии под геймплей (фраги/клатчи/фейлы)."""
     if not segs:
         return []
+    if domain == "streams":
+        _open_true = ("Right here starts something viral: insane flick, impossible "
+                      "clutch beginning, hilarious fail, scream reaction, trash-talk, "
+                      "or jaw-dropping skill — the exact second that stops scrolling. "
+                      "High emotion or action ignites within the next 1-2 lines.")
+        _open_false = ("Lobby waiting, load screens, menu navigation, buying phase, "
+                       "quiet looting, death cam, scoreboard, silent rotation with no "
+                       "contact, or a calm mid-round moment. Nothing viral starts here.")
+        _close_true = ("The payoff lands here: multi-kill completes, clutch resolves, "
+                       "fail unfolds fully, reaction peaks, or a cut right before "
+                       "the outcome — a perfect cut point right after this line.")
+        _close_false = ("The fight continues past this line, nothing resolved yet, "
+                        "or it is a flat filler moment. Cutting here would break it.")
+    else:
+        _open_true = ("Right here starts something viral: a shocking accusation, exposed "
+                      "secret, threat, ultimatum, love confession, insult, or a burning "
+                      "question — the exact phrase that stops scrolling. Emotion or "
+                      "conflict ignites within the next 1-2 lines.")
+        _open_false = ("Greetings, filler, small talk, scene-setting, recap, or a sentence "
+                       "continued from before. Nothing viral starts here.")
+        _close_true = ("The payoff lands here: punchline, confession, reveal, decision, "
+                       "plot twist, or a question left hanging for part 2. "
+                       "A perfect cut point right after this line.")
+        _close_false = ("The thought continues past this line, the explanation is unfinished, "
+                        "or it is a flat filler ending. Cutting here would break the moment.")
 
     def _slen(s):
         return len(f"[{s['start']:.1f}-{s['end']:.1f}] {s['text']}")
@@ -614,37 +650,36 @@ def _drex_direct(segs, key: str, want: int, min_len: int, max_len: int,
         for s in c:
             n = pos_of.get(id(s), 0)
             lid = f"L{n}"
-            per_chunk[ci][f"{lid}_open"] = {
-                "type": "noul",
-                "instructions": f"Line {lid} OPENS a viral TikTok moment.",
-                "criteria": {
-                    "true": ("Right here starts something viral: a shocking accusation, exposed "
-                             "secret, threat, ultimatum, love confession, insult, or a burning "
-                             "question — the exact phrase that stops scrolling. Emotion or "
-                             "conflict ignites within the next 1-2 lines."),
-                    "false": ("Greetings, filler, small talk, scene-setting, recap, or a sentence "
-                              "continued from before. Nothing viral starts here.")}}
-            per_chunk[ci][f"{lid}_open2"] = {
-                "type": "noul",
-                "instructions": f"Line {lid} is a scroll-stopper opening.",
-                "criteria": {
-                    "true": ("The first phrase shocks, intrigues, or provokes — the viewer must "
-                             "hear what comes next. Instant curiosity spike."),
-                    "false": ("Mundane opening: no curiosity spike, easy to swipe past.")}}
+            txt = str(s.get("text", "") or "")
+            # филлер-строка открытием не станет никогда (hook-сторож её
+            # всё равно задавит): open-вопросы пропускаем, экономим ~1/2
+            # direct-вызовов. Close-вопросы нужны всем строкам.
+            if _HEUR_FILLER_START.match(txt.lower()) or len(txt.split()) < 3:
+                open_qs = {}
+            else:
+                open_qs = {
+                    f"{lid}_open": {
+                        "type": "noul",
+                        "instructions": f"Line {lid} OPENS a viral TikTok moment.",
+                        "criteria": {"true": _open_true, "false": _open_false}},
+                    f"{lid}_open2": {
+                        "type": "noul",
+                        "instructions": f"Line {lid} is a scroll-stopper opening.",
+                        "criteria": {
+                            "true": ("The first phrase shocks, intrigues, or provokes — the viewer must "
+                                     "hear what comes next. Instant curiosity spike."),
+                            "false": ("Mundane opening: no curiosity spike, easy to swipe past.")}},
+                }
+            per_chunk[ci].update(open_qs)
             per_chunk[ci][f"{lid}_close"] = {
                 "type": "noul",
                 "instructions": f"Line {lid} ENDS a viral TikTok moment.",
-                "criteria": {
-                    "true": ("The payoff lands here: punchline, confession, reveal, decision, "
-                             "plot twist, or a question left hanging for part 2. "
-                             "A perfect cut point right after this line."),
-                    "false": ("The thought continues past this line, the explanation is unfinished, "
-                              "or it is a flat filler ending. Cutting here would break the moment.")}}
+                "criteria": {"true": _close_true, "false": _close_false}}
             per_chunk[ci][f"{lid}_close2"] = {
                 "type": "noul",
                 "instructions": f"Line {lid} is a good cut point.",
                 "criteria": {
-                    "true": ("Ends on punch, twist, decision, or an open question — cutting here "
+                    "true": ("Ends on payoff, twist, decision, or an open question — cutting here "
                              "keeps the tension at maximum."),
                     "false": ("Cuts mid-thought or lands on flat filler.")}}
     ans = _ask_drex(key, states, per_chunk)
@@ -1147,6 +1182,22 @@ def _polish_picks(picked, segs, key):
                 p["verdict"] = (str(p.get("verdict", "")) + " Клиффхэнгер: жди часть 2.")[:300]
 
 
+def pick_domain(segs, hint: str = "auto") -> str:
+    """Какой домен критериев: series / streams.
+    hint series|streams — принудительно из интерфейса; auto — по плотности
+    речи: редкая речь (<0.9 слов/сек) = геймплей без комментатора, которому
+    критерии про измены/признания дают мусорные пики."""
+    if hint in ("series", "streams"):
+        return hint
+    try:
+        words = sum(len(str(s.get("text", "")).split()) for s in segs)
+        span = (float(segs[-1]["end"]) - float(segs[0]["start"])) if segs else 0
+        wps = words / max(span, 1)
+    except Exception:
+        return "series"
+    return "streams" if wps < 0.9 else "series"
+
+
 def pick_moments(segs, lang: str, key: str, want: int, min_len: int, max_len: int,
                  scenes=None, min_gap: float = 30.0, domain: str = "series"):
     if not key:
@@ -1156,7 +1207,7 @@ def pick_moments(segs, lang: str, key: str, want: int, min_len: int, max_len: in
         # прямой режим: границы ставит сам DREX на строках транскрипта
         try:
             cands = _drex_direct(segs, key, want, min_len, max_len,
-                                 scenes=scenes)
+                                 scenes=scenes, domain=domain)
         except Exception:
             cands = []
     try:
@@ -1224,7 +1275,9 @@ def pick_moments(segs, lang: str, key: str, want: int, min_len: int, max_len: in
         raise RuntimeError("DREX вернул пусто — попробуй ещё раз")
     if TOURNAMENT and len(pool) >= 3:
         try:
-            pool = _tournament_order(pool, segs, key)
+            # голову топа хватает и 8: пар 28 вместо 66, порядок тот же
+            pool = _tournament_order(pool, segs, key,
+                                     top_n=min(12, max(8, want)))
         except Exception:
             pass
     # адаптивный зазор: на часовом видео под 50 клипов зазор жмём, иначе не влезут
@@ -2418,7 +2471,7 @@ def _extract_pcm(path: str, ss=None, dur=None, af=None,
     return np.frombuffer(r.stdout, dtype=np.int16).reshape(-1, ch)
 
 
-def _seek_live(gcap, gdur: float, need: float, tries: int = 3):
+def _seek_live(gcap, gdur: float, need: float, tries: int = 5):
     """Ставит геймплей на живое место: пробует случайные точки, меряет
     движение между двумя кадрами (0.4с) и берёт самое активное.
     Отсекает меню, профиль, сундуки и темноту."""
@@ -2451,6 +2504,86 @@ def _seek_live(gcap, gdur: float, need: float, tries: int = 3):
             best, best_score = s, score
     gcap.set(cv2.CAP_PROP_POS_MSEC, best * 1000)
     return best
+
+
+_BAR_CACHE = {}
+
+
+def _gameplay_bar(path: str) -> int:
+    """Высота белой браузерной полосы (poki) снизу кадра геймплея, в px
+    исходника. 0 — полосы нет. Кэш на процесс (ключ: путь+mtime+размер)."""
+    try:
+        key = (path, os.path.getmtime(path), os.path.getsize(path))
+    except OSError:
+        return 0
+    if key in _BAR_CACHE:
+        return _BAR_CACHE[key]
+    h_bar = 0
+    try:
+        import cv2
+        import numpy as np
+        import tempfile
+        _w, _h, _n, _f = _probe_wh_fps(path)
+        dur = _n / max(_f, 1) if _n and _f else 0
+        if dur > 0:
+            tmp = os.path.join(tempfile.gettempdir(),
+                               f"gpbar_{os.getpid()}.png")
+            try:
+                subprocess.run(
+                    [FFMPEG, "-y", "-v", "error",
+                     "-ss", f"{dur * 0.1:.1f}", "-i", path,
+                     "-frames:v", "1", tmp],
+                    timeout=60, check=False)
+                fr = cv2.imread(tmp)
+                if fr is not None:
+                    g = fr.astype(float).mean(axis=2)
+                    rows = g.mean(axis=1)
+                    n = 0
+                    for v in reversed(rows):
+                        if v > 200:
+                            n += 1
+                        else:
+                            break
+                    # полоса — заметная (10+px) и не пол-экрана (<130px)
+                    if 10 <= n <= 130:
+                        h_bar = n + 16  # запас: край сглажен, при апскейле полоса расползается
+            finally:
+                try:
+                    if os.path.exists(tmp):
+                        os.remove(tmp)
+                except OSError:
+                    pass
+    except Exception:
+        h_bar = 0
+    _BAR_CACHE[key] = h_bar
+    return h_bar
+
+
+def strip_bar_file(src: str) -> str:
+    """Срезает белую браузерную полосу (poki) снизу файла перепаковкой.
+    Без полосы — возвращает src как есть. Таймкоды не едут (только кроп),
+    поэтому сцены/транскрибация дальше работают как обычно."""
+    try:
+        bar = _gameplay_bar(src)
+        if not bar:
+            return src
+        out = src + ".nobar.mp4"
+        subprocess.run(
+            [FFMPEG, "-y", "-v", "error", "-i", src,
+             "-vf", f"crop=iw:ih-{bar}:0:0",
+             "-map", "0:v", "-map", "0:a?"] + _rand_meta()
+            + _video_codec_args()
+            + ["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", out],
+            timeout=1800, check=True)
+        if not _readable_video(out):
+            return src
+        try:
+            os.remove(src)
+        except OSError:
+            pass
+        return out
+    except Exception:
+        return src
 
 
 _BANNER_EFF = {}
@@ -2830,9 +2963,12 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
     else:
         fc.append("[vtop0]null[vtop]")
     # --- низ: геймплей кольцом. Случайный флип низа у каждого клипа:
-    # одинаковый subway сверху разных моментов даёт разный низ-хеш ---
+    # одинаковый subway сверху разных моментов даёт разный низ-хеш.
+    # Белую браузерную полосу (poki) режем заранее по детекту. ---
     _gflip = ",hflip" if random.random() < 0.5 else ""
-    fc.append(f"[1:v]fps=30{_gflip},scale=1080:1152:flags=lanczos:"
+    _gbar = _gameplay_bar(gp)
+    _gpre = f"crop=iw:ih-{_gbar}:0:0," if _gbar else ""
+    fc.append(f"[1:v]fps=30{_gflip},{_gpre}scale=1080:1152:flags=lanczos:"
               f"force_original_aspect_ratio=increase,"
               f"crop=1080:1152:x='(in_w-out_w)/2+({jx:.4f}*in_w)':"
               f"y='(in_h-out_h)/2+({jy:.4f}*in_h)',setsar=1[vbot]")
