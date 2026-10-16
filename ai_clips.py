@@ -189,7 +189,7 @@ _AUDIO_OUT = ["-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2"]
 
 # ---------- 1. Транскрибация ----------
 
-def transcribe(path: str, limit_min: int = 0, progress=None, model_name: str = "base"):
+def transcribe(path: str, limit_min: int = 0, progress=None, model_name: str = "giga"):
     """faster-whisper / GigaAM -> segments[{start,end,text,words[]}]."""
     if model_name == "giga":
         return _transcribe_giga(path, limit_min, progress)
@@ -883,9 +883,17 @@ def snap_to_speech(s: float, e: float, bounds, tol: float = 1.2):
 
 
 def parse_stamps(text: str):
-    """Ручные таймкоды: строки 'мм:сс-мм:сс' / 'ч:мм:сс-...' / 'сек-сек'."""
+    """Ручные таймкоды: строки 'мм:сс-мм:сс' / 'ч:мм:сс-...' / 'сек-сек'.
+    Терпимый к мусору: '02:15-03:10 название' или лишние пробелы больше
+    не убивают строку молча (раньше такое тихо уходило в авто-режим
+    с DREX — отсюда и «зачем он»)."""
     def ts(t):
-        t = t.strip().replace(",", ".")
+        t = (t or "").strip().replace(",", ".")
+        # берём первый похожий на время кусок — хвосты типа названия режем
+        m = re.search(r"\d+:\d+(?::\d+)?(?:\.\d+)?|\d+(?:\.\d+)?", t)
+        if not m:
+            return None
+        t = m.group(0)
         if re.fullmatch(r"\d+(\.\d+)?", t):
             return float(t)
         p = t.split(":")
@@ -902,7 +910,7 @@ def parse_stamps(text: str):
     out = []
     for line in (text or "").splitlines():
         line = line.strip().strip("-–— ")
-        if not line or "-" not in line.replace("–", "-"):
+        if not line or "-" not in line.replace("–", "-").replace("—", "-"):
             continue
         a, b = re.split(r"\s*[-–—]\s*", line, maxsplit=1)
         s, e = ts(a), ts(b)
@@ -1888,14 +1896,41 @@ def render_twitch_clip(src: str, moment: dict, segs, out: str,
                         break
                 if bok and bfr is not None:
                     _bh0, _bw0 = bfr.shape[:2]
-                    _boxw = 650 if _bh0 > _bw0 else min(1022, OUT_W2)
-                    _bh = int(round(_bh0 * _boxw / max(_bw0, 1)))
-                    _bh = min(_bh, OUT_H2)
-                    _by = (OUT_H2 - _bh) // 2 + random.randint(-15, 15)
+                    _tw_placed = False
+                    if _banner_trading(bpath) and _bw0 < _bh0:
+                        # только низ (катка ниже вебки), 558×990 = 26.6%
+                        _boxw, _boxh = 558, 990
+                        _gr_stretch = False
+                        _gr_zoom = 1.0
+                        _by = (TOP_H2 + max(OUT_H2 - TOP_H2 - _boxh, 0) // 2
+                               + random.randint(-10, 10))
+                        _tw_placed = True
+                    elif _banner_big(bpath) and _bw0 >= _bh0:
+                        # 1080×512 = 26.7% экрана, бока кропятся кавером
+                        _boxw, _boxh = _BANNER_BIG_W, _BANNER_BIG_H
+                        _gr_stretch = False
+                        _gr_zoom = 1.0
+                    elif _banner_full(bpath) and _bw0 > _bh0:
+                        # GR Music: стретч 1080×404 = 21.0% + наезд от кромки
+                        _boxw, _boxh = _BANNER_GR_W, _BANNER_GR_H
+                        _gr_stretch = True
+                        _gr_zoom = _BANNER_GR_ZOOM
+                    else:
+                        _gr_stretch = False
+                        _gr_zoom = 1.0
+                        _tw_placed = False
+                        _boxw = 650 if _bh0 > _bw0 else min(1022, OUT_W2)
+                        _bh = int(round(_bh0 * _boxw / max(_bw0, 1)))
+                        _boxh = min(_bh, OUT_H2)
+                    if not _tw_placed:
+                        _by = ((OUT_H2 - _boxh) // 2
+                               + random.randint(-15, 15))
+                    # Trading — 0.7, остальные — 0.95
+                    _bop = 0.7 if _banner_trading(bpath) else 0.95
                     frame = _banner_overlay(
-                        frame, bfr, y_top=_by, box_w=_boxw,
-                        zoom=1.0, bj=bj,
-                        opacity=0.95 if tw_key else 1.0,
+                        frame, bfr, y_top=_by, box_w=_boxw, box_h=_boxh,
+                        zoom=_gr_zoom, bj=bj, stretch=_gr_stretch,
+                        opacity=_bop,
                         key_green=tw_key)
                     banner_on = True
             if captions and not banner_on:
@@ -2355,33 +2390,101 @@ def _banner_key_vf(path: str | None = None) -> str:
     return ""
 
 
+def _banner_trading(bpath: str | None = None) -> bool:
+    """Вертикальный Trading-креатив: полупрозрачный 70%, строго по центру."""
+    try:
+        n = os.path.basename(bpath or BANNER_FILE).lower()
+    except Exception:
+        return False
+    return n.endswith((".mp4", ".webm")) and "trading" in n
+
+
 def _banner_fmt(bpath: str | None = None) -> str:
-    """Форматная цепочка баннера: хромакей-файлы — ключ + лёгкая
-    прозрачность, готовые креативы (типа Trading) — целиком,
-    без прозрачности. Вставлять ПЕРЕД setpts."""
+    """Форматная цепочка баннера: Trading — 0.7, все остальные — 0.95
+    (хромакей-файлы — после вычитания зелени). Сквозь баннер чуть
+    видно видео. Вставлять ПЕРЕД setpts."""
     _key = _banner_key_vf(bpath)
     if _key:
         return f"{_key}format=yuva420p,colorchannelmixer=aa=0.95"
-    return "format=yuv420p"
+    if _banner_trading(bpath):
+        return "format=yuva420p,colorchannelmixer=aa=0.7"
+    return "format=yuva420p,colorchannelmixer=aa=0.95"
 
 
-def _banner_box(bpath: str, out_h: int = 1920):
-    """Ширина/верх бокса баннера: горизонтальные — широко внизу по центру
-    (как раньше), вертикальные (Trading 720x1280) — компактно по центру
-    экрана (~60% высоты), иначе перекроют всё видео."""
+# Минимум площади под крупные баннеры: 26.6% экрана 1080x1920.
+# Широкие креативы (GR Music 3:1, RubUP ~2.3:1) одной шириной не дотянуть
+# (1080px в ширину дают лишь 18-24%), поэтому им — бокс 1080×511
+# на всю ширину с кропом боков: 1080×511/2073600 = 26.6%.
+BANNER_MIN_AREA = 0.266
+# Размеры боксов только ЧЁТНЫЕ: нечёт (511, 403, случайные 1007) роняет
+# кодировщик (yuv420p требует делимость на 2) — часть рендеров падала.
+_BANNER_BIG_W, _BANNER_BIG_H = 1080, 512  # 26.7% экрана
+# GR Music: бокс 1080×404 + bleed-наезд 1.08: контент шире экрана,
+# края и скруглённые углы уходят за кадр — баннер впритык до краёв.
+# (Натяжка +12% высоты глазом почти не видна.)
+_BANNER_GR_W, _BANNER_GR_H, _BANNER_GR_ZOOM = 1080, 404, 1.08
+
+
+def _banner_big(bpath: str | None = None) -> bool:
+    """Крупный показ кавером (минимум 26.6% экрана): только RubUP.
+    GR Music идёт целиком (см. _banner_full) — по краям важный текст."""
+    try:
+        n = os.path.basename(bpath or BANNER_FILE).lower()
+    except Exception:
+        return False
+    if not n.endswith((".mp4", ".webm")):
+        return False
+    return "rubup" in n
+
+
+def _banner_full(bpath: str | None = None) -> bool:
+    """GR Music 3:1: стретч 1080×403 = 21.0% экрана (+12% высоты)."""
+    try:
+        n = os.path.basename(bpath or BANNER_FILE).lower()
+    except Exception:
+        return False
+    if not n.endswith((".mp4", ".webm")):
+        return False
+    return "music" in n
+
+
+def _banner_box(bpath: str, out_h: int = 1920, top: int = 0):
+    """(ширина, высота, верх) бокса баннера: обычные горизонтальные —
+    широко внизу по центру (как раньше), вертикальные (кроме Trading) —
+    компактно по центру экрана (~60% высоты), иначе перекроют всё видео.
+    RubUP — 1080×512 = 26.7% экрана, GR Music — стретч 1080×404.
+    Trading — только на геймплей (ниже top): 558×990 = 26.6%."""
     import random
+
+    def _even(x):
+        return max(int(x) // 2 * 2, 2)
+
     try:
         bw0, bh0, _, _ = _probe_wh_fps(bpath)
     except Exception:
         bw0, bh0 = 0, 0
+    if _banner_big(bpath) and bw0 > bh0:
+        return (_BANNER_BIG_W, _BANNER_BIG_H,
+                (out_h - _BANNER_BIG_H) // 2 + random.randint(-15, 15))
+    if _banner_full(bpath) and bw0 > bh0 > 0:
+        # GR Music: стретч 1080×404 = 21.0% экрана
+        return (_BANNER_GR_W, _BANNER_GR_H,
+                (out_h - _BANNER_GR_H) // 2 + random.randint(-15, 15))
+    if _banner_trading(bpath):
+        # только геймплей: бокс 558×990 = 26.6%, по центру низа
+        w, h = 558, 990
+        room = max(out_h - top - h, 0)
+        return w, h, top + room // 2 + random.randint(-10, 10)
     if bh0 > bw0 > 0:
-        w = random.randint(620, 680)
-        h = int(round(bh0 * w / max(bw0, 1)))
+        w = random.randrange(620, 681, 2)
+        h = _even(bh0 * w / max(bw0, 1))
         if h > 1200:
             h = 1200
-            w = max(int(round(bw0 * h / max(bh0, 1))), 1)
-        return w, (out_h - h) // 2 + random.randint(-15, 15)
-    return random.randint(1000, 1022), random.randint(758, 794)
+            w = _even(bw0 * h / max(bh0, 1))
+        return w, h, (out_h - h) // 2 + random.randint(-15, 15)
+    w = random.randrange(1000, 1023, 2)
+    h = _even(bh0 * w / max(bw0, 1)) if bw0 and bh0 else 538
+    return w, h, random.randint(758, 794)
 
 
 def _green_alpha_bgr(fg_bgr):
@@ -2411,12 +2514,15 @@ def _despill_bgr(fg_bgr):
 def _banner_overlay(bg, fg, box_w: int = BANNER_W, cy: int | None = None,
                     zoom: float = 1.0, y_top: int | None = None,
                     opacity: float = 0.95,
-                    bj: dict | None = None, key_green: bool = False):
+                    bj: dict | None = None, key_green: bool = False,
+                    box_h: int | None = None, stretch: bool = False):
     """Баннер поверх кадра. key_green=True — вычитает зелёный фон
     (хромакей-файлы типа RubUP green-screen): зелень в прозрачность
     с растушёвкой + despill, сквозь неё видно видео.
     cy — центр по вертикали (по умолчанию центр кадра), y_top — верх бокса,
     zoom — наезд с центр-кропом,
+    box_h — высота бокса: задан — кавер (бока кропятся), иначе по аспекту.
+    Крупные баннеры идут боксом 1080×511 = 26.6% экрана.
     opacity — непрозрачность баннера (0.95 = фон чуть просвечивает)."""
     import cv2
     import numpy as np
@@ -2426,7 +2532,20 @@ def _banner_overlay(bg, fg, box_w: int = BANNER_W, cy: int | None = None,
     if bh > bg.shape[0]:
         bh = bg.shape[0]
         bw = max(int(round(w0 * bh / max(h0, 1))), 1)
-    fg = cv2.resize(fg, (bw, bh), interpolation=cv2.INTER_LANCZOS4)
+    if stretch and box_h and box_h > 0:
+        # стретч в точный бокс: ничего не режем, лёгкая натяжка
+        fg = cv2.resize(fg, (bw, box_h), interpolation=cv2.INTER_LANCZOS4)
+        bh = box_h
+    elif box_h and box_h > 0 and box_h != bh:
+        # кавер под заданную высоту: бока режем, искажений нет
+        s = max(bw / max(w0, 1), box_h / max(h0, 1))
+        sw, sh = max(int(round(w0 * s)), 1), max(int(round(h0 * s)), 1)
+        big = cv2.resize(fg, (sw, sh), interpolation=cv2.INTER_LANCZOS4)
+        dx, dy = max((sw - bw) // 2, 0), max((sh - box_h) // 2, 0)
+        fg = big[dy:dy + box_h, dx:dx + bw]
+        bh = box_h
+    else:
+        fg = cv2.resize(fg, (bw, bh), interpolation=cv2.INTER_LANCZOS4)
     if zoom > 1.0:  # наезд: режем поля, центр-кроп обратно в бокс
         zw, zh = int(round(bw * zoom)), int(round(bh * zoom))
         big = cv2.resize(fg, (zw, zh), interpolation=cv2.INTER_LANCZOS4)
@@ -3108,9 +3227,14 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
             fc.append(f"[vb{bi}]trim=start={prev:.3f}:end={cA:.3f},setpts=PTS-STARTPTS[p{wi}a]")
             order.append(f"[p{wi}a]")
             bi += 1
-            nfrz = int(round(cA * 30))
-            fc.append(f"[vb{bi}]select='eq(n\\,{nfrz})',loop=loop=999:size=1,"
-                      f"setpts=PTS-STARTPTS,fps=30,trim=start=0:end={b_eff:.3f},"
+            # стоп в моменте: держим ПОСЛЕДНИЙ показанный кадр куска
+            # (tpad клонирует его). Старый select по абсолютному номеру
+            # кадра с округлением давал видимый прыжок «на кадр назад».
+            seg = max(cA - prev, 0.04)
+            fc.append(f"[vb{bi}]trim=start={prev:.3f}:end={cA:.3f},"
+                      f"setpts=PTS-STARTPTS,"
+                      f"tpad=stop_mode=clone:stop_duration={b_eff:.3f},"
+                      f"trim=start={seg:.3f}:end={seg + b_eff:.3f},"
                       f"setpts=PTS-STARTPTS[f{wi}]")
             bi += 1
             order.append(f"[f{wi}]")
@@ -3118,9 +3242,23 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
         fc.append(f"[vb{bi}]trim=start={prev:.3f}:end={od:.3f},setpts=PTS-STARTPTS[p{len(wins)}a]")
         order.append(f"[p{len(wins)}a]")
         # баннер: ширина и вертикаль гуляют у каждого рендера, иначе
-        # баннерный кусок пиксель-в-пиксель одинаков во всех клипах пачки
-        _bn_w, _bn_y = _banner_box(bpath)
-        fc.append(f"[2:v]scale={_bn_w}:-2,fps=30,{_banner_fmt(bpath)},"
+        # баннерный кусок пиксель-в-пиксель одинаков во всех клипах пачки.
+        # RubUP: кавер 1080×512 = 26.7%. GR: стретч 1080×404 + bleed 1.08.
+        # Trading: только низ (геймплей ниже шва TOP_H), 558×990 = 26.6%.
+        _bn_w, _bn_h, _bn_y = _banner_box(bpath, top=TOP_H)
+        if _banner_big(bpath):
+            _bn_scale = (f"scale={_bn_w}:{_bn_h}:flags=lanczos:"
+                         f"force_original_aspect_ratio=increase,"
+                         f"crop={_bn_w}:{_bn_h}")
+        elif _banner_full(bpath):
+            # стретч + bleed-наезд: края и углы уходят за кадр
+            _zw = int(_bn_w * _BANNER_GR_ZOOM) // 2 * 2
+            _zh = int(_bn_h * _BANNER_GR_ZOOM) // 2 * 2
+            _bn_scale = (f"scale={_zw}:{_zh}:flags=lanczos,"
+                         f"crop={_bn_w}:{_bn_h}")
+        else:
+            _bn_scale = f"scale={_bn_w}:-2"
+        fc.append(f"[2:v]{_bn_scale},fps=30,{_banner_fmt(bpath)},"
                   f"setpts=PTS/{BANNER_SPEED:.3f}[bn0]")
         fc.append(f"[bn0]split={len(wins)}" + "".join(f"[bb{i}]" for i in range(len(wins))))
         for wi, (oA, oB, cA) in enumerate(wins):
@@ -3182,13 +3320,19 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
         aorder.append(f"[a{len(wins)}]")
         if _banner_has_audio(bpath):
             fc.append(f"[2:a]atempo={BANNER_SPEED:.3f},aresample=44100,"
-                      f"volume=0.5,aformat=sample_fmts=fltp:channel_layouts=stereo[ba]")
-            aorder2 = []
-            for wi in range(len(wins)):
-                aorder2.append(aorder[wi * 2] if wi * 2 < len(aorder) else "")
-                aorder2.append("[ba]")
-            aorder2.append(aorder[-1])
-            aorder = [x for x in aorder2 if x]
+                      f"volume=0.5,aformat=sample_fmts=fltp:channel_layouts=stereo[ba0]")
+        else:
+            # у баннера нет своей дорожки — кладём тишину, иначе звук
+            # убежит вперёд видео на длину баннера
+            fc.append(f"anullsrc=r=44100:cl=stereo:d={b_eff:.3f}[ba0]")
+        fc.append(f"[ba0]asplit={len(wins)}"
+                  + "".join(f"[ba{i}]" for i in range(len(wins))))
+        aorder2 = []
+        for wi in range(len(wins)):
+            aorder2.append(aorder[wi])
+            aorder2.append(f"[ba{wi}]")
+        aorder2.append(aorder[-1])
+        aorder = aorder2
         fc.append("".join(aorder) + f"concat=n={len(aorder)}:v=0:a=1[acat]")
         fc.append(f"[acat]{_LOUDNORM},volume={random.uniform(0.95, 1.05):.3f},"
                   f"{_TIKTOK_AF_TAIL}[aout]")
@@ -4305,7 +4449,7 @@ def uniqualize_video(src: str, out: str, opts: dict | None = None,
             _cprog = (lambda p, s: progress(min(15, 5 + p * 0.3), "транскрибация…")) \
                 if progress else None
             _segs, _lang = transcribe(src, 0, progress=_cprog,
-                                      model_name="base")
+                                      model_name="giga")
             _adj = []
             for _s in _segs:
                 _ws = []

@@ -38,7 +38,7 @@ CFG = os.path.join(BASE, "config.json")
 DEFAULT_CFG = {"gemini_key": "", "drex_key": "", "want": 8, "gameplay": "subway", "lens": "40-59", "limit_min": 0,
                "vmode": "split", "captions": True, "facetrack": True,
                "antidetect": False, "mirror": False, "banner": True,
-               "asr_model": "base", "max_workers": 2}
+               "asr_model": "giga", "max_workers": 2}
 
 
 DB_VERSION = 6
@@ -238,8 +238,33 @@ def free_slot():
         active = max(0, active - 1)
 
 
-def fetch_source(url: str, progress=None, limit_min: int = 0,
-                 sections: list | None = None) -> str:
+class _YdlLogger:
+    """Ошибки yt-dlp — в server.log, а не в пустоту (иначе 'Conversion
+    failed' не расследуешь). Прогресс не дублируем — он идёт через hook."""
+
+    def debug(self, msg):
+        pass
+
+    def warning(self, msg):
+        print(f"[yt-dlp] {msg}", flush=True)
+
+    def error(self, msg):
+        print(f"[yt-dlp] {msg}", flush=True)
+
+
+# Запасной формат без слияния экзотики: avc+aac в родном mp4.
+# Основной формат иногда падает на постобработке (битый фрагмент,
+# странный кодек) — тогда докачиваем этим, он собирается всегда.
+_SAFE_FORMAT = ("bv*[height<=1080][fps<=30][ext=mp4]+ba[ext=m4a]"
+                "/b[height<=1080][ext=mp4]/b")
+
+
+def fetch_source(url: str, progress=None, limit_min: int = 0) -> str:
+    """Качает всё видео целиком быстрым aria2c. БЕЗ download_sections:
+    проверено живьём — для YouTube DASH секции всё равно тянут весь
+    файл (1.2 ГБ ради 10 минут), только медленным нативным качальщиком
+    и через хрупкую постобработку (отсюда 'Conversion failed').
+    limit_min режется локально за секунды (_slice_copy ниже)."""
     from yt_dlp import YoutubeDL
 
     def hook(d):
@@ -250,43 +275,59 @@ def fetch_source(url: str, progress=None, limit_min: int = 0,
             sp = (d.get("_speed_str") or "").strip()
             progress(k, f"качаю видео… {int(k * 100)}% {sp}".strip())
 
+    try:
+        limit_min = max(0, int(limit_min or 0))
+    except (TypeError, ValueError):
+        limit_min = 0
+
+    def _base_opts(out):
+        return {"quiet": True, "no_warnings": True, "noplaylist": True,
+                "socket_timeout": 30, "ffmpeg_location": FFMPEG,
+                "logger": _YdlLogger(),
+                "progress_hooks": [hook],
+                "concurrent_fragment_downloads": 4,
+                "retries": 10, "fragment_retries": 10,
+                # вис ниже 100 КБ/с — убивать и ретраить, а не висеть вечно
+                "throttled_rate": 100000,
+                # БЕЗ extractor_args: дефолтные клиенты отдают 1440p, а android/ios
+                # под SABR-гейтом дают только 360p — проверяли, это и душило качество
+                # aria2c: 16 коннектов вместо одного — ровная скорость без просадок
+                "external_downloader": {"default": "aria2c"},
+                "external_downloader_args": {
+                    "aria2c": ["-x", "16", "-s", "16", "-k", "1M",
+                               "--file-allocation=none", "-q"]},
+                # качаем до 1440p: даунскейл в 1080 чище, чем апскейл из 720p.
+                # vbr первым — из одинаковых берём самый жирный по битрейту
+                # 30fps-варианты первыми: выход всё равно max 30fps, а 60fps = x2 байт впустую
+                "format": ("bv*[height<=1440][fps<=30]+ba/b[height<=1440][fps<=30]"
+                           "/bv*[height<=1440]+ba/b[height<=1440]"),
+                "format_sort": ["vbr"],
+                "merge_output_format": "mp4", "outtmpl": out}
+
+    def _grabber(opts):
+        with YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            return (info or {}).get("title", "видео")
+
     tmp = os.path.join(TMP_DIR, uuid.uuid4().hex + ".mp4")
-    opts = {"quiet": True, "no_warnings": True, "noplaylist": True,
-            "socket_timeout": 30, "ffmpeg_location": FFMPEG,
-            "progress_hooks": [hook],
-            "concurrent_fragment_downloads": 4,
-            "retries": 10, "fragment_retries": 10,
-            # вис ниже 100 КБ/с — убивать и ретраить, а не висеть вечно
-            "throttled_rate": 100000,
-            # БЕЗ extractor_args: дефолтные клиенты отдают 1440p, а android/ios
-            # под SABR-гейтом дают только 360p — проверяли, это и душило качество
-            # aria2c: 16 коннектов вместо одного — ровная скорость без просадок
-            "external_downloader": {"default": "aria2c"},
-            "external_downloader_args": {"aria2c": ["-x", "16", "-s", "16", "-k", "1M",
-                                                    "--file-allocation=none", "-q"]},
-            # качаем до 1440p: даунскейл в 1080 чище, чем апскейл из 720p.
-            # vbr первым — из одинаковых берём самый жирный по битрейту
-            # 30fps-варианты первыми: выход всё равно max 30fps, а 60fps = x2 байт впустую
-            "format": ("bv*[height<=1440][fps<=30]+ba/b[height<=1440][fps<=30]"
-                       "/bv*[height<=1440]+ba/b[height<=1440]"),
-            "format_sort": ["vbr"],
-            "merge_output_format": "mp4", "outtmpl": tmp}
-    if sections:
-        # точечные куски (ручные таймкоды): тянем только нужные секции,
-        # а не всё видео (на DASH/HLS — только нужные фрагменты)
-        opts["download_sections"] = list(sections)
-    else:
+    try:
+        title = _grabber(_base_opts(tmp))
+    except Exception as e1:
+        # постобработка/слияние упало — второй шанс merge-safe форматом
+        print(f"[fetch] основной формат не собрался ({str(e1)[:150]}), "
+              f"пробую { _SAFE_FORMAT.split('+')[0]}…", flush=True)
         try:
-            limit_min = max(0, int(limit_min or 0))
-        except (TypeError, ValueError):
-            limit_min = 0
-        if limit_min > 0:
-            # нужен только кусок: тянем секцию, а не всё видео
-            # (HLS/DASH — только нужные фрагменты, остальное как раньше)
-            opts["download_sections"] = [f"*00:00-{limit_min:02d}:00"]
-    with YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        title = (info or {}).get("title", "видео")
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+        tmp = os.path.join(TMP_DIR, uuid.uuid4().hex + ".mp4")
+        so = _base_opts(tmp)
+        so["format"] = _SAFE_FORMAT
+        try:
+            title = _grabber(so)
+        except Exception as e2:
+            raise RuntimeError(f"не скачалось: {str(e2)[:200]}") from e2
     path = tmp if os.path.exists(tmp) else None
     if not path:
         cands = [os.path.join(TMP_DIR, f) for f in os.listdir(TMP_DIR)]
@@ -299,109 +340,79 @@ def fetch_source(url: str, progress=None, limit_min: int = 0,
         except OSError:
             pass
         raise RuntimeError("скачался битый файл — попробуй ещё раз")
-    return path, title
-
-
-def _fmt_ts(t: float) -> str:
-    """Секунды -> ЧЧ:ММ:СС для download_sections и подписей."""
-    t = max(0, int(t))
-    return f"{t // 3600:02d}:{(t % 3600) // 60:02d}:{t % 60:02d}"
-
-
-def _ffmpeg_cut(src: str, s: float, dur: float, out: str) -> str:
-    """Точный вырез куска с перекодом (границы по кадру, а не по кейфрейму —
-    иначе тайминги субтитров уплывут)."""
-    import subprocess as _sp
-    _sp.run([FFMPEG, "-y", "-v", "error",
-             "-ss", str(round(max(s, 0.0), 2)), "-t", str(round(max(dur, 1.0), 2)),
-             "-i", src, "-map", "0:v", "-map", "0:a?"] + ac._rand_meta()
-            + ac._video_codec_args()
-            + ["-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
-               "-movflags", "+faststart", out],
-            timeout=600, check=True)
-    if not ac._readable_video(out):
-        raise RuntimeError("вырез куска не удался")
-    return out
-
-
-def fetch_moment_section(url: str, start: float, end: float, pad: float = 8.0,
-                         progress=None):
-    """Качает ТОЛЬКО момент [start-pad, end+pad], а не всё видео.
-    Возвращает (path, title); файл начинается со start-pad, тайминги
-    внутри — локальные. Секции не зашли / файл битый — фолбэк:
-    всё видео + точный вырез (старое поведение, но только для этого куска)."""
-    s = max(0.0, float(start) - pad)
-    e = float(end) + pad
-    section = f"*{_fmt_ts(s)}-{_fmt_ts(e)}"
-    try:
-        path, title = fetch_source(url, progress=progress, sections=[section])
-    except Exception:
-        path, title = None, ""
-    if path and ac._readable_video(path):
-        try:
-            dur = ac.media_duration(path) or 0
-        except Exception:
-            dur = 0
-        if dur and dur <= (e - s) + 30:
-            return path, title  # секции сработали — файл уже только момент
-        # секции проигнорированы и приехало всё видео — вырезаем кусок
+    if limit_min > 0:
+        # только первые N минут: мгновенный локальный вырез вместо секций
         cut = os.path.join(TMP_DIR, uuid.uuid4().hex + ".mp4")
         try:
-            _ffmpeg_cut(path, s, e - s, cut)
+            _slice_copy(path, 0.0, limit_min * 60.0, cut)
             try:
                 os.remove(path)
             except OSError:
                 pass
-            return cut, title
+            path = cut
         except Exception:
             try:
                 if os.path.exists(cut):
                     os.remove(cut)
             except OSError:
                 pass
-            if dur:
-                return path, title  # резать не вышло — отдаём как есть
-    # фолбэк: качаем всё и режем кусок
-    full, title = fetch_source(url, progress=progress)
-    try:
-        cut = os.path.join(TMP_DIR, uuid.uuid4().hex + ".mp4")
-        _ffmpeg_cut(full, s, e - s, cut)
-        return cut, title
-    finally:
-        try:
-            if os.path.exists(full):
-                os.remove(full)
-        except OSError:
-            pass
+    return path, title
+
+
+def _fmt_ts(t: float) -> str:
+    """Секунды -> ЧЧ:ММ:СС для подписей."""
+    t = max(0, int(t))
+    return f"{t // 3600:02d}:{(t % 3600) // 60:02d}:{t % 60:02d}"
+
+
+def _slice_copy(src: str, s: float, dur: float, out: str) -> str:
+    """Мгновенный вырез куска без перекода (-c copy, секунды).
+    Границы по кейфреймам (±пару сек) — не страшно: дальше всё
+    (паузы, транскрибация, рендер) работает в локальных координатах
+    куска, а запас pad покрывает сдвиг."""
+    import subprocess as _sp
+    _sp.run([FFMPEG, "-y", "-v", "error",
+             "-ss", str(round(max(s, 0.0), 2)), "-t", str(round(max(dur, 1.0), 2)),
+             "-i", src, "-map", "0:v", "-map", "0:a?",
+             "-c", "copy", "-movflags", "+faststart", out],
+            timeout=600, check=True)
+    if not ac._readable_video(out):
+        raise RuntimeError("вырез куска не удался")
+    return out
 
 
 def run_manual_job(job_id: str, url: str, opts: dict, stamps: list, prog) -> list:
-    """Ручные таймкоды — умный путь без DREX, сцен и полной транскрибации:
-    каждый момент качается ОТДЕЛЬНО (а не всё видео), паузы внутри
-    чистятся, субтитры — транскрибация только этих минут.
-    Возвращает clips-мета для log_job."""
+    """Ручные таймкоды — короткий путь без DREX, сцен и полной
+    транскрибации. YouTube не отдаёт куски для 1080p+ (проверено:
+    --download-sections всё равно тянет весь файл, а N таких скачек
+    только хуже), поэтому: качаем 1 раз целиком, мгновенно режем
+    на куски локально, дальше — только твои минуты (паузы, субтитры,
+    рендер). Возвращает clips-мета для log_job."""
     total = len(stamps)
     mode = opts.get("vmode", "split")
-    # --- фаза 1: точечная скачка (2→30%) ---
+    # --- фаза 1: одна скачка (2→20%) + мгновенная нарезка кусков ---
+    prog(2, "качаю видео…")
+    full, vtitle = fetch_source(
+        url, progress=lambda k, s: prog(int(2 + k * 18), "качаю видео…"))
+    with lock:
+        if job_id in jobs:
+            jobs[job_id].update(title=vtitle)
     raws = []
     for i, m in enumerate(stamps):
         s, e = float(m["start"]), float(m["end"])
-        prog(int(2 + 28 * i / total), f"качаю момент {i + 1}/{total}…")
-
-        def _dp(k, st, _i=i):
-            prog(int(2 + 28 * (_i + max(0.0, min(1.0, k))) / total),
-                 f"качаю момент {_i + 1}/{total}…")
-
-        p, vt = fetch_moment_section(url, s, e, pad=8.0, progress=_dp)
-        raws.append((p, vt))
-    with lock:
-        if job_id in jobs and raws:
-            jobs[job_id].update(title=raws[0][1])
-    # --- фаза 2: паузы -> субтитры минут -> рендер (30→99%) ---
+        p = os.path.join(TMP_DIR, uuid.uuid4().hex + ".mp4")
+        _slice_copy(full, max(s - 8.0, 0.0), (e - s) + 16.0, p)
+        raws.append(p)
+    try:
+        if os.path.exists(full):
+            os.remove(full)  # дальше нужны только куски
+    except OSError:
+        pass
+    # --- фаза 2: паузы -> субтитры минут -> рендер (20→99%) ---
     clips = []
-    for i, ((p, _vt), m) in enumerate(zip(raws, stamps)):
-        f0 = 30 + 69 * i / total
-        f1 = 30 + 69 * (i + 1) / total
+    for i, (p, m) in enumerate(zip(raws, stamps)):
+        f0 = 20 + 79 * i / total
+        f1 = 20 + 79 * (i + 1) / total
 
         def _pp(q, _a=f0, _b=f1, _i=i):
             with lock:
@@ -424,7 +435,7 @@ def run_manual_job(job_id: str, url: str, opts: dict, stamps: list, prog) -> lis
         try:
             segs_i, _lang = ac.transcribe(
                 stage_in, 0, progress=lambda q, st: _pp(0.10 + q * 0.25),
-                model_name=opts.get("asr_model", "base"))
+                model_name=opts.get("asr_model", "giga"))
         except Exception:
             segs_i = []
         dur = ac.media_duration(stage_in) or round(e - s + 16.0, 1)
@@ -483,7 +494,13 @@ def run_job(job_id: str, url: str, opts: dict):
         if free_gb < 1.5:
             raise RuntimeError(f"Нет места на диске ({free_gb:.1f} ГБ) — почисти Библиотеку")
         mode = opts.get("vmode", "blur")
-        stamps = ac.parse_stamps(opts.get("stamps", ""))
+        raw_stamps = (opts.get("stamps") or "")
+        stamps = ac.parse_stamps(raw_stamps)
+        if raw_stamps.strip() and not stamps:
+            # текст таймкодов есть, но ничего не распарсилось — раньше такое
+            # МОЛЧА уходило в авто-режим с DREX. Теперь честная ошибка.
+            raise RuntimeError(
+                "таймкоды не распознались — пиши 'мм:сс-мм:сс', по одному на строку")
         if mode != "parts" and stamps:
             # ручной путь: DREX/сцены/полное видео не нужны вообще —
             # качаем только моменты, субтитры только на эти минуты
@@ -529,7 +546,7 @@ def run_job(job_id: str, url: str, opts: dict):
             prog(10, "транскрибация…")
             segs, lang = ac.transcribe(src, opts.get("limit_min", 0),
                                        progress=lambda p, s: prog(int(10 + p * 0.7), s),
-                                       model_name=opts.get("asr_model", "base"))
+                                       model_name=opts.get("asr_model", "giga"))
             prog(82, "режу на части…")
             bounds = ac.compute_parts(segs, 40.0, 59.0)
             nb = len(bounds)
@@ -552,7 +569,7 @@ def run_job(job_id: str, url: str, opts: dict):
             prog(10, "транскрибация…")
             segs, lang = ac.transcribe(src, opts.get("limit_min", 0),
                                         progress=lambda p, s: prog(int(10 + p * 0.7), s),
-                                        model_name=opts.get("asr_model", "base"))
+                                        model_name=opts.get("asr_model", "giga"))
         # Ручные таймкоды сюда уже не доходят: их увёл ранний возврат
         # в run_manual_job (точечная скачка, без DREX/сцен/полного видео).
         if mode != "parts":
@@ -716,7 +733,7 @@ def api_start():
             "banner": bool(data.get("banner", True)),
             "banner_path": resolve_banner(data.get("banner_file", "")),
             "gameplay": data.get("gameplay", "subway") if data.get("gameplay") in ("subway", "minecraft") else "subway",
-            "asr_model": data.get("asr_model", "base") if data.get("asr_model") in ("base", "small", "giga") else "base",
+            "asr_model": data.get("asr_model", "giga") if data.get("asr_model") in ("base", "small", "giga") else "giga",
             "fast": bool(data.get("fast", False)),
             "vmode": data.get("vmode", "blur"), "stamps": stamps,
             "domain": data.get("domain", "auto") if data.get("domain") in ("auto", "series", "streams") else "auto"}), daemon=True).start()
@@ -807,7 +824,7 @@ def run_twitch_job(job_id: str, url: str, opts: dict):
         prog(10, "транскрибация…")
         segs, lang = ac.transcribe(src, opts.get("limit_min", 0),
                                    progress=lambda p, s: prog(int(10 + p * 0.7), s),
-                                   model_name=opts.get("asr_model", "base"))
+                                   model_name=opts.get("asr_model", "giga"))
         prog(82, "оценка моментов…")
         moments, scorer = ac.pick_moments(
             segs, lang, opts.get("api_key", ""),
@@ -936,7 +953,7 @@ def api_twitch_start():
             "mirror": bool(data.get("mirror", False)),
             "banner": bool(data.get("banner", True)),
             "banner_path": resolve_banner(data.get("banner_file", "")),
-            "asr_model": "base"}), daemon=True).start()
+            "asr_model": "giga"}), daemon=True).start()
         ids.append(job_id)
     return jsonify({"ok": True, "jobs": ids})
 
@@ -2074,9 +2091,11 @@ def list_banners():
         except Exception:
             green = False
         if green:
-            name += " · хромакей"
+            name += " · хромакей · 95%"
+        elif ac._banner_trading(p):
+            name += " · 70%"
         else:
-            name += " · целиком"
+            name += " · 95%"
         try:
             size = os.path.getsize(p)
         except OSError:

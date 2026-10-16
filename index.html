@@ -371,7 +371,7 @@
         <div class="step"><b>01</b><span>Источник</span></div>
         <label class="lbl" for="urls">Ссылки на серии — по одной на строку</label>
         <textarea id="urls" placeholder="по одной ссылке на строку — до 10 за раз, на ночь хватит"></textarea>
-        <label class="lbl" for="key">DREX API-ключ <span style="text-transform:none;letter-spacing:0">(<a href="https://drex.nace.ai" target="_blank">nace.ai</a> — без него не запустится)</span></label>
+        <label class="lbl" for="key">DREX API-ключ <span style="text-transform:none;letter-spacing:0">(<a href="https://drex.nace.ai" target="_blank">nace.ai</a> — для ИИ-режима; со своими таймкодами не нужен)</span></label>
         <input id="key" type="password" placeholder="nace_sk… (можно сохранить в настройках)">
         <div class="step"><b>02</b><span>Что нарезать</span></div>
         <div class="ai-grid" id="wantLensGrid">
@@ -388,7 +388,7 @@
         </div>
         <div class="ai-grid">
           <div><label class="lbl" for="asd">Транскрибация</label>
-            <select id="asd"><option value="base" selected>Быстро · Base</option><option value="small">Точно · Small (медленнее)</option><option value="giga">GigaAM v3 · топ для русского</option></select></div>
+            <select id="asd"><option value="giga" selected>GigaAM v3</option></select></div>
           <div><label class="lbl" for="game">Геймплей снизу</label>
             <select id="game"><option value="subway" selected>Subway Surfers</option><option value="minecraft">Minecraft паркур</option></select></div>
         </div>
@@ -535,7 +535,7 @@
           <div><label class="lbl" for="sVmode">Формат по умолчанию</label>
             <select id="sVmode"><option value="split">Сплит + Subway</option><option value="blur9">Блюр 9:16 · антиплагиат</option><option value="blur">Размытый фон</option><option value="face">Трек лица</option><option value="parts">Части · всё видео кусками 45–59с</option><option value="fast">Только нарезка</option></select></div>
           <div><label class="lbl" for="sAsd">Транскрибация</label>
-            <select id="sAsd"><option value="base">Быстро · Base</option><option value="small">Точно · Small</option><option value="giga">GigaAM v3 · топ для русского</option></select></div>
+            <select id="sAsd"><option value="giga">GigaAM v3</option></select></div>
         </div>
         <div class="ai-grid">
           <div><label class="lbl" for="sW">Параллельных задач</label>
@@ -1186,10 +1186,18 @@ $('cs2Go').onclick=async ()=>{
 async function loadBanners(){
   try{
     const j=await (await fetch('/api/banners')).json();
+    const sig='|'+(j.banners||[]).map(b=>b.id).join('|');
     for(const id of ['banFile','twBanFile','uqBanFile']){
       const sel=$(id);
       if(!sel)continue;
       const cur=sel.value;
+      // список не изменился — не трогаем (иначе открытый дропдаун
+      // вырывается из-под курсора при каждом переходе между вкладками)
+      if(sel._bannersSig===sig){
+        if(Array.from(sel.options).some(o=>o.value===cur))sel.value=cur;
+        continue;
+      }
+      sel._bannersSig=sig;
       sel.innerHTML='<option value="">По умолчанию</option>'+(j.banners||[]).map(b=>'<option value="'+esc(b.id)+'">'+esc(b.name)+' · '+Math.round(b.dur||0)+'с</option>').join('');
       if(Array.from(sel.options).some(o=>o.value===cur))sel.value=cur;
       // кастомный селект кеширует пункты при построении — сносим и строим
@@ -1274,7 +1282,7 @@ async function loadSettings(){
     $('sLens').value=SETTINGS.lens||'40-59';
     $('sLimit').value=String(SETTINGS.limit_min ?? 0);
     $('sVmode').value=SETTINGS.vmode||'split';
-    $('sAsd').value=SETTINGS.asr_model||'base';
+    $('sAsd').value=SETTINGS.asr_model||'giga';
     $('sGame').value=SETTINGS.gameplay||'subway';
     $('sW').value=String(SETTINGS.max_workers||2);
     $('sCaps').checked=!!SETTINGS.captions;
@@ -1307,7 +1315,7 @@ function applyDefaults(){
   $('lens').value=['15-30','40-59','40-75','80-118'].includes(lens)?lens:'40-59';
   $('limit').value=String(SETTINGS.limit_min ?? 0);
   $('mode').value=SETTINGS.vmode||'split';
-  $('asd').value=SETTINGS.asr_model||'base';
+  $('asd').value=SETTINGS.asr_model||'giga';
   $('game').value=SETTINGS.gameplay||'subway';
   $('caps').checked=!!SETTINGS.captions;
   $('anti').checked=!!SETTINGS.antidetect;
