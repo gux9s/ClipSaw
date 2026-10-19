@@ -524,7 +524,67 @@ def run_job(job_id: str, url: str, opts: dict):
         # дальше все режимы работают с чистым кадром
         src = ac.strip_bar_file(src)
         mode = opts.get("vmode", "blur")
-        if mode == "parts":
+        if mode == "story":
+            # истории: русская озвучка уже в исходнике. Паузы вырезаем
+            # агрессивнее обычного, затем GigaAM и DREX 1.5 по обрывам.
+            prog(6, "чищу паузы…")
+            if opts.get("story_remove_pauses", True):
+                clean = os.path.join(TMP_DIR, uuid.uuid4().hex + ".mp4")
+                try:
+                    stage_in = ac.remove_silence(
+                        src, clean, min_sil=0.40, thresh_db=-38.0, pad=0.14,
+                        progress=lambda p, s: prog(int(6 + p * 0.04), "чищу паузы…"))
+                except Exception:
+                    stage_in = src
+                if stage_in != src:
+                    try:
+                        if os.path.exists(src):
+                            os.remove(src)
+                    except OSError:
+                        pass
+                    src = stage_in
+            kind = opts.get("story_kind", "parts")
+            scenes = []
+            if kind == "moments":
+                prog(10, "ищу сцены…")
+                try:
+                    scenes = ac.detect_scenes(src)
+                except Exception:
+                    scenes = []
+            prog(10, "транскрибация…")
+            segs, lang = ac.transcribe(
+                src, opts.get("limit_min", 0),
+                progress=lambda p, s: prog(int(10 + p * 0.7), s),
+                model_name="giga")
+            if not segs:
+                raise RuntimeError("не расслышал русскую озвучку в видео")
+            if kind == "moments":
+                prog(82, "DREX: ищу интересные моменты…")
+                moments, scorer = ac.pick_moments(
+                    segs, lang, opts.get("api_key", ""),
+                    int(opts.get("want", 8) or 8),
+                    float(opts.get("min_len", 40) or 40),
+                    float(opts.get("max_len", 59) or 59),
+                    scenes=scenes, min_gap=opts.get("min_gap", 30),
+                    domain="series")
+                if not moments:
+                    raise RuntimeError("DREX не нашёл моментов — проверь ключ")
+                for m in moments:
+                    m["last"] = True
+                    m["part_title"] = ""
+                    m["story"] = 0
+                    m["part"] = 0
+                    m["of"] = 1
+            else:
+                prog(82, "DREX 1.5: ищу обрывы…")
+                moments = ac.pick_anime_parts(
+                    segs, opts.get("api_key", ""),
+                    min_len=float(opts.get("min_len", 180) or 180),
+                    max_len=float(opts.get("max_len", 240) or 240))
+                scorer = "drex"
+                if not moments:
+                    raise RuntimeError("DREX 1.5 не нашёл обрывов — проверь ключ")
+        elif mode == "parts":
             # режим частей: сцены и DREX не нужны вообще.
             # Сначала чистим паузы, потом ОДНА транскрибация, потом резка.
             prog(6, "чищу паузы…")
@@ -572,7 +632,7 @@ def run_job(job_id: str, url: str, opts: dict):
                                         model_name=opts.get("asr_model", "giga"))
         # Ручные таймкоды сюда уже не доходят: их увёл ранний возврат
         # в run_manual_job (точечная скачка, без DREX/сцен/полного видео).
-        if mode != "parts":
+        if mode not in ("parts", "story"):
             prog(82, "оценка моментов…")
             domain = ac.pick_domain(segs, opts.get("domain", "auto"))
             moments, scorer = ac.pick_moments(
@@ -605,7 +665,42 @@ def run_job(job_id: str, url: str, opts: dict):
                             jobs[job_id].update(
                                 stage=f"рендер… {_i + 1}/{total_n}", pct=npct)
 
-            if mode == "parts":
+            extra = []
+            if mode == "story":
+                nvars = max(1, min(3, int(opts.get("story_variants", 1) or 1)))
+                for _vi in range(nvars):
+                    _o = out if _vi == 0 else out[:-4] + f"v{_vi + 1}.mp4"
+                    raw = _o + ".raw.mp4" if opts.get("story_banner", True) else _o
+                    _bgm = ac.pick_story_music() if opts.get("story_music", True) else None
+                    ac.render_story_part(
+                        src, m, segs, raw,
+                        captions=opts.get("captions", True),
+                        blur_subs=opts.get("story_blur_subs", True),
+                        unique=opts.get("story_unique", True),
+                        mirror=opts.get("story_mirror", opts.get("mirror", False)),
+                        cta=opts.get("story_cta", True),
+                        bgm=_bgm,
+                        progress=_pp)
+                    if raw != _o:
+                        try:
+                            ac.insert_banners(raw, _o,
+                                              banner_path=opts.get("banner_path"),
+                                              middle=True)
+                        except Exception as e:
+                            print("[banner]", e)
+                            try:
+                                os.replace(raw, _o)
+                            except OSError:
+                                pass
+                        finally:
+                            try:
+                                if os.path.exists(raw):
+                                    os.remove(raw)
+                            except OSError:
+                                pass
+                    if _vi:
+                        extra.append((_vi, _o))
+            elif mode == "parts":
                 ac.render_split_clip(src, m, segs, out,
                                      facetrack=False,
                                      captions=opts.get("captions", True),
@@ -636,7 +731,7 @@ def run_job(job_id: str, url: str, opts: dict):
                     jobs[job_id].update(
                         stage=f"рендер… {n}/{len(moments)}",
                         pct=int(84 + n / len(moments) * 15))
-            return {"i": i, "title": m.get("title", f"Клип {i + 1}"),
+            base = {"i": i, "title": m.get("title", f"Клип {i + 1}"),
                     "score": m.get("score", 0),
                     "verdict": str(m.get("verdict", ""))[:300],
                     "hook": str(m.get("hook", ""))[:40],
@@ -644,6 +739,20 @@ def run_job(job_id: str, url: str, opts: dict):
                     "of": int(m.get("of", 1)),
                     "dur": ac.media_duration(out) or round(float(m["end"]) - float(m["start"]), 1),
                     "size": os.path.getsize(out)}
+            if not extra:
+                return base
+            res = [base]
+            for _vi, _o in extra:
+                d = dict(base)
+                d["i"] = i + _vi / 10.0
+                d["title"] = base["title"] + f" · вар.{_vi + 1}"
+                d["dur"] = ac.media_duration(_o) or base["dur"]
+                try:
+                    d["size"] = os.path.getsize(_o)
+                except OSError:
+                    d["size"] = base["size"]
+                res.append(d)
+            return res
 
         # 2 клипа параллельно — кодирует железо, ffprobe/ffmpeg одного
         # потока все ядра не насыщают. as_completed вместо map: зависший
@@ -654,7 +763,8 @@ def run_job(job_id: str, url: str, opts: dict):
         try:
             futs = {ex.submit(one, (i, m)): i for i, m in enumerate(moments)}
             for fut in _ac(futs):
-                clips.append(fut.result())
+                _r = fut.result()
+                clips.extend(_r if isinstance(_r, list) else [_r])
         finally:
             ex.shutdown(wait=False, cancel_futures=True)
         clips.sort(key=lambda c: c["i"])
@@ -700,12 +810,36 @@ def api_start():
     if stamps.strip() and len(urls) > 1:
         return jsonify({"ok": False, "error": "Таймкоды работают только с одним видео"}), 400
     cfg = get_settings()
+    story = str(data.get("vmode") or "") == "story"
     if not data.get("api_key"):
         data["api_key"] = cfg.get("drex_key", "")
     for k in ("want", "gameplay", "limit_min", "vmode", "captions", "facetrack", "antidetect", "mirror", "banner", "asr_model", "drex_key"):
         if k not in data or data[k] in ("", None):
             data[k] = cfg.get(k)
-    if not data.get("min_len") or not data.get("max_len"):
+    if story:
+        kind = str(data.get("story_kind") or "parts")
+        if kind not in ("parts", "moments"):
+            kind = "parts"
+        data["story_kind"] = kind
+        try:
+            mn = int(data.get("min_len") or (40 if kind == "moments" else 180))
+            mx = int(data.get("max_len") or (59 if kind == "moments" else 240))
+        except (TypeError, ValueError):
+            mn, mx = (40, 59) if kind == "moments" else (180, 240)
+        if kind == "moments":
+            data["min_len"] = max(5, min(300, mn))
+            data["max_len"] = max(8, min(300, mx))
+        else:
+            data["min_len"] = max(45, min(600, mn))
+            data["max_len"] = max(60, min(600, mx))
+        try:
+            nv = int(data.get("story_variants") or 1)
+        except (TypeError, ValueError):
+            nv = 1
+        data["story_variants"] = max(1, min(3, nv))
+        data["asr_model"] = "giga"
+        data["facetrack"] = True
+    elif not data.get("min_len") or not data.get("max_len"):
         try:
             mn, mx = str(data.get("lens", cfg.get("lens", "40-59"))).split("-")
             data["min_len"], data["max_len"] = int(mn), int(mx)
@@ -736,6 +870,15 @@ def api_start():
             "asr_model": data.get("asr_model", "giga") if data.get("asr_model") in ("base", "small", "giga") else "giga",
             "fast": bool(data.get("fast", False)),
             "vmode": data.get("vmode", "blur"), "stamps": stamps,
+            "story_blur_subs": bool(data.get("story_blur_subs", True)),
+            "story_unique": bool(data.get("story_unique", True)),
+            "story_mirror": bool(data.get("story_mirror", False)),
+            "story_cta": bool(data.get("story_cta", True)),
+            "story_remove_pauses": bool(data.get("story_remove_pauses", True)),
+            "story_kind": data.get("story_kind", "parts"),
+            "story_banner": bool(data.get("story_banner", True)),
+            "story_music": bool(data.get("story_music", True)),
+            "story_variants": data.get("story_variants", 1),
             "domain": data.get("domain", "auto") if data.get("domain") in ("auto", "series", "streams") else "auto"}), daemon=True).start()
         ids.append(job_id)
     return jsonify({"ok": True, "jobs": ids})

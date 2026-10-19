@@ -61,7 +61,13 @@ def _transcribe_giga(path: str, limit_min: int = 0, progress=None):
                     continue  # дубль из нахлёста
                 if a >= total:
                     break
-                words.append({"w": str(w.text).strip(),
+                tw = str(w.text).strip()
+                # GigaAM иногда дублирует слово с тем же таймкодом
+                # («когда когда», «я я») — второй экземпляр не нужен
+                if (words and tw and tw.lower() == words[-1]["w"].lower()
+                        and a - words[-1]["s"] < 0.12):
+                    continue
+                words.append({"w": tw,
                               "s": round(a, 2), "e": round(a + max(float(w.end - w.start), 0.05), 2)})
         except Exception:
             pass
@@ -74,6 +80,17 @@ def _transcribe_giga(path: str, limit_min: int = 0, progress=None):
         if progress:
             progress(int(34 * (k + 1) / max(len(starts), 1)), "транскрибация GigaAM…")
     words.sort(key=lambda x: x["s"])
+    # после сортировки рядом оказываются копии из нахлёста окон —
+    # выкидываем повтор с тем же словом и почти тем же таймкодом
+    clean = []
+    for w in words:
+        if not w["w"]:
+            continue
+        if (clean and w["w"].lower() == clean[-1]["w"].lower()
+                and abs(w["s"] - clean[-1]["s"]) < 0.12):
+            continue
+        clean.append(w)
+    words = clean
     # слова -> сегменты: пауза 0.8с или длина 12с
     segs, cur = [], []
     for w in words:
@@ -168,6 +185,8 @@ def _video_codec_args(hq: bool = False) -> list:
 
 # Единая громкость под ленту: тихие сериалы подтягиваем к уровню TikTok.
 _LOUDNORM = "loudnorm=I=-16:TP=-1.5:LRA=11"
+# Истории: звук плотнее, как у крупных TikTok-каналов.
+_STORY_LOUDNORM = "loudnorm=I=-14:TP=-1.5:LRA=11"
 # ВАЖНО: loudnorm без финального ресемпла поднимает выход до 96/192 кГц —
 # такие файлы TikTok плохо перекодирует (вечные 0 просмотров без нарушений).
 # Поэтому везде после loudnorm добавляем возврат на 48 кГц стерео.
@@ -1443,13 +1462,45 @@ def pick_moments(segs, lang: str, key: str, want: int, min_len: int, max_len: in
 
 # ---------- 3. Трек лиц ----------
 
+YUNET_URL = ("https://github.com/opencv/opencv_zoo/raw/main/models/"
+             "face_detection_yunet/face_detection_yunet_2023mar.onnx")
+
+
+def _ensure_yunet() -> str | None:
+    """ЮНет (227 КБ) качается один раз: без него кроп за лицом не работает,
+    а на аниме-лицах он заметно точнее Haar."""
+    path = os.path.join(MODELS, "yunet.onnx")
+    try:
+        if os.path.exists(path) and os.path.getsize(path) > 100000:
+            return path
+        import shutil
+        os.makedirs(MODELS, exist_ok=True)
+        tmp = path + ".tmp"
+        with urllib.request.urlopen(YUNET_URL, timeout=90, context=_CTX) as r:
+            with open(tmp, "wb") as f:
+                shutil.copyfileobj(r, f)
+        os.replace(tmp, path)
+        return path
+    except Exception as e:
+        print(f"[yunet] не скачался: {e}", flush=True)
+        try:
+            if os.path.exists(path + ".tmp"):
+                os.remove(path + ".tmp")
+        except OSError:
+            pass
+        return None
+
+
 def _yunet_detector(w: int, h: int):
     import cv2
-    path = os.path.join(MODELS, "yunet.onnx")
-    if not os.path.exists(path):
+    path = _ensure_yunet()
+    if not path:
         return None
-    det = cv2.FaceDetectorYN.create(path, "", (w, h), 0.6, 0.3, 5000)
-    return det
+    try:
+        det = cv2.FaceDetectorYN.create(path, "", (w, h), 0.6, 0.3, 5000)
+        return det
+    except Exception:
+        return None
 
 
 def track_faces(src: str, start: float, end: float, every: float = 0.7):
@@ -1529,6 +1580,75 @@ def face_x_at(track, t: float) -> float:
             k = (t - t0) / max(t1 - t0, 1e-6)
             return x0 + (x1 - x0) * k
     return track[-1][1]
+
+
+def track_faces_xy(src: str, start: float, end: float, every: float = 0.55):
+    """Трек центра лица (x, y, размер) для аниме/сериалов: 4:3-кроп
+    едет за героем, а не стоит по центру. Ошибка = [] и безопасный центр."""
+    import cv2
+    try:
+        cap = cv2.VideoCapture(src)
+        W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1280
+        H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 720
+        det = _yunet_detector(W, H)
+        if det is None:
+            cap.release()
+            return []
+        pts, t = [], float(start)
+        while t <= end:
+            cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
+            ok, fr = cap.read()
+            if not ok:
+                t += every
+                continue
+            try:
+                _, faces = det.detect(fr)
+            except Exception:
+                faces = None
+            if faces is not None and len(faces):
+                areas = [float(f[2]) * float(f[3]) for f in faces]
+                mx = max(areas)
+                sel = [f for f, a in zip(faces, areas) if a >= mx * 0.35]
+                tot = sum(float(f[2]) * float(f[3]) for f in sel) or 1.0
+                cx = sum((float(f[0]) + float(f[2]) / 2) * float(f[2]) * float(f[3])
+                         for f in sel) / tot / W
+                cy = sum((float(f[1]) + float(f[3]) / 2) * float(f[2]) * float(f[3])
+                         for f in sel) / tot / H
+                size = (mx ** 0.5) / max(H, 1)
+                pts.append((t, float(min(max(cx, 0.0), 1.0)),
+                            float(min(max(cy, 0.0), 1.0)), float(size)))
+            t += every
+        cap.release()
+        if len(pts) < 2:
+            return []
+        sm = []
+        for i, (tt, x, y, z) in enumerate(pts):
+            win = pts[max(0, i - 2):i + 3]
+            sm.append((tt,
+                       sum(p[1] for p in win) / len(win),
+                       sum(p[2] for p in win) / len(win),
+                       sum(p[3] for p in win) / len(win)))
+        return sm
+    except Exception:
+        try:
+            cap.release()
+        except Exception:
+            pass
+        return []
+
+
+def face_xy_at(track, t: float):
+    if not track:
+        return None
+    if t <= track[0][0]:
+        return track[0][1], track[0][2], track[0][3]
+    for p0, p1 in zip(track, track[1:]):
+        if p0[0] <= t <= p1[0]:
+            k = (t - p0[0]) / max(p1[0] - p0[0], 1e-6)
+            return (p0[1] + (p1[1] - p0[1]) * k,
+                    p0[2] + (p1[2] - p0[2]) * k,
+                    p0[3] + (p1[3] - p0[3]) * k)
+    return track[-1][1], track[-1][2], track[-1][3]
 
 
 _CAM_CACHE = {}
@@ -1898,8 +2018,11 @@ def render_twitch_clip(src: str, moment: dict, segs, out: str,
                     _bh0, _bw0 = bfr.shape[:2]
                     _tw_placed = False
                     if _banner_trading(bpath) and _bw0 < _bh0:
-                        # только низ (катка ниже вебки), 558×990 = 26.6%
-                        _boxw, _boxh = 558, 990
+                        # только низ (катка ниже вебки), панель 606×910,
+                        # чёрные поля вырезаны кропом
+                        _boxw, _boxh = _BANNER_TR_W, _BANNER_TR_H
+                        _cx, _cy, _cw, _ch = _BANNER_TR_CROP
+                        bfr = bfr[_cy:_cy + _ch, _cx:_cx + _cw]
                         _gr_stretch = False
                         _gr_zoom = 1.0
                         _by = (TOP_H2 + max(OUT_H2 - TOP_H2 - _boxh, 0) // 2
@@ -2391,7 +2514,7 @@ def _banner_key_vf(path: str | None = None) -> str:
 
 
 def _banner_trading(bpath: str | None = None) -> bool:
-    """Вертикальный Trading-креатив: полупрозрачный 70%, строго по центру."""
+    """Вертикальный Trading-креатив: полупрозрачный 70%, только геймплей."""
     try:
         n = os.path.basename(bpath or BANNER_FILE).lower()
     except Exception:
@@ -2399,16 +2522,26 @@ def _banner_trading(bpath: str | None = None) -> bool:
     return n.endswith((".mp4", ".webm")) and "trading" in n
 
 
-def _banner_fmt(bpath: str | None = None) -> str:
+# Trading: кроп панели по внутренней стороне светлой рамки (x, y, w, h) —
+# чёрные поля и бирюзовое свечение вокруг вырезаются целиком, кейинг
+# не нужен. Панель статична весь ролик (замерено в 3 точках).
+# Бокс 606×910 = 26.6% экрана.
+_BANNER_TR_CROP = (58, 206, 604, 908)
+_BANNER_TR_W, _BANNER_TR_H = 606, 910
+
+
+def _banner_fmt(bpath: str | None = None, aa: float | None = None) -> str:
     """Форматная цепочка баннера: Trading — 0.7, все остальные — 0.95
     (хромакей-файлы — после вычитания зелени). Сквозь баннер чуть
-    видно видео. Вставлять ПЕРЕД setpts."""
+    видно видео. aa можно дрожать по рендерам (уникализация).
+    Вставлять ПЕРЕД setpts."""
+    a = 0.95 if aa is None else max(0.5, min(1.0, float(aa)))
     _key = _banner_key_vf(bpath)
     if _key:
-        return f"{_key}format=yuva420p,colorchannelmixer=aa=0.95"
+        return f"{_key}format=yuva420p,colorchannelmixer=aa={a:.3f}"
     if _banner_trading(bpath):
-        return "format=yuva420p,colorchannelmixer=aa=0.7"
-    return "format=yuva420p,colorchannelmixer=aa=0.95"
+        return "format=yuva420p,colorchannelmixer=aa=0.700"
+    return f"format=yuva420p,colorchannelmixer=aa={a:.3f}"
 
 
 # Минимум площади под крупные баннеры: 26.6% экрана 1080x1920.
@@ -2471,8 +2604,8 @@ def _banner_box(bpath: str, out_h: int = 1920, top: int = 0):
         return (_BANNER_GR_W, _BANNER_GR_H,
                 (out_h - _BANNER_GR_H) // 2 + random.randint(-15, 15))
     if _banner_trading(bpath):
-        # только геймплей: бокс 558×990 = 26.6%, по центру низа
-        w, h = 558, 990
+        # только геймплей: панель 606×910 = 26.6%, по центру низа
+        w, h = _BANNER_TR_W, _BANNER_TR_H
         room = max(out_h - top - h, 0)
         return w, h, top + room // 2 + random.randint(-10, 10)
     if bh0 > bw0 > 0:
@@ -2733,10 +2866,15 @@ def _banner_eff(path: str | None = None) -> float:
 
 
 def _ass_captions(segs, start: float, spd: float, wins, b_eff: float,
-                  path: str, part_title: str = "") -> bool:
+                  path: str, part_title: str = "", pos_y: int = 660,
+                  font_size: int = 64, max_words: int = 4,
+                  max_chars: int = 40, title_color: str = "",
+                  title_pos: int = 100, hook_text: str = "",
+                  hook_pos: int = 0, hook_size: int = 40) -> bool:
     """ASS-субтитры с пословным караоке (белый -> жёлтый, как было в PIL).
     Время — уже в координатах итога (фризы баннеров учтены).
-    Возвращает True если есть хоть одна реплика."""
+    pos_y/font_size/max_words — для 4:3-формата историй, где сабы стоят
+    под роликом, а не поверх него. Возвращает True если есть хоть реплика."""
     def _ts(t: float) -> str:
         t = max(t, 0.0)
         return f"{int(t // 3600)}:{int((t % 3600) // 60):02d}:{t % 60:05.2f}"
@@ -2759,15 +2897,24 @@ def _ass_captions(segs, start: float, spd: float, wins, b_eff: float,
             "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
             "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
             "Alignment, MarginL, MarginR, MarginV, Encoding",
-            "Style: Hook,Arial,64,&H00FFFFFF,&H000AD6FF,&H80000000,&H80000000,"
-            "-1,0,0,0,100,100,0,0,1,3,1,5,40,40,40,1",
+            f"Style: Hook,Arial,{int(font_size)},&H00FFFFFF,&H000AD6FF,"
+            "&H80000000,&H80000000,-1,0,0,0,100,100,0,0,1,3,1,5,40,40,40,1",
+            f"Style: HookTop,Arial,{int(hook_size)},&H00FFFFFF,&H00FFFFFF,"
+            "&HCC101010,&HCC101010,-1,0,0,0,100,100,0,0,3,6,0,8,80,80,40,1",
             "[Events]",
             "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, "
             "Effect, Text"]
     body = []
     if part_title:
+        _title = part_title.replace("{", "(").replace("}", ")")
+        _col = f"{{\\c&H{title_color}&}}" if title_color else ""
         body.append("Dialogue: 0,0:00:00.00,9:59:59.00,Hook,,0,0,0,,"
-                    "{\\an8\\pos(540,100)}" + part_title.replace("{", "(").replace("}", ")"))
+                    f"{{\\an8\\pos(540,{int(title_pos)})}}{_col}" + _title)
+    if hook_text and hook_pos > 0:
+        _hk = (hook_text.replace("{", "(").replace("}", ")")
+               .replace("\\", "/"))
+        body.append("Dialogue: 0,0:00:00.00,9:59:59.00,HookTop,,0,0,0,,"
+                    f"{{\\an8\\pos(540,{int(hook_pos)})}}" + _hk)
     n_dlgs = 0
     dlgs = []
     for s in segs:
@@ -2775,14 +2922,18 @@ def _ass_captions(segs, start: float, spd: float, wins, b_eff: float,
               if float(w.get("e", 0)) > start - 0.15]
         if not ws:
             continue
-        chunks, cur = [], []
+        chunks, cur, cur_chars = [], [], 0
         for w in ws:
             if float(w.get("s", 0)) < start - 0.15:
                 continue
+            wtxt = str(w.get("w", ""))
             cur.append(w)
-            if len(cur) >= 4 or re.search(r"[.!?…]$", str(w.get("w", ""))):
+            cur_chars += len(wtxt) + (1 if len(cur) > 1 else 0)
+            if (len(cur) >= max(1, int(max_words)) or
+                    cur_chars >= max(8, int(max_chars)) or
+                    re.search(r"[.!?…]$", wtxt)):
                 chunks.append(cur)
-                cur = []
+                cur, cur_chars = [], 0
         if cur:
             chunks.append(cur)
         for ch in chunks:
@@ -2796,7 +2947,7 @@ def _ass_captions(segs, start: float, spd: float, wins, b_eff: float,
                 max(1, int(round((float(w["e"]) - float(w["s"])) * 100))),
                 str(w["w"]).replace("{", "(").replace("}", ")")) for w in ch)
             dlgs.append([cs0, ce0,
-                         f"{{\\an5\\pos(540,660)}}{txt.strip()}"])
+                         f"{{\\an5\\pos(540,{int(pos_y)})}}{txt.strip()}"])
     # концы — ровно до начала следующей: иначе реплики налезают друг на друга
     dlgs.sort(key=lambda d: d[0])
     for i, (s0, e0, tx) in enumerate(dlgs):
@@ -3256,9 +3407,15 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
             _zh = int(_bn_h * _BANNER_GR_ZOOM) // 2 * 2
             _bn_scale = (f"scale={_zw}:{_zh}:flags=lanczos,"
                          f"crop={_bn_w}:{_bn_h}")
+        elif _banner_trading(bpath):
+            # кроп чёрных полей, затем в бокс
+            _cx, _cy, _cw, _ch = _BANNER_TR_CROP
+            _bn_scale = (f"crop={_cw}:{_ch}:{_cx}:{_cy},"
+                         f"scale={_bn_w}:{_bn_h}:flags=lanczos")
         else:
             _bn_scale = f"scale={_bn_w}:-2"
-        fc.append(f"[2:v]{_bn_scale},fps=30,{_banner_fmt(bpath)},"
+        fc.append(f"[2:v]{_bn_scale},fps=30,"
+                  f"{_banner_fmt(bpath, random.uniform(0.94, 0.96))},"
                   f"setpts=PTS/{BANNER_SPEED:.3f}[bn0]")
         fc.append(f"[bn0]split={len(wins)}" + "".join(f"[bb{i}]" for i in range(len(wins))))
         for wi, (oA, oB, cA) in enumerate(wins):
@@ -4042,6 +4199,7 @@ def swap_banner(src: str, out: str, banner_path: str | None = None,
     (по умолчанию assets/banner.mp4) СТРОГО по середине итога либо в at.
     Возвращает {removed, mid, total}."""
     import os as _os
+    import random
     bpath = banner_path if banner_path and _os.path.exists(banner_path) else BANNER_FILE
     if not _os.path.exists(bpath):
         raise RuntimeError("нет баннера для вставки")
@@ -4156,12 +4314,20 @@ def swap_banner(src: str, out: str, banner_path: str | None = None,
          "-frames:v", "1", frame_png],
         timeout=120, check=True)
     # свой баннер вписываем в кадр (центр); зелёный фон хромакей-файлов
-    # вычитается ключом (_sw_key), сквозь него видно исходное видео
-    sw = min(bw or W, W)
-    sh = max(int(round((bh or H) * sw / max(bw or W, 1))), 1)
-    if sh > H:
-        sh = H
-        sw = max(int(round((bw or W) * sh / max(bh or H, 1))), 1)
+    # вычитается ключом (_sw_key), сквозь него видно исходное видео.
+    # Trading — центрированный бокс 26.6% площади, а не весь кадр.
+    if _banner_trading(bpath):
+        import math as _math
+        _tcx, _tcy, _tcw, _tch = _BANNER_TR_CROP
+        _s = _math.sqrt(BANNER_MIN_AREA * W * H / max(_tcw * _tch, 1))
+        sw = max(int(_tcw * _s) // 2 * 2, 2)
+        sh = max(int(_tch * _s) // 2 * 2, 2)
+    else:
+        sw = min(bw or W, W)
+        sh = max(int(round((bh or H) * sw / max(bw or W, 1))), 1)
+        if sh > H:
+            sh = H
+            sw = max(int(round((bw or W) * sh / max(bh or H, 1))), 1)
     ox, oy = (W - sw) // 2, (H - sh) // 2
     vparts = []
     vi = 0
@@ -4175,8 +4341,12 @@ def swap_banner(src: str, out: str, banner_path: str | None = None,
     vparts.append(f"[1:v]trim=start=0:end={b_eff:.3f},setpts=PTS-STARTPTS[vf]")
     vparts.append(f"[2:v]split={1 + len(covf)}"
                   + "".join(f"[cbs{i}]" for i in range(1 + len(covf))))
-    _sw_fmt = _banner_fmt(bpath)
-    bfs = f"[cbs0]scale={sw}:{sh},fps={fps_i},{_sw_fmt}"
+    _sw_fmt = _banner_fmt(bpath, random.uniform(0.94, 0.96))
+    _sw_pre = ""
+    if _banner_trading(bpath):
+        _tcx, _tcy, _tcw, _tch = _BANNER_TR_CROP
+        _sw_pre = f"crop={_tcw}:{_tch}:{_tcx}:{_tcy},"
+    bfs = f"[cbs0]{_sw_pre}scale={sw}:{sh},fps={fps_i},{_sw_fmt}"
     bfs += ",setpts=PTS/{:.3f}[vb]".format(BANNER_SPEED)
     vparts.append(bfs)
     vparts.append(f"[vf][vb]overlay={ox}:{oy}:eof_action=pass[vmid]")
@@ -4726,6 +4896,310 @@ def restyle_cs2(src: str, out: str, title: str = "",
             "size": os.path.getsize(out)}
 
 
+# ---------- истории: DREX 1.5 режет на 3–4 минуты по обрывам ----------
+
+_ANIME_CLOSE_TRUE = (
+    "After this line the audience is left with a burning question, a shocking "
+    "reveal, immediate danger, or a decision whose outcome is unknown. Cutting "
+    "here creates a cliffhanger and makes the viewer need the next part.")
+_ANIME_CLOSE_FALSE = (
+    "The line is ordinary narration, calm explanation, dialogue that continues, "
+    "or a transition. The scene is still unfolding and no new tension lands.")
+_ANIME_OPEN_TRUE = (
+    "The line immediately creates mystery, threat, eerie atmosphere, or continues "
+    "a cliffhanger with high stakes. A viewer cannot scroll past the first seconds.")
+_ANIME_OPEN_FALSE = (
+    "Greeting, recap, calm description, filler, or mid-sentence continuation with "
+    "no tension. Nothing hooks the viewer here.")
+_ANIME_FILLER_TRUE = (
+    "The sentence or thought clearly continues into the next line; cutting here "
+    "would break grammar or logic. It is ordinary exposition with no reveal.")
+_ANIME_FILLER_FALSE = (
+    "The line is a complete thought or a natural pause in the story.")
+
+
+def _story_sentences(segs):
+    """Склеивает слова GigaAM в предложения: DREX должен видеть обрыв
+    на границе мысли, а не посреди 12-секундного куска."""
+    out = []
+    for s in segs:
+        text = str(s.get("text", "") or "").strip()
+        if not text:
+            continue
+        start, end = float(s["start"]), float(s["end"])
+        parts = [p.strip() for p in re.split(r"(?<=[.!?…])\s+", text) if p.strip()]
+        if len(parts) <= 1:
+            out.append({"start": start, "end": end, "text": text,
+                        "words": s.get("words") or []})
+            continue
+        words = s.get("words") or []
+        counts = [len(re.findall(r"\S+", p)) for p in parts]
+        subs = []
+        if words and sum(counts) == len(words):
+            idx = 0
+            for p, cnt in zip(parts, counts):
+                ws = words[idx:idx + cnt]
+                idx += cnt
+                if ws:
+                    subs.append({"start": float(ws[0]["s"]),
+                                 "end": float(ws[-1]["e"]),
+                                 "text": p, "words": ws})
+        else:
+            total_chars = sum(len(p) for p in parts) or 1
+            cur = 0
+            for p in parts:
+                a = start + (end - start) * cur / total_chars
+                cur += len(p)
+                b = start + (end - start) * cur / total_chars
+                ws = [w for w in words
+                      if a - 0.08 <= float(w.get("s", a)) < b - 0.08]
+                if ws:
+                    a, b = float(ws[0]["s"]), float(ws[-1]["e"])
+                subs.append({"start": a, "end": b, "text": p, "words": ws})
+        for x in subs:
+            if x["end"] - x["start"] < 0.35 and out:
+                out[-1]["end"] = max(out[-1]["end"], x["end"])
+                out[-1]["text"] = (out[-1]["text"] + " " + x["text"]).strip()
+            elif x["end"] > x["start"]:
+                out.append(x)
+    # GigaAM режиссёрски рвёт предложение на границе 12-секундного окна:
+    # склеиваем обрывки, иначе DREX метит обрыв посреди мысли.
+    merged = []
+    for x in out:
+        if merged:
+            prev = merged[-1]
+            tail = prev["text"].rstrip()
+            starts_low = bool(x["text"]) and x["text"][0].islower()
+            no_end = not re.search(r"[.!?…][\"»)]?$", tail)
+            if ((no_end or starts_low) and
+                    float(x["end"]) - float(prev["start"]) <= 32.0):
+                prev["end"] = max(float(prev["end"]), float(x["end"]))
+                prev["text"] = (prev["text"] + " " + x["text"]).strip()
+                prev["words"] = list(prev.get("words") or []) + list(x.get("words") or [])
+                continue
+        merged.append(x)
+    return merged
+
+
+def _even_story_parts(sents, min_len: float, max_len: float):
+    """Фолбэк без DREX: ровные части 3–4 минуты по границам предложений."""
+    if not sents:
+        return []
+    t0, t1 = float(sents[0]["start"]), float(sents[-1]["end"])
+    total = t1 - t0
+    if total <= 0:
+        return []
+    target = (min_len + max_len) / 2.0
+    n = max(1, int(round(total / max(target, 1.0))))
+    while n > 1 and total / n < min_len:
+        n -= 1
+    while total / n > max_len:
+        n += 1
+    ends = sorted(float(x["end"]) for x in sents)
+    parts, prev = [], t0
+    for k in range(1, n):
+        raw = t0 + total * k / n
+        lo, hi = prev + min_len * 0.75, min(prev + max_len, t1)
+        cand = [e for e in ends if lo <= e <= hi]
+        e = min(cand, key=lambda x: abs(x - raw)) if cand else raw
+        e = min(max(e, prev + 5.0), t1)
+        parts.append((prev, e))
+        prev = e
+    if t1 - prev >= 5.0:
+        parts.append((prev, t1))
+    elif parts:
+        parts[-1] = (parts[-1][0], t1)
+    return parts
+
+
+def pick_anime_parts(segs, key: str, min_len: float = 180.0,
+                     max_len: float = 240.0):
+    """DREX 1.5 читает предложения и метит close/open. DP собирает
+    непрерывную цепочку частей: сильный обрыв + сильный старт следующей
+    минус штраф за длину. Возвращает моменты с part/of для UI."""
+    if not segs:
+        return []
+    sents = _story_sentences(segs)
+    if not sents:
+        return []
+    t0, t1 = float(sents[0]["start"]), float(sents[-1]["end"])
+    total = t1 - t0
+    if total <= max_len * 1.12:
+        return [{"start": round(t0, 1), "end": round(t1, 1),
+                 "score": 70, "title": "Часть 1",
+                 "part_title": "ЧАСТЬ 1/1",
+                 "verdict": (f"Видео целиком — дробить не нужно, "
+                             f"{total / 60:.1f} мин."),
+                 "hook": " ".join(" ".join(s["text"] for s in sents).split()[:7]),
+                 "story": 1, "part": 0, "of": 1, "last": True}]
+    if not key:
+        raise RuntimeError("Для режима историй нужен DREX-ключ")
+
+    def _slen(s):
+        return len(f"[{s['start']:.1f}-{s['end']:.1f}] {s['text']}")
+
+    chunks, cur, cur_chars = [], [], 0
+    for s in sents:
+        cur.append(s)
+        cur_chars += _slen(s)
+        if cur_chars >= 18000:
+            chunks.append(cur)
+            tail, tc = [], 0
+            for x in reversed(cur):
+                tail.append(x)
+                tc += _slen(x)
+                if tc >= 5000:
+                    break
+            tail.reverse()
+            cur, cur_chars = tail, tc
+    if cur and (not chunks or cur[0] is not chunks[-1][0]):
+        chunks.append(cur)
+    if not chunks:
+        return []
+
+    pos_of = {id(s): n for n, s in enumerate(sents)}
+    states = []
+    for c in chunks:
+        lines = []
+        for s in c:
+            n = pos_of.get(id(s), 0)
+            if n > 0:
+                gap = float(s["start"]) - float(sents[n - 1]["end"])
+                if gap > 1.2:
+                    lines.append(f"…пауза {gap:.0f}с…")
+            lines.append(f"L{n} [{s['start']:.1f}-{s['end']:.1f}] {s['text']}")
+        states.append("\n".join(lines))
+
+    per_chunk = [dict() for _ in chunks]
+    for ci, c in enumerate(chunks):
+        for s in c:
+            n = pos_of.get(id(s), 0)
+            lid = f"L{n}"
+            per_chunk[ci][f"{lid}_close"] = {
+                "type": "noul",
+                "instructions": f"Line {lid} is the best cliffhanger ending for a 3-4 minute horror story part.",
+                "criteria": {"true": _ANIME_CLOSE_TRUE, "false": _ANIME_CLOSE_FALSE}}
+            per_chunk[ci][f"{lid}_open"] = {
+                "type": "noul",
+                "instructions": f"Line {lid} is the strongest cold open for the next part.",
+                "criteria": {"true": _ANIME_OPEN_TRUE, "false": _ANIME_OPEN_FALSE}}
+            per_chunk[ci][f"{lid}_filler"] = {
+                "type": "noul",
+                "instructions": f"Line {lid} is mid-thought filler, not a natural cut.",
+                "criteria": {"true": _ANIME_FILLER_TRUE, "false": _ANIME_FILLER_FALSE}}
+    ans = _ask_drex(key, states, per_chunk, workers=8)
+    if not ans:
+        parts = _even_story_parts(sents, min_len, max_len)
+        out = []
+        for k, (a, b) in enumerate(parts):
+            out.append({"start": round(a, 1), "end": round(b, 1), "score": 55,
+                        "title": f"Часть {k + 1}",
+                        "part_title": f"ЧАСТЬ {k + 1}/{len(parts)}",
+                        "verdict": "DREX не ответил — ровные части по таймингу.",
+                        "hook": "", "story": 1, "part": k, "of": len(parts),
+                        "last": k == len(parts) - 1})
+        return out
+
+    def _q(n, suffix):
+        return float((ans.get(f"L{n}_{suffix}") or {}).get("noul", 0.5))
+
+    pc, po = [], []
+    for n in range(len(sents)):
+        filler = _q(n, "filler")
+        damp = max(0.35, 1.0 - 0.55 * filler)
+        pc.append(_q(n, "close") * damp)
+        po.append(_q(n, "open") * damp)
+
+    target = (min_len + max_len) / 2.0
+
+    def _fit(d):
+        return max(0.0, 1.0 - abs(d - target) / max(target, 1.0))
+
+    def _boundary(j, d):
+        nxt = po[j + 1] if j + 1 < len(sents) else 0.35
+        return 1.7 * pc[j] + 0.8 * nxt + 0.7 * _fit(d)
+
+    n = len(sents)
+    dp, prev = [-1e9] * n, [-1] * n
+    for j in range(n):
+        d0 = float(sents[j]["end"]) - t0
+        if min_len <= d0 <= max_len:
+            dp[j] = _boundary(j, d0) + 0.15
+        for i in range(j):
+            if dp[i] <= -1e8:
+                continue
+            d = float(sents[j]["end"]) - float(sents[i + 1]["start"])
+            if min_len <= d <= max_len:
+                val = dp[i] + _boundary(j, d)
+                if val > dp[j]:
+                    dp[j], prev[j] = val, i
+    if dp[-1] <= -1e8:
+        cands = [j for j in range(max(0, n - 60), n) if dp[j] > -1e8]
+        if not cands:
+            parts = _even_story_parts(sents, min_len, max_len)
+            out = []
+            for k, (a, b) in enumerate(parts):
+                out.append({"start": round(a, 1), "end": round(b, 1), "score": 55,
+                            "title": f"Часть {k + 1}",
+                            "part_title": f"ЧАСТЬ {k + 1}/{len(parts)}",
+                            "verdict": "DREX не нашёл обрывов — ровные части.",
+                            "hook": "", "story": 1, "part": k, "of": len(parts),
+                            "last": k == len(parts) - 1})
+            return out
+        tail = lambda j: (float(sents[-1]["end"]) - float(sents[j + 1]["start"])
+                          if j + 1 < n else 0.0)
+        end_j = max(cands, key=lambda j: dp[j] + 0.25 * _fit(tail(j)))
+    else:
+        end_j = n - 1
+    ends, j = [], end_j
+    while j >= 0:
+        ends.append(j)
+        j = prev[j]
+    ends.reverse()
+    parts, prev_end = [], -1
+    for j in ends:
+        a = float(sents[prev_end + 1]["start"]) if prev_end >= 0 else t0
+        b = float(sents[j]["end"])
+        if b - a >= max(5.0, min_len * 0.5):
+            parts.append([a, b, j])
+        prev_end = j
+    if ends and ends[-1] < n - 1:
+        a = float(sents[ends[-1] + 1]["start"])
+        if t1 - a >= 60.0:
+            parts.append([a, t1, n - 1])
+        elif parts:
+            parts[-1][1], parts[-1][2] = t1, n - 1
+    if not parts:
+        even = _even_story_parts(sents, min_len, max_len)
+        out = []
+        for k, (a, b) in enumerate(even):
+            out.append({"start": round(a, 1), "end": round(b, 1), "score": 55,
+                        "title": f"Часть {k + 1}",
+                        "part_title": f"ЧАСТЬ {k + 1}/{len(even)}",
+                        "verdict": "DREX 1.5: не нашёл обрывов — ровные части.",
+                        "hook": "", "story": 1, "part": k, "of": len(even),
+                        "last": k == len(even) - 1})
+        return out
+    total_parts = len(parts)
+    out = []
+    for k, (a, b, j) in enumerate(parts):
+        close = pc[j] if j < len(pc) else 0.5
+        nxt = po[j + 1] if j + 1 < len(po) else 0.5
+        sc = int(round(100 * min(1.0, 0.65 * close + 0.35 * nxt)))
+        txt = " ".join(s["text"] for s in sents
+                       if a - 0.01 <= float(s["start"]) < b)
+        out.append({
+            "start": round(a, 1), "end": round(b, 1), "score": sc,
+            "title": f"Часть {k + 1}",
+            "part_title": f"ЧАСТЬ {k + 1}/{total_parts}",
+            "verdict": (f"DREX 1.5: обрыв {close:.2f}, старт {nxt:.2f}, "
+                        f"длина {int(round(b - a))}с."),
+            "hook": " ".join(txt.split()[:7]),
+            "story": 1, "part": k, "of": total_parts,
+            "last": k == total_parts - 1})
+    return out
+
+
 def compute_parts(segs, min_len: float = 45.0, max_len: float = 59.0):
     """Режет ВСЁ видео на последовательные части 45–59с по границам слов.
     Возвращает [{start, end}] без пропусков и наложений."""
@@ -4890,6 +5364,478 @@ def render_blur9(src: str, moment: dict, segs, out: str,
         _wait_pipe(proc)
     if proc.returncode != 0 or not _has_video(out):
         raise RuntimeError("рендер не удался")
+    return out
+
+
+_STORY_CTA_MORE = [
+    "ПРОДОЛЖЕНИЕ В СЛЕДУЮЩЕЙ ЧАСТИ", "КОНЦОВКА В СЛЕДУЮЩЕЙ ЧАСТИ",
+    "ЧТО БЫЛО ДАЛЬШЕ — СМОТРИ ДАЛЬШЕ", "СЛЕДУЮЩАЯ ЧАСТЬ УЖЕ ГОТОВА",
+    "РАЗВЯЗКА — В СЛЕДУЮЩЕЙ ЧАСТИ"]
+_STORY_CTA_LAST = [
+    "ПОДПИШИСЬ • БУДЕТ ЕЩЁ", "ПОДПИШИСЬ, ЧТОБЫ НЕ ПОТЕРЯТЬ",
+    "БОЛЬШЕ ИСТОРИЙ — В ПРОФИЛЕ", "ПОДПИШИСЬ • НОВЫЕ СЕРИИ КАЖДЫЙ ДЕНЬ",
+    "СТАВЬ ПЛЮС — БУДЕТ ПРОДОЛЖЕНИЕ"]
+
+
+def _with_story_cta(frame, font, last: bool = False, txt: str | None = None,
+                    y: int = 250):
+    """Плашка-затравка поверх верха: зритель понимает, что это серия,
+    и идёт за следующей частью, а не просто досматривает. Текст
+    рандомится один раз на ролик — одинаковые плашки у всех видео
+    TikTok читает как шаблонный репост."""
+    from PIL import Image, ImageDraw
+    import random
+    try:
+        img = Image.fromarray(frame)
+        dr = ImageDraw.Draw(img)
+        if not txt:
+            txt = random.choice(_STORY_CTA_LAST if last else _STORY_CTA_MORE)
+        bb = dr.textbbox((0, 0), txt, font=font, stroke_width=2)
+        tw = bb[2] - bb[0]
+        x = (frame.shape[1] - tw) / 2
+        dr.rounded_rectangle([x - 16, y - 9, x + tw + 16, y + (bb[3] - bb[1]) + 12],
+                             radius=16, fill=(12, 12, 12))
+        dr.text((x, y), txt, font=font, fill="#FFD60A",
+                stroke_width=2, stroke_fill="black")
+        return __import__("numpy").asarray(img)
+    except Exception:
+        return frame
+
+
+def render_story_part(src: str, moment: dict, segs, out: str,
+                      captions: bool = True, blur_subs: bool = True,
+                      unique: bool = True, mirror: bool = False,
+                      cta: bool = True, bgm: str | None = None,
+                      bgm_vol: float = 0.14, progress=None):
+    """Китайская история в TikTok-формате: ролик 4:3 по центру на блюр-фоне,
+    кроп всегда с зумом за героем, китайские сабы снизу размыты, русские —
+    под роликом. Звук — оригинальная русская озвучка, без перевода."""
+    import cv2
+    import numpy as np
+    import random
+    import tempfile
+    import time
+    from PIL import Image
+    start, end = float(moment["start"]), float(moment["end"])
+    cap = cv2.VideoCapture(src)
+    src_fps = float(cap.get(cv2.CAP_PROP_FPS) or 30) or 30.0
+    fps = round(min(src_fps, 30.0), 2)
+    W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1280
+    H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 720
+    nfr = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    if nfr and src_fps > 0:
+        end = min(end, nfr / src_fps)
+    if end - start < 1.5:
+        cap.release()
+        raise RuntimeError("момент за пределами видео")
+    dur = end - start
+    spd = random.uniform(0.985, 1.015) if unique else 1.0
+    out_dur = max(0.5, dur / spd)
+    # окно истории: 1080x1012 — на 25% больше по площади, чем 4:3,
+    # поэтому чуть выше классического кадра (16:15)
+    FG_W, FG_H, FG_Y = 1080, 1012, 370
+
+    base_h = float(H)
+    base_w = base_h * FG_W / FG_H
+    if base_w > W:
+        base_w = float(W)
+        base_h = base_w * FG_H / FG_W
+    if base_h > H:
+        base_h = float(H)
+        base_w = base_h * FG_W / FG_H
+
+    track = track_faces_xy(src, start, end, every=0.55)
+    z = random.uniform(1.075, 1.125) if unique else 1.09
+    if track:
+        avg_size = sum(p[3] for p in track) / len(track)
+        z += max(-0.025, min(0.055, (0.24 - avg_size) * 0.24))
+    z = max(1.055, min(1.19, z))
+
+    ass_path = None
+    has_hook = False
+    if captions:
+        fd, ass_path = tempfile.mkstemp(prefix="story_", suffix=".ass")
+        os.close(fd)
+        title = _story_title_variant(str(moment.get("part_title", "") or ""))
+        tcol = random.choice(["0AD6FF", "FFD60A", "FF9F0A", "30D158", "BF5AF2"])
+        tpos = random.randint(142, 158)
+        cap_fs = random.choice([52, 54, 56, 58])
+        cap_y = random.randint(1484, 1500)
+        try:
+            has = _ass_captions(
+                segs, start, spd, [], 0.0, ass_path,
+                part_title=title,
+                pos_y=cap_y, font_size=cap_fs, max_words=3, max_chars=28,
+                title_color=tcol, title_pos=tpos)
+        except Exception:
+            has = False
+        if not has:
+            try:
+                os.remove(ass_path)
+            except OSError:
+                pass
+            ass_path = None
+
+    use_bgm = bool(bgm) and os.path.exists(bgm)
+    bgm_vol = max(0.08, min(0.22, bgm_vol + random.uniform(-0.03, 0.03)))
+    bgm_off = 0.0
+    if use_bgm:
+        try:
+            _r = subprocess.run([FFMPEG, "-i", bgm], capture_output=True,
+                                text=True, timeout=30)
+            _m = __import__("re").search(r"Duration: (\d+):(\d+):(\d+)\.(\d+)",
+                                         _r.stderr or "")
+            bd = (int(_m.group(1)) * 3600 + int(_m.group(2)) * 60 +
+                  int(_m.group(3)) + int(_m.group(4)) / 100.0) if _m else 0.0
+            if bd > 6:
+                bgm_off = random.uniform(0.0, max(bd - 6.0, 0.0))
+        except Exception:
+            bgm_off = 0.0
+    cmd = [FFMPEG, "-y", "-v", "error",
+           "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "1080x1920",
+           "-r", str(fps), "-i", "pipe:0",
+           "-ss", str(start), "-t", str(round(dur, 2)), "-i", src]
+    if use_bgm:
+        if bgm_off > 0.05:
+            cmd += ["-ss", f"{bgm_off:.3f}"]
+        cmd += ["-stream_loop", "-1", "-i", bgm]
+    else:
+        cmd += ["-map", "0:v", "-map", "1:a?"]
+    vf = _quality_vf()
+    if unique:
+        uvf, _uaf = _antidetect_filters()
+        vf += "," + uvf
+    if ass_path:
+        vf += f",subtitles={_fesc(ass_path)}"
+    cmd += ["-vf", vf]
+    has_voice = _has_audio_stream(src)
+    if has_voice and use_bgm:
+        if unique:
+            k = random.uniform(1.01, 1.04)
+            af = (f"aresample=44100,asetrate=44100*{k:.4f},"
+                  f"aresample=44100,atempo={spd / k:.5f}")
+            vol = random.uniform(0.97, 1.02)
+        else:
+            af = f"atempo={spd:.5f}" if abs(spd - 1.0) > 1e-4 else ""
+            vol = 1.0
+        voice = _tiktok_af(af, _STORY_LOUDNORM, f"volume={vol:.3f}")
+        fc = (f"[1:a]{voice}[voice];"
+              f"[2:a]volume={bgm_vol:.3f},aresample=48000,"
+              f"aformat=channel_layouts=stereo[bg];"
+              f"[voice][bg]amix=inputs=2:duration=first:normalize=0,"
+              f"alimiter=limit=0.95[aout]")
+        cmd += ["-filter_complex", fc, "-map", "0:v", "-map", "[aout]"]
+    elif has_voice:
+        if unique:
+            k = random.uniform(1.01, 1.04)
+            af = (f"aresample=44100,asetrate=44100*{k:.4f},"
+                  f"aresample=44100,atempo={spd / k:.5f}")
+            vol = random.uniform(0.97, 1.02)
+        else:
+            af = f"atempo={spd:.5f}" if abs(spd - 1.0) > 1e-4 else ""
+            vol = 1.0
+        cmd += ["-af", _tiktok_af(af, _STORY_LOUDNORM, f"volume={vol:.3f}")]
+    elif use_bgm:
+        fc = (f"[2:a]volume={bgm_vol:.3f},aresample=48000,"
+              f"aformat=channel_layouts=stereo[aout]")
+        cmd += ["-filter_complex", fc, "-map", "0:v", "-map", "[aout]"]
+    cmd += _video_codec_args(hq=False) + ["-pix_fmt", "yuv420p",
+            *_AUDIO_OUT, "-movflags", "+faststart",
+            "-t", str(round(out_dur, 2))] + _rand_meta() + [out]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+
+    start_idx = max(0, int(round(start * src_fps)))
+    cap.set(cv2.CAP_PROP_POS_FRAMES, start_idx)
+    _warm_start(cap)
+    read_idx = int(cap.get(cv2.CAP_PROP_POS_FRAMES) or start_idx)
+    total = max(1, int(round(out_dur * fps)))
+    cta_font = _font(34) if cta else None
+    cta_txt = (random.choice(_STORY_CTA_LAST if moment.get("last")
+                             else _STORY_CTA_MORE) if cta else None)
+    cta_y = 250
+    last_frame = None
+    try:
+        for k in range(total):
+            target = start_idx + int(round(k * spd * src_fps / fps))
+            while read_idx <= target:
+                ok, fr = cap.read()
+                read_idx += 1
+                if not ok:
+                    break
+                last_frame = fr
+            if last_frame is None:
+                ok, fr = cap.read()
+                read_idx += 1
+                if not ok:
+                    break
+                last_frame = fr
+            fr = last_frame
+            if mirror:
+                fr = cv2.flip(fr, 1)
+            fr = cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)
+            t = start + (k / fps) * spd
+            pt = face_xy_at(track, t)
+            if pt:
+                cx, cy, face_sz = pt
+            else:
+                cx, cy, face_sz = 0.5, 0.46, 0.20
+            zk = z + max(-0.02, min(0.045, (0.24 - face_sz) * 0.22))
+            cw = max(32.0, base_w / zk)
+            ch = max(24.0, base_h / zk)
+            x0 = int(round(min(max(cx * W - cw / 2.0, 0.0), max(W - cw, 0.0))))
+            y0 = int(round(min(max(cy * H - ch / 2.0, 0.0), max(H - ch, 0.0))))
+            crop = fr[y0:y0 + int(round(ch)), x0:x0 + int(round(cw))]
+            if crop.size == 0:
+                crop = fr
+            fg = cv2.resize(crop, (FG_W, FG_H), interpolation=cv2.INTER_LANCZOS4)
+            if blur_subs:
+                sub_top = H * 0.82
+                vis_top = max(float(y0), sub_top)
+                if vis_top < y0 + ch:
+                    by = int(round((vis_top - y0) / max(ch, 1.0) * FG_H))
+                    by = max(0, min(FG_H - 1, by))
+                    roi = fg[by:]
+                    if roi.size:
+                        rh, rw = roi.shape[:2]
+                        sw, sh = max(2, rw // 3), max(2, rh // 3)
+                        bl = cv2.GaussianBlur(
+                            cv2.resize(roi, (sw, sh), interpolation=cv2.INTER_AREA),
+                            (0, 0), 8.7)
+                        bl = cv2.resize(bl, (rw, rh), interpolation=cv2.INTER_LINEAR)
+                        # белый текст на тёмном фоне после блюра всё ещё
+                        # читается — прижимаем яркость размытой полосы
+                        bl = cv2.convertScaleAbs(bl, alpha=0.68)
+                        hroi = roi.shape[0]
+                        ramp = np.ones((hroi, 1, 1), np.float32)
+                        r = min(hroi, 46)
+                        if r > 1:
+                            ramp[:r, 0, 0] = np.linspace(0.0, 1.0, r)
+                        fg[by:] = np.clip(
+                            roi.astype(np.float32) * (1.0 - ramp) +
+                            bl.astype(np.float32) * ramp, 0, 255).astype(np.uint8)
+            small = cv2.resize(fr, (90, 160), interpolation=cv2.INTER_AREA)
+            small = cv2.GaussianBlur(small, (0, 0), 5)
+            bg = cv2.resize(small, (1080, 1920), interpolation=cv2.INTER_LINEAR)
+            bg = cv2.convertScaleAbs(bg, alpha=0.55)
+            frame = bg
+            frame[FG_Y:FG_Y + FG_H, :] = fg
+            if cta and k >= total - int(round(2.8 * fps)):
+                frame = _with_story_cta(frame, cta_font,
+                                        bool(moment.get("last")), cta_txt,
+                                        cta_y)
+            _pipe_write(proc, frame)
+            if progress and k % 15 == 0:
+                progress(k / total)
+    finally:
+        cap.release()
+        try:
+            proc.stdin.close()
+        except Exception:
+            pass
+        _wait_pipe(proc)
+        if ass_path:
+            try:
+                os.remove(ass_path)
+            except OSError:
+                pass
+    if proc.returncode != 0 or not _has_video(out):
+        raise RuntimeError("рендер истории не удался")
+    return out
+
+
+def list_story_music() -> list:
+    """Все аудиофайлы из assets/music и assets — пул для ротации фона."""
+    import glob as _g
+    base = os.path.join(BASE, "assets")
+    cands = []
+    for d in (os.path.join(base, "music"), base):
+        for ext in ("mp3", "m4a", "aac", "wav", "opus", "ogg", "flac"):
+            cands += sorted(_g.glob(os.path.join(d, f"*.{ext}")))
+    return cands
+
+
+def _story_title_variant(t: str) -> str:
+    """ЧАСТЬ 1/5 -> случайная форма, чтобы заголовки не были шаблоном."""
+    import random
+    import re as _re
+    m = _re.match(r"^(ЧАСТЬ|СЕРИЯ)\s+(\d+)\s*/\s*(\d+)\s*$", (t or "").strip())
+    if not m:
+        return t
+    n, of = m.group(2), m.group(3)
+    return random.choice([f"ЧАСТЬ {n}/{of}", f"ЧАСТЬ {n} ИЗ {of}",
+                          f"СЕРИЯ {n}/{of}", f"ИСТОРИЯ {n}/{of}"])
+
+
+def pick_story_music() -> str | None:
+    """Случайный трек из пула (Fallen Down в приоритете)."""
+    import random
+    cs = list_story_music()
+    if not cs:
+        return None
+    pri = [c for c in cs if "fallen" in os.path.basename(c).lower()]
+    return random.choice(pri or cs)
+
+
+def find_story_music() -> str | None:
+    """Фоновая музыка для историй: первый аудиофайл в assets/music или
+    assets, приоритет — имя со 'fallen' (Fallen Down slowed + reverb)."""
+    import glob as _g
+    base = os.path.join(BASE, "assets")
+    cands = []
+    for d in (os.path.join(base, "music"), base):
+        for ext in ("mp3", "m4a", "aac", "wav", "opus", "ogg", "flac"):
+            cands += sorted(_g.glob(os.path.join(d, f"*.{ext}")))
+    if not cands:
+        return None
+    for c in cands:
+        if "fallen" in os.path.basename(c).lower():
+            return c
+    return cands[0]
+
+
+def insert_banners(src: str, out: str, banner_path: str | None = None,
+                   every: float = 60.0, middle: bool = False,
+                   progress=None) -> str:
+    """Добивает баннеры в готовый ролик: минимум +1 на каждую минуту
+    хронометража (49с -> 1, 130с -> 2, 194с -> 3, 240с -> 4). На точке
+    вставки видео замирает последним кадром, поверх играет баннер
+    (хромакей/прозрачность как в остальных режимах), звук источника
+    сменяет звук баннера или тишина."""
+    import shutil as _sh
+    import random
+    bpath = banner_path if banner_path and os.path.exists(banner_path) else BANNER_FILE
+    W, H, nfr, fps = _probe_wh_fps(src)
+    if (not os.path.exists(bpath) or W <= 0 or H <= 0 or nfr <= 0 or fps <= 0):
+        if os.path.abspath(src) != os.path.abspath(out):
+            _sh.copyfile(src, out)
+        return out
+    dur = float(nfr) / float(fps)
+    b_eff = max(_banner_eff(bpath), 1.0)
+    if dur < b_eff + 6.0:
+        _sh.copyfile(src, out)
+        return out
+    fps_i = max(int(round(min(fps, 30.0))), 15)
+    _bw, _bh, _bn, _bf = _probe_wh_fps(bpath)
+    bdur = (_bn / _bf) if (_bn and _bf) else 0.0
+    bspd = BANNER_SPEED * random.uniform(0.95, 1.05)
+    b_eff = max((bdur / bspd) if bdur else b_eff, 1.0)
+    _baa = random.uniform(0.94, 0.96)
+    _beq = (f"eq=brightness={random.uniform(-0.012, 0.012):.4f}:"
+            f"contrast={random.uniform(0.99, 1.01):.3f}:"
+            f"saturation={random.uniform(0.98, 1.02):.3f}:"
+            f"gamma_r={random.uniform(0.99, 1.01):.3f}:"
+            f"gamma_g={random.uniform(0.99, 1.01):.3f}:"
+            f"gamma_b={random.uniform(0.99, 1.01):.3f},"
+            f"hue=h={random.uniform(-2.0, 2.0):.1f}")
+    pts = []
+    if middle:
+        # ровно середина: центр баннера = центру итогового ролика
+        pts = [round(max(dur / 2.0, 0.5), 3)]
+    else:
+        n = int(round(dur / max(every, 1.0)))
+        if dur >= 30 and n < 1:
+            n = 1
+        if n <= 0:
+            _sh.copyfile(src, out)
+            return out
+        last_ok = dur - b_eff - 3.5
+        for i in range(1, n + 1):
+            t = min(float(i) * every, last_ok)
+            if t <= 0.5:
+                continue
+            if pts and t - pts[-1] < b_eff + 4.0:
+                continue
+            pts.append(round(t, 3))
+    if not pts:
+        _sh.copyfile(src, out)
+        return out
+    import tempfile as _tf
+    work = _tf.mkdtemp(prefix="banins_")
+    try:
+        freeze = []
+        for i, t in enumerate(pts):
+            p = os.path.join(work, f"f{i}.png")
+            subprocess.run([FFMPEG, "-y", "-v", "error", "-ss", f"{t:.3f}",
+                            "-i", src, "-frames:v", "1", p],
+                           timeout=180, check=True)
+            freeze.append(p)
+        bw, bh, by = _banner_box(bpath, out_h=H)
+        bw, bh = max(bw // 2 * 2, 2), max(bh // 2 * 2, 2)
+        ox = max((W - bw) // 2, 0)
+        by = max(0, min(H - bh, by))
+        inputs = ["-i", src]
+        for p in freeze:
+            inputs += ["-loop", "1", "-framerate", str(fps_i),
+                       "-t", f"{b_eff:.3f}", "-i", p]
+        ban_idx = 1 + len(freeze)
+        inputs += ["-i", bpath]
+        pre = "crop=604:908:58:206," if _banner_trading(bpath) else ""
+        bounds = [0.0] + pts + [dur]
+        nseg = len(pts) + 1
+        ve, ue = [], []
+        for j in range(nseg):
+            s, e = bounds[j], bounds[j + 1]
+            ve.append(f"[0:v]trim=start={s:.3f}:end={e:.3f},"
+                      f"setpts=PTS-STARTPTS[v{j}]")
+        ve.append(f"[{ban_idx}:v]split={len(pts)}" +
+                  "".join(f"[bs{i}]" for i in range(len(pts))))
+        for i in range(len(pts)):
+            ve.append(f"[bs{i}]trim=start=0:end={max(bdur or b_eff * bspd, 0.1):.3f},"
+                      f"setpts=PTS-STARTPTS,{pre}{_banner_fmt(bpath, _baa)},"
+                      f"scale={bw}:{bh},fps={fps_i},{_beq},"
+                      f"noise=alls=1:allf=t,"
+                      f"setpts=PTS/{bspd:.3f}[vb{i}]")
+            ve.append(f"[{1 + i}:v]fps={fps_i},format=yuv420p,"
+                      f"setpts=PTS-STARTPTS[fb{i}]")
+            ve.append(f"[fb{i}][vb{i}]overlay={ox}:{by}:eof_action=pass[vm{i}]")
+        for j in range(nseg):
+            ue.append(f"[v{j}]")
+            if j < len(pts):
+                ue.append(f"[vm{j}]")
+        ve.append("".join(ue) + f"concat=n={len(ue)}:v=1:a=0[vout]")
+        has_src_a = _has_audio_stream(src)
+        if has_src_a:
+            has_ban_a = _has_audio_stream(bpath)
+            for j in range(nseg):
+                s, e = bounds[j], bounds[j + 1]
+                ve.append(f"[0:a]atrim=start={s:.3f}:end={e:.3f},"
+                          f"asetpts=PTS-STARTPTS,aresample=48000,"
+                          f"aformat=channel_layouts=stereo[a{j}]")
+            for i in range(len(pts)):
+                sil = (f"anullsrc=r=48000:cl=stereo:d={b_eff:.3f}[ab{i}]")
+                if has_ban_a:
+                    ve.append(f"[{ban_idx}:a]atempo={bspd:.3f},"
+                              f"atrim=start=0:end={b_eff:.3f},"
+                              f"asetpts=PTS-STARTPTS,"
+                              f"volume={random.uniform(0.45, 0.55):.3f},"
+                              f"aresample=48000,"
+                              f"aformat=channel_layouts=stereo[ba{i}]")
+                    ve.append(f"anullsrc=r=48000:cl=stereo:d={b_eff:.3f}[as{i}]")
+                    ve.append(f"[as{i}][ba{i}]amix=inputs=2:duration=first:"
+                              f"normalize=0[ab{i}]")
+                else:
+                    ve.append(sil)
+            ua = []
+            for j in range(nseg):
+                ua.append(f"[a{j}]")
+                if j < len(pts):
+                    ua.append(f"[ab{j}]")
+            ve.append("".join(ua) + f"concat=n={len(ua)}:v=0:a=1[aout]")
+        fc = ";".join(ve)
+        total = dur + len(pts) * b_eff
+        cmd = [FFMPEG, "-y", "-v", "error"] + inputs + \
+            ["-filter_complex", fc, "-map", "[vout]"]
+        if has_src_a:
+            cmd += ["-map", "[aout]"]
+        cmd += _rand_meta() + _video_codec_args() + ["-pix_fmt", "yuv420p",
+                *_AUDIO_OUT, "-movflags", "+faststart",
+                "-t", f"{total:.3f}", out]
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=max(300, int(total * 4) + 240))
+        if r.returncode != 0 or not _has_video(out):
+            raise RuntimeError(f"баннеры не встали: {(r.stderr or '')[-300:]}")
+    finally:
+        _sh.rmtree(work, ignore_errors=True)
     return out
 
 

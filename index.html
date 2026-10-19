@@ -332,6 +332,7 @@
       <button data-v="dashboard" class="on"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7.5" height="7.5" rx="2"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="2"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="2"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="2"/></svg><span class="nl">Дашборд</span></button>
       <button data-v="cut"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><path d="M8.2 7.8L20 19M8.2 16.2L20 5"/></svg><span class="nl">Нарезка</span></button>
       <button data-v="twitch"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 3h16v11H9l-5 4V3z"/><path d="M9 7.5v4M13.5 7.5v4"/></svg><span class="nl">Twitch</span></button>
+      <button data-v="anime"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5A2.5 2.5 0 016.5 3H12v17H6.5A2.5 2.5 0 004 22V5.5z"/><path d="M20 5.5A2.5 2.5 0 0017.5 3H12v17h5.5A2.5 2.5 0 0120 22V5.5z"/></svg><span class="nl">Истории</span></button>
       <button data-v="clips"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="M10 9.5v5l4.5-2.5L10 9.5z" fill="currentColor" stroke="none"/></svg><span class="nl">Клипы</span></button>
       <button data-v="uniq"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"/><path d="M19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9L19 15z"/></svg><span class="nl">Уникализатор</span></button>
       <button data-v="refs"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M16.5 16.5L21 21"/></svg><span class="nl">Разбор</span></button>
@@ -448,6 +449,50 @@
       </div>
       <h2>Очередь</h2>
       <div id="twQueue"><div class="empty">Здесь появятся задачи и готовые клипы</div></div>
+    </section>
+
+    <!-- STORIES -->
+    <section class="view" id="v-anime">
+      <div class="card">
+        <div class="step"><b>01</b><span>Источник</span></div>
+        <label class="lbl" for="anUrls">Ссылки на китайские страшилки с русской озвучкой — по одной на строку</label>
+        <textarea id="anUrls" placeholder="https://youtu.be/..."></textarea>
+        <div class="dim" style="margin-top:6px">Без перевода: софт слушает уже готовую русскую дорожку, вырезает паузы и собирает части по 3–4 минуты. Китайские субтитры в кадре размываются, русские жгутся под роликом.</div>
+        <label class="lbl" for="anKey">DREX 1.5 API-ключ</label>
+        <input id="anKey" type="password" placeholder="nace_sk… (можно сохранить в настройках)">
+        <div class="step"><b>02</b><span>Формат</span></div>
+        <div class="ai-grid">
+          <div><label class="lbl" for="anMode">Что делаем</label>
+            <select id="anMode"><option value="parts" selected>Истории по частям</option><option value="moments">Интересные моменты</option></select></div>
+          <div id="anLenWrap"><label class="lbl" for="anLen">Длина части</label>
+            <select id="anLen"><option value="60-120">1–2 минуты</option><option value="120-180">2–3 минуты</option><option value="150-210">2.5–3.5 минуты</option><option value="180-240" selected>3–4 минуты</option><option value="240-300">4–5 минут</option><option value="300-360">5–6 минут</option><option value="360-600">6–10 минут</option></select></div>
+          <div id="anWantWrap" style="display:none"><label class="lbl" for="anWant">Клипов с видео</label>
+            <select id="anWant"><option>3</option><option>5</option><option selected>8</option><option>10</option><option>15</option><option>20</option></select></div>
+          <div id="anLensWrap" style="display:none"><label class="lbl" for="anLens">Длина клипа</label>
+            <select id="anLens"><option value="8-15">Очень короткие · 8–15</option><option value="15-30" selected>Короткие · 15–30</option><option value="20-40">20–40</option><option value="40-59">Стандарт · 40–59</option><option value="40-75">Длинные · 40–75</option><option value="60-90">60–90</option><option value="80-118">Макси · 80–118</option><option value="90-150">90–150</option></select></div>
+          <div><label class="lbl" for="anVar">Вариантов на клип</label>
+            <select id="anVar"><option value="1" selected>1</option><option value="2">2</option><option value="3">3</option></select></div>
+          <div><label class="lbl" for="anLimit">Анализ</label>
+            <select id="anLimit"><option value="0" selected>Всё видео</option><option value="10">Первые 10 мин</option><option value="20">Первые 20 мин</option><option value="40">Первые 40 мин</option><option value="60">Первый час</option></select></div>
+        </div>
+        <div class="chkgrid">
+          <label class="chk"><input type="checkbox" id="anPause" checked> Вырезать все паузы</label>
+          <label class="chk"><input type="checkbox" id="anBlurSub" checked> Размывать китайские субтитры</label>
+          <label class="chk"><input type="checkbox" id="anCaps" checked> Русские субтитры</label>
+          <label class="chk"><input type="checkbox" id="anUnique" checked> Уникализация (звук · цвет · зерно)</label>
+          <label class="chk"><input type="checkbox" id="anCta" checked> Затравка «продолжение» в конце</label>
+          <label class="chk"><input type="checkbox" id="anMirror"> Зеркало (текст в кадре станет нечитаемым)</label>
+          <label class="chk"><input type="checkbox" id="anBan" checked> Баннер в середине</label>
+          <label class="chk"><input type="checkbox" id="anMusic" checked> Музыка Fallen Down slowed + reverb</label>
+          <div><label class="lbl" for="anBanFile">Какой баннер</label>
+            <select id="anBanFile"><option value="">По умолчанию</option></select></div>
+        </div>
+        <div style="margin-top:14px"><button class="btn" id="anGo">Сделать части</button></div>
+        <div class="dim" style="margin-top:8px">Ролик по центру (чуть выше 4:3), зум всегда на персонажах, блюр-фон сверху и снизу. «По частям» — DREX 1.5 режет на обрывах; «Интересные моменты» — как обычная нарезка: выбираешь количество и длину клипов.</div>
+        <div class="err-line" id="anErr"></div>
+      </div>
+      <h2>Очередь</h2>
+      <div id="anQueue"><div class="empty">Здесь появятся части</div></div>
     </section>
 
     <section class="view" id="v-clips">
@@ -569,8 +614,8 @@
 
 <script>
 const $=id=>document.getElementById(id);
-const TITLES={dashboard:'Дашборд',cut:'Нарезка',twitch:'Twitch',clips:'Клипы',uniq:'Уникализатор',refs:'Разбор',history:'История',settings:'Настройки'};
-const SUBS={dashboard:'пачка вертикальных шортсов из серий',cut:'ссылки → сценки → серии',twitch:'стримы: вебка сверху, катка снизу',clips:'готовое с постерами и скором',uniq:'залил видео → получил уникальное',refs:'залётные конкуренты → хуки в обучение',history:'все запуски и их движки',settings:'ключи, дефолты, воркеры'};
+const TITLES={dashboard:'Дашборд',cut:'Нарезка',twitch:'Twitch',anime:'Истории',clips:'Клипы',uniq:'Уникализатор',refs:'Разбор',history:'История',settings:'Настройки'};
+const SUBS={dashboard:'пачка вертикальных шортсов из серий',cut:'ссылки → сценки → серии',twitch:'стримы: вебка сверху, катка снизу',anime:'китайские страшилки → части 3–4 мин на обрывах',clips:'готовое с постерами и скором',uniq:'залил видео → получил уникальное',refs:'залётные конкуренты → хуки в обучение',history:'все запуски и их движки',settings:'ключи, дефолты, воркеры'};
 let SETTINGS={};
 let live=new Map();
 let HIST=[];
@@ -592,6 +637,7 @@ function show(v){
   if(v==='refs')loadRefs();
   if(v==='uniq'){loadUniq();loadBanners();}
   if(v==='twitch'){fillKeys();loadBanners();}
+  if(v==='anime'){fillKeys();loadBanners();}
   if(v==='cut')loadBanners();
 }
 document.querySelectorAll('#nav button').forEach(b=>b.onclick=()=>show(b.dataset.v));
@@ -653,8 +699,8 @@ setInterval(async ()=>{
 
 function showErr(m){const e=$('err');e.textContent=m;e.style.display='block'}
 function hideErr(){$('err').style.display='none'}
-function fillKeys(){const v=localStorage.getItem('cs_drex')||SETTINGS.drex_key||'';if(!v)return;if($('key')&&!$('key').value)$('key').value=v;if($('twKey')&&!$('twKey').value)$('twKey').value=v;}
-function watchKeys(){[$('key'),$('twKey')].forEach(el=>{if(!el||el._kw)return;el._kw=1;el.addEventListener('change',()=>{const v=el.value.trim();if(v)localStorage.setItem('cs_drex',v);fillKeys();});});}
+function fillKeys(){const v=localStorage.getItem('cs_drex')||SETTINGS.drex_key||'';if(!v)return;['key','twKey','anKey'].forEach(id=>{const el=$(id);if(el&&!el.value)el.value=v;});}
+function watchKeys(){['key','twKey','anKey'].forEach(id=>{const el=$(id);if(!el||el._kw)return;el._kw=1;el.addEventListener('change',()=>{const v=el.value.trim();if(v)localStorage.setItem('cs_drex',v);fillKeys();});});}
 if(localStorage.getItem('cs_drex'))$('key').value=localStorage.getItem('cs_drex');
 watchKeys();
 $('manualChk').addEventListener('change',()=>{$('stampsBox').style.display=$('manualChk').checked?'block':'none'});
@@ -701,6 +747,58 @@ $('go').onclick=async ()=>{
     renderDashActive();
   }catch(e){showErr(e.message)}
   finally{$('go').disabled=false;$('go').textContent='Нарезать шортсы'}
+};
+
+/* ---------- истории ---------- */
+function syncAnMode(){
+  const m=$('anMode').value==='moments';
+  $('anLenWrap').style.display=m?'none':'';
+  $('anWantWrap').style.display=m?'':'none';
+  $('anLensWrap').style.display=m?'':'none';
+  $('anGo').textContent=m?'Сделать моменты':'Сделать части';
+}
+$('anMode').onchange=syncAnMode;
+syncAnMode();
+
+$('anGo').onclick=async ()=>{
+  const E=$('anErr');E.style.display='none';
+  const urls=$('anUrls').value.trim();
+  if(!urls){E.textContent='Вставь хоть одну ссылку';E.style.display='block';return;}
+  const key=$('anKey').value.trim();
+  if(!key){E.textContent='Для режима историй нужен DREX-ключ';E.style.display='block';return;}
+  localStorage.setItem('cs_drex',key);
+  const kind=$('anMode').value;
+  const [mn,mx]=(kind==='moments'?$('anLens'):$('anLen')).value.split('-').map(Number);
+  const b=$('anGo');b.disabled=true;b.textContent='Запускаю…';
+  try{
+    const r=await fetch('/api/start',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({urls,api_key:key,vmode:'story',story_kind:kind,
+        min_len:mn,max_len:mx,limit_min:+$('anLimit').value,asr_model:'giga',
+        want:+$('anWant').value,
+        captions:$('anCaps').checked,
+        story_blur_subs:$('anBlurSub').checked,
+        story_unique:$('anUnique').checked,
+        story_mirror:$('anMirror').checked,
+        story_cta:$('anCta').checked,
+        story_remove_pauses:$('anPause').checked,
+        story_banner:$('anBan').checked,banner_file:$('anBanFile').value,
+        story_music:$('anMusic').checked,story_variants:+$('anVar').value,
+        facetrack:true,antidetect:false,mirror:false,banner:false})});
+    const j=await r.json();
+    if(!j.ok)throw new Error(j.error||'Не получилось');
+    toast(j.jobs.length>1?'Запущено задач: '+j.jobs.length:'История запущена','ok');
+    const q=$('anQueue');
+    if(q.querySelector('.empty'))q.innerHTML='';
+    j.jobs.forEach((id,k)=>{
+      const d=document.createElement('div');d.className='job';
+      d.innerHTML='<div class="t">История '+(k+1)+'</div><div class="bar live"><i style="width:0%"></i></div><div class="s">в очереди…</div><div class="clips"></div>';
+      q.prepend(d);
+      live.set(id,{targets:[{bar:d.querySelector('.bar i'),st:d.querySelector('.s'),
+        box:d.querySelector('.clips'),titleEl:d.querySelector('.t')}]});
+    });
+    renderDashActive();
+  }catch(e){E.textContent=e.message;E.style.display='block';}
+  finally{b.disabled=false;syncAnMode();}
 };
 
 /* ---------- дашборд ---------- */
@@ -780,7 +878,7 @@ function makeCustom(id){
   sel._cs={sync};sync();
 }
 function refreshCustom(){document.querySelectorAll('select').forEach(s=>{if(s._cs)s._cs.sync();});}
-  ['want','game','lens','limit','mode','asd','sWant','sLens','sLimit','sVmode','sAsd','sGame','sW','twWant','twLens','twLimit','banFile','twBanFile','uqBanFile'].forEach(makeCustom);
+  ['want','game','lens','limit','mode','asd','sWant','sLens','sLimit','sVmode','sAsd','sGame','sW','twWant','twLens','twLimit','anMode','anWant','anLens','anVar','anLen','anLimit','banFile','twBanFile','uqBanFile','anBanFile'].forEach(makeCustom);
 
 /* ---------- клипы ---------- */
 let LIB=[];
@@ -1187,7 +1285,7 @@ async function loadBanners(){
   try{
     const j=await (await fetch('/api/banners')).json();
     const sig='|'+(j.banners||[]).map(b=>b.id).join('|');
-    for(const id of ['banFile','twBanFile','uqBanFile']){
+    for(const id of ['banFile','twBanFile','uqBanFile','anBanFile']){
       const sel=$(id);
       if(!sel)continue;
       const cur=sel.value;
@@ -1209,7 +1307,7 @@ async function loadBanners(){
         sel.style.display='';
       }
     }
-    ['banFile','twBanFile','uqBanFile'].forEach(makeCustom);
+    ['banFile','twBanFile','uqBanFile','anBanFile'].forEach(makeCustom);
     refreshCustom();
   }catch(e){console.error('banners:',e);}
 }

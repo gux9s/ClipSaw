@@ -24,3 +24,7 @@ __pycache__/
 
 # macos
 .DS_Store
+
+# рабочие папки уникализатора
+unique/
+unique_in/
