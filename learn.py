@@ -166,7 +166,12 @@ def full_features(verdict: str = "", title: str = "", hook: str = "",
 
 
 def dataset():
-    """[(features(v2), y, weight)] — y=1 хит, y=0 брак/низ. weight — важность."""
+    """[(features(v2), y, weight)] — y=1 хит, y=0 брак/низ. weight — важность.
+
+    Просмотры берём из привязанных публикаций account_videos (свежие
+    данные TikTok), а если их нет — из ручной метки clips.views.
+    Так цикл «клип → тег → аккаунт → просмотры → обучение» замкнут.
+    """
     try:
         c = sqlite3.connect(DB, timeout=10)
     except Exception:
@@ -174,15 +179,24 @@ def dataset():
     try:
         try:
             rows = c.execute(
-                "SELECT verdict, title, hook, dur, score, views FROM clips"
-                " WHERE views != 0").fetchall()
+                "SELECT cl.verdict, cl.title, cl.hook, cl.dur, cl.score,"
+                " cl.views, COALESCE(SUM(av.views),0) AS post_views"
+                " FROM clips cl"
+                " LEFT JOIN account_videos av"
+                "   ON av.clip_job=cl.job_id AND av.clip_idx=cl.idx"
+                " GROUP BY cl.job_id, cl.idx").fetchall()
         except Exception:
             try:
                 rows = c.execute(
-                    "SELECT verdict, views FROM clips WHERE views != 0").fetchall()
-                rows = [(r[0], "", "", 0, 0, r[1]) for r in rows]
+                    "SELECT verdict, title, hook, dur, score, views, 0"
+                    " FROM clips").fetchall()
             except Exception:
-                rows = []
+                try:
+                    rows = c.execute(
+                        "SELECT verdict, '', '', 0, 0, views, 0"
+                        " FROM clips").fetchall()
+                except Exception:
+                    rows = []
         try:
             refs = c.execute(
                 "SELECT viral, hookp, whole, peak, score, views, hook, dur"
@@ -194,11 +208,18 @@ def dataset():
             c.close()
         except Exception:
             pass
-    pos = [(r[0], r[1], r[2], r[3], r[4], r[5]) for r in rows if r[5] and r[5] > 0]
-    neg = [(r[0], r[1], r[2], r[3], r[4]) for r in rows if len(r) > 5 and r[5] == -1]
-    # если старая схема без колонок — neg из verdict
-    if not neg and rows and len(rows[0]) == 2:
-        neg = [(r[0], "", "", 0, 0) for r in rows if r[1] == -1]
+
+    pos, neg = [], []
+    for r in rows:
+        manual = int(r[5] or 0)
+        post = int(r[6] or 0) if len(r) > 6 else 0
+        if manual == -1:
+            neg.append((r[0], r[1], r[2], r[3], r[4]))
+            continue
+        effective = post if post > 0 else manual
+        if effective > 0:
+            pos.append((r[0], r[1], r[2], r[3], r[4], effective))
+
     vs = sorted(v for _, _, _, _, _, v in pos)
     med = vs[len(vs) // 2] if vs else 0
     data = []
@@ -419,11 +440,18 @@ def status():
         c = sqlite3.connect(DB, timeout=10)
         try:
             nrefs = c.execute("SELECT COUNT(*) FROM refs").fetchone()[0]
+            try:
+                nposts = c.execute(
+                    "SELECT COUNT(*) FROM account_videos"
+                    " WHERE clip_job IS NOT NULL").fetchone()[0]
+            except Exception:
+                nposts = 0
         finally:
             c.close()
     except Exception:
-        nrefs = 0
+        nrefs = nposts = 0
     out = {"labeled": len(data), "pos": pos, "neg": neg, "refs": nrefs,
+           "posts": nposts,
            "trained": bool(w and not (payload or {}).get("prior")),
            "weights": w}
     if payload:

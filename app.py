@@ -1,8 +1,12 @@
 """ClipSaw web — ссылка на YouTube -> пачка вертикальных шортсов.
 Только нарезка сериалов/фильмов: сцены -> транскрибация -> LLM-скоринг -> 9:16 -> субтитры."""
+import csv
+import io
 import json
 import os
+import re
 import sqlite3
+import subprocess
 import threading
 import time
 import uuid
@@ -28,20 +32,24 @@ os.makedirs(LEGACY_DIR, exist_ok=True)
 os.makedirs(THUMB_DIR, exist_ok=True)
 UNIQ_IN = os.path.join(BASE, "unique_in")
 UNIQ_OUT = os.path.join(BASE, "unique")
+GAMEPLAY_DIR = os.path.join(BASE, "gameplay")
 os.makedirs(UNIQ_IN, exist_ok=True)
 os.makedirs(UNIQ_OUT, exist_ok=True)
+os.makedirs(GAMEPLAY_DIR, exist_ok=True)
 UNIQ_JOBS = {}
 FFMPEG = os.path.expanduser("~/.local/bin/ffmpeg")
 
 DB = os.path.join(BASE, "data.db")
 CFG = os.path.join(BASE, "config.json")
-DEFAULT_CFG = {"gemini_key": "", "drex_key": "", "want": 8, "gameplay": "subway", "lens": "40-59", "limit_min": 0,
+DEFAULT_CFG = {"gemini_key": "", "drex_key": "", "want": 8, "gameplay": "subway.mp4", "lens": "40-59", "limit_min": 0,
                "vmode": "split", "captions": True, "facetrack": True,
                "antidetect": False, "mirror": False, "banner": True,
-               "asr_model": "giga", "max_workers": 2}
+               "clip_music": True, "tt_cookies": "",
+               "asr_model": "giga", "asr_api_key": "",
+               "asr_api_base": "https://gw.lunaroute.com/v1", "max_workers": 2}
 
 
-DB_VERSION = 6
+DB_VERSION = 10
 
 
 def _connect():
@@ -125,6 +133,74 @@ def init_db():
                                  ("score", "INTEGER NOT NULL DEFAULT 0")):
                     if col not in cols:
                         c.execute(f"ALTER TABLE refs ADD COLUMN {col} {typ}")
+            if ver < 7:
+                cols = [r[1] for r in c.execute("PRAGMA table_info(clips)").fetchall()]
+                if "hidden" not in cols:
+                    c.execute("ALTER TABLE clips ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0")
+            if ver < 8:
+                c.execute("""CREATE TABLE IF NOT EXISTS tags(
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  name TEXT UNIQUE NOT NULL,
+                  theme TEXT NOT NULL DEFAULT '',
+                  max_videos INTEGER NOT NULL DEFAULT 0,
+                  account_id INTEGER,
+                  created REAL)""")
+                c.execute("""CREATE TABLE IF NOT EXISTS clip_tags(
+                  job_id TEXT NOT NULL, idx INTEGER NOT NULL,
+                  tag_id INTEGER NOT NULL,
+                  PRIMARY KEY(job_id, idx, tag_id))""")
+                c.execute("CREATE INDEX IF NOT EXISTS ix_clip_tags_tag ON clip_tags(tag_id)")
+                c.execute("""CREATE TABLE IF NOT EXISTS accounts(
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  nick TEXT UNIQUE NOT NULL,
+                  created REAL, synced REAL,
+                  followers INTEGER NOT NULL DEFAULT 0,
+                  likes INTEGER NOT NULL DEFAULT 0,
+                  video_count INTEGER NOT NULL DEFAULT 0,
+                  total_views INTEGER NOT NULL DEFAULT 0,
+                  source TEXT NOT NULL DEFAULT '',
+                  error TEXT NOT NULL DEFAULT '')""")
+                c.execute("""CREATE TABLE IF NOT EXISTS account_videos(
+                  account_id INTEGER NOT NULL, video_id TEXT NOT NULL,
+                  title TEXT, views INTEGER NOT NULL DEFAULT 0,
+                  likes INTEGER NOT NULL DEFAULT 0,
+                  comments INTEGER NOT NULL DEFAULT 0,
+                  url TEXT, published REAL,
+                  PRIMARY KEY(account_id, video_id))""")
+            if ver < 9:
+                cols = [r[1] for r in c.execute("PRAGMA table_info(accounts)").fetchall()]
+                if "following" not in cols:
+                    c.execute("ALTER TABLE accounts ADD COLUMN following INTEGER NOT NULL DEFAULT 0")
+            if ver < 10:
+                cols = [r[1] for r in c.execute("PRAGMA table_info(account_videos)").fetchall()]
+                for col, typ in (("clip_job", "TEXT"), ("clip_idx", "INTEGER"),
+                                 ("link_source", "TEXT NOT NULL DEFAULT ''"),
+                                 ("first_seen", "REAL"), ("last_seen", "REAL"),
+                                 ("views_updated", "REAL")):
+                    if col not in cols:
+                        c.execute(f"ALTER TABLE account_videos ADD COLUMN {col} {typ}")
+                c.execute("CREATE INDEX IF NOT EXISTS ix_account_videos_clip"
+                          " ON account_videos(clip_job, clip_idx)")
+                tcols = [r[1] for r in c.execute("PRAGMA table_info(tags)").fetchall()]
+                if "hashtags" not in tcols:
+                    c.execute("ALTER TABLE tags ADD COLUMN hashtags TEXT NOT NULL DEFAULT ''")
+                c.execute("""CREATE TABLE IF NOT EXISTS tag_accounts(
+                  tag_id INTEGER NOT NULL, account_id INTEGER NOT NULL,
+                  PRIMARY KEY(tag_id, account_id))""")
+                c.execute("CREATE INDEX IF NOT EXISTS ix_tag_accounts_acc"
+                          " ON tag_accounts(account_id)")
+                c.execute("""INSERT OR IGNORE INTO tag_accounts(tag_id, account_id)
+                  SELECT id, account_id FROM tags WHERE account_id IS NOT NULL""")
+                c.execute("""CREATE TABLE IF NOT EXISTS video_metrics(
+                  account_id INTEGER NOT NULL, video_id TEXT NOT NULL,
+                  ts REAL NOT NULL, views INTEGER NOT NULL DEFAULT 0,
+                  likes INTEGER NOT NULL DEFAULT 0,
+                  comments INTEGER NOT NULL DEFAULT 0,
+                  PRIMARY KEY(account_id, video_id, ts))""")
+                c.execute("CREATE INDEX IF NOT EXISTS ix_video_metrics_acc"
+                          " ON video_metrics(account_id, ts)")
+                c.execute("CREATE INDEX IF NOT EXISTS ix_video_metrics_vid"
+                          " ON video_metrics(account_id, video_id, ts)")
             c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES ('version',?)",
                       (str(DB_VERSION),))
     finally:
@@ -135,7 +211,7 @@ def db():
     return _connect()
 
 
-def log_job(job_id, title, url, status, clips=None, scorer="heuristic"):
+def log_job(job_id, title, url, status, clips=None, scorer="heuristic", tags=None):
     clips = clips or []
     try:
         c = _connect()
@@ -151,6 +227,11 @@ def log_job(job_id, title, url, status, clips=None, scorer="heuristic"):
                      json.dumps(clips, ensure_ascii=False),
                      sum(int(x.get("size", 0) or 0) for x in clips), scorer))
                 c.execute("DELETE FROM clips WHERE job_id=?", (job_id,))
+                # повторная запись задачи — новые клипы: старые теги и
+                # привязки к публикациям к ним уже не относятся
+                c.execute("DELETE FROM clip_tags WHERE job_id=?", (job_id,))
+                c.execute("UPDATE account_videos SET clip_job=NULL, clip_idx=NULL,"
+                          " link_source='' WHERE clip_job=?", (job_id,))
                 c.executemany(
                     "INSERT INTO clips"
                     "(job_id,idx,title,score,verdict,hook,dur,size,views,created,story,part,\"of\")"
@@ -162,6 +243,24 @@ def log_job(job_id, title, url, status, clips=None, scorer="heuristic"):
                       int(x.get("story", 0) or 0), int(x.get("part", 0) or 0),
                       int(x.get("of", 1) or 1))
                      for k, x in enumerate(clips)])
+                tids = []
+                for t in (tags or []):
+                    try:
+                        tids.append(int(t))
+                    except Exception:
+                        pass
+                if tids:
+                    q = ",".join("?" * len(tids))
+                    valid = [r[0] for r in c.execute(
+                        f"SELECT id FROM tags WHERE id IN ({q})", tids).fetchall()]
+                    rows = []
+                    for k, x in enumerate(clips):
+                        idx = int(x.get("i", k))
+                        rows.extend((job_id, idx, tid) for tid in valid)
+                    if rows:
+                        c.executemany(
+                            "INSERT OR IGNORE INTO clip_tags"
+                            "(job_id,idx,tag_id) VALUES(?,?,?)", rows)
         finally:
             c.close()
     except Exception:
@@ -172,9 +271,11 @@ def log_job(job_id, title, url, status, clips=None, scorer="heuristic"):
 def get_settings():
     try:
         with open(CFG, encoding="utf-8") as f:
-            return {**DEFAULT_CFG, **json.load(f)}
+            out = {**DEFAULT_CFG, **json.load(f)}
     except Exception:
-        return dict(DEFAULT_CFG)
+        out = dict(DEFAULT_CFG)
+    out["gameplay"] = ac.gameplay_value(out.get("gameplay"))
+    return out
 
 
 def save_settings(d):
@@ -182,6 +283,7 @@ def save_settings(d):
     for k in DEFAULT_CFG:
         if k in d:
             cur[k] = d[k]
+    cur["gameplay"] = ac.gameplay_value(cur.get("gameplay"))
     try:
         cur["max_workers"] = min(4, max(1, int(cur.get("max_workers", 2))))
     except Exception:
@@ -365,6 +467,44 @@ def _fmt_ts(t: float) -> str:
     return f"{t // 3600:02d}:{(t % 3600) // 60:02d}:{t % 60:02d}"
 
 
+def _story_manual_moments(stamps, kind, total_dur=0.0):
+    """Ручные таймкоды -> моменты в формате историй.
+    kind='parts' нумерует части и вешает «продолжение» только на последнюю;
+    kind='moments' оставляет самостоятельные моменты без нумерации."""
+    ranges = []
+    for st in (stamps or [])[:20]:
+        try:
+            s, e = float(st.get("start", 0)), float(st.get("end", 0))
+        except (TypeError, ValueError):
+            continue
+        if s < 0 or e <= s:
+            continue
+        if total_dur:
+            if s >= total_dur:
+                continue
+            e = min(e, total_dur)
+        if e - s < 1.5:
+            continue
+        ranges.append((s, e))
+    parts = kind != "moments"
+    n = len(ranges)
+    out = []
+    for k, (s, e) in enumerate(ranges):
+        stamp = f"{_fmt_ts(s)}–{_fmt_ts(e)}"
+        title = (f"Часть {k + 1}/{n}" if parts else f"Момент {k + 1}") + " · " + stamp
+        out.append({
+            "start": round(s, 3), "end": round(e, 3), "score": 100,
+            "title": title, "verdict": f"Вручную {stamp}",
+            "hook": title[:40],
+            "part_title": f"ЧАСТЬ {k + 1}/{n}" if parts else "",
+            "story": 1 if parts else 0,
+            "part": k if parts else 0,
+            "of": n if parts else 1,
+            "last": (k == n - 1) if parts else True,
+        })
+    return out
+
+
 def _slice_copy(src: str, s: float, dur: float, out: str) -> str:
     """Мгновенный вырез куска без перекода (-c copy, секунды).
     Границы по кейфреймам (±пару сек) — не страшно: дальше всё
@@ -435,7 +575,9 @@ def run_manual_job(job_id: str, url: str, opts: dict, stamps: list, prog) -> lis
         try:
             segs_i, _lang = ac.transcribe(
                 stage_in, 0, progress=lambda q, st: _pp(0.10 + q * 0.25),
-                model_name=opts.get("asr_model", "giga"))
+                model_name=opts.get("asr_model", "giga"),
+                api_key=opts.get("asr_api_key", ""),
+                api_base=opts.get("asr_api_base", ""))
         except Exception:
             segs_i = []
         dur = ac.media_duration(stage_in) or round(e - s + 16.0, 1)
@@ -447,6 +589,7 @@ def run_manual_job(job_id: str, url: str, opts: dict, stamps: list, prog) -> lis
         if mode == "fast":
             ac.fast_cut(stage_in, {"start": 0.0, "end": dur}, out)
         else:
+            _bgm = ac.pick_clip_music() if opts.get("clip_music", True) else None
             ac.render_clip(
                 stage_in, mm, segs_i, out,
                 facetrack=opts.get("facetrack", True),
@@ -457,6 +600,8 @@ def run_manual_job(job_id: str, url: str, opts: dict, stamps: list, prog) -> lis
                 banner_path=opts.get("banner_path"),
                 gameplay=opts.get("gameplay", "subway"),
                 max_total=float(opts.get("max_len", 60) or 60),
+                bgm=_bgm,
+                hook=opts.get("hook", ""),
                 progress=lambda q: _pp(0.35 + max(0.0, min(1.0, q)) * 0.65))
         clips.append({
             "i": i, "title": title_m, "score": 100,
@@ -501,9 +646,10 @@ def run_job(job_id: str, url: str, opts: dict):
             # МОЛЧА уходило в авто-режим с DREX. Теперь честная ошибка.
             raise RuntimeError(
                 "таймкоды не распознались — пиши 'мм:сс-мм:сс', по одному на строку")
-        if mode != "parts" and stamps:
+        if mode not in ("parts", "story") and stamps:
             # ручной путь: DREX/сцены/полное видео не нужны вообще —
             # качаем только моменты, субтитры только на эти минуты
+            # истории обрабатываются ниже: им нужен src и story-рендер
             with lock:
                 jobs[job_id].update(status="work", stage="качаю моменты…", pct=1)
             clips = run_manual_job(job_id, url, opts, stamps[:20], prog)
@@ -511,7 +657,8 @@ def run_job(job_id: str, url: str, opts: dict):
                 jobs[job_id].update(status="done", pct=100, stage="готово",
                                     clips=clips, scorer="manual")
                 title = jobs[job_id].get("title", url)
-            log_job(job_id, title, url, "done", clips, "manual")
+            log_job(job_id, title, url, "done", clips, "manual",
+                    tags=opts.get("tags"))
             return
         with lock:
             jobs[job_id].update(status="work", stage="качаю видео…", pct=1)
@@ -525,27 +672,30 @@ def run_job(job_id: str, url: str, opts: dict):
         src = ac.strip_bar_file(src)
         mode = opts.get("vmode", "blur")
         if mode == "story":
-            # истории: русская озвучка уже в исходнике. Паузы вырезаем
-            # агрессивнее обычного, затем GigaAM и DREX 1.5 по обрывам.
-            prog(6, "чищу паузы…")
-            if opts.get("story_remove_pauses", True):
-                clean = os.path.join(TMP_DIR, uuid.uuid4().hex + ".mp4")
-                try:
-                    stage_in = ac.remove_silence(
-                        src, clean, min_sil=0.40, thresh_db=-38.0, pad=0.14,
-                        progress=lambda p, s: prog(int(6 + p * 0.04), "чищу паузы…"))
-                except Exception:
-                    stage_in = src
-                if stage_in != src:
+            # истории: русская озвучка уже в исходнике. Авто-режим чистит
+            # паузы и ищет обрывы через DREX; ручные таймкоды режут ровно
+            # выбранные отрезки по исходной шкале времени.
+            manual = bool(stamps)
+            if not manual:
+                prog(6, "чищу паузы…")
+                if opts.get("story_remove_pauses", True):
+                    clean = os.path.join(TMP_DIR, uuid.uuid4().hex + ".mp4")
                     try:
-                        if os.path.exists(src):
-                            os.remove(src)
-                    except OSError:
-                        pass
-                    src = stage_in
+                        stage_in = ac.remove_silence(
+                            src, clean, min_sil=0.40, thresh_db=-38.0, pad=0.14,
+                            progress=lambda p, s: prog(int(6 + p * 0.04), "чищу паузы…"))
+                    except Exception:
+                        stage_in = src
+                    if stage_in != src:
+                        try:
+                            if os.path.exists(src):
+                                os.remove(src)
+                        except OSError:
+                            pass
+                        src = stage_in
             kind = opts.get("story_kind", "parts")
             scenes = []
-            if kind == "moments":
+            if kind == "moments" and not manual:
                 prog(10, "ищу сцены…")
                 try:
                     scenes = ac.detect_scenes(src)
@@ -555,10 +705,19 @@ def run_job(job_id: str, url: str, opts: dict):
             segs, lang = ac.transcribe(
                 src, opts.get("limit_min", 0),
                 progress=lambda p, s: prog(int(10 + p * 0.7), s),
-                model_name="giga")
+                model_name=opts.get("asr_model", "giga"),
+                api_key=opts.get("asr_api_key", ""),
+                api_base=opts.get("asr_api_base", ""))
             if not segs:
                 raise RuntimeError("не расслышал русскую озвучку в видео")
-            if kind == "moments":
+            if manual:
+                moments = _story_manual_moments(
+                    stamps, kind, total_dur=ac.media_duration(src) or 0.0)
+                if not moments:
+                    raise RuntimeError(
+                        "таймкоды вне видео или короче 1.5 сек — проверь минуты")
+                scorer = "manual"
+            elif kind == "moments":
                 prog(82, "DREX: ищу интересные моменты…")
                 moments, scorer = ac.pick_moments(
                     segs, lang, opts.get("api_key", ""),
@@ -606,7 +765,9 @@ def run_job(job_id: str, url: str, opts: dict):
             prog(10, "транскрибация…")
             segs, lang = ac.transcribe(src, opts.get("limit_min", 0),
                                        progress=lambda p, s: prog(int(10 + p * 0.7), s),
-                                       model_name=opts.get("asr_model", "giga"))
+                                       model_name=opts.get("asr_model", "giga"),
+                                       api_key=opts.get("asr_api_key", ""),
+                                       api_base=opts.get("asr_api_base", ""))
             prog(82, "режу на части…")
             bounds = ac.compute_parts(segs, 40.0, 59.0)
             nb = len(bounds)
@@ -629,9 +790,11 @@ def run_job(job_id: str, url: str, opts: dict):
             prog(10, "транскрибация…")
             segs, lang = ac.transcribe(src, opts.get("limit_min", 0),
                                         progress=lambda p, s: prog(int(10 + p * 0.7), s),
-                                        model_name=opts.get("asr_model", "giga"))
-        # Ручные таймкоды сюда уже не доходят: их увёл ранний возврат
-        # в run_manual_job (точечная скачка, без DREX/сцен/полного видео).
+                                        model_name=opts.get("asr_model", "giga"),
+                                        api_key=opts.get("asr_api_key", ""),
+                                        api_base=opts.get("asr_api_base", ""))
+        # Обычные клипы с ручными таймкодами сюда не доходят: их увёл ранний
+        # возврат в run_manual_job. Истории со stamps собираются ниже.
         if mode not in ("parts", "story"):
             prog(82, "оценка моментов…")
             domain = ac.pick_domain(segs, opts.get("domain", "auto"))
@@ -665,6 +828,9 @@ def run_job(job_id: str, url: str, opts: dict):
                             jobs[job_id].update(
                                 stage=f"рендер… {_i + 1}/{total_n}", pct=npct)
 
+            # фон нарезки: свой трек на клип (ротация пула без повторов)
+            clip_bgm = (ac.pick_clip_music() if opts.get("clip_music", True)
+                        else None)
             extra = []
             if mode == "story":
                 nvars = max(1, min(3, int(opts.get("story_variants", 1) or 1)))
@@ -680,6 +846,7 @@ def run_job(job_id: str, url: str, opts: dict):
                         mirror=opts.get("story_mirror", opts.get("mirror", False)),
                         cta=opts.get("story_cta", True),
                         bgm=_bgm,
+                        hq=bool(opts.get("story_banner", True)),
                         progress=_pp)
                     if raw != _o:
                         try:
@@ -710,6 +877,8 @@ def run_job(job_id: str, url: str, opts: dict):
                                      banner_path=opts.get("banner_path"),
                                      gameplay=opts.get("gameplay", "subway"),
                                      max_total=float(opts.get("max_len", 59) or 59),
+                                     bgm=clip_bgm,
+                                     hook=opts.get("hook", ""),
                                      progress=_pp)
             elif fast:
                 ac.fast_cut(src, m, out)
@@ -723,6 +892,8 @@ def run_job(job_id: str, url: str, opts: dict):
                                banner_path=opts.get("banner_path"),
                                gameplay=opts.get("gameplay", "subway"),
                                max_total=float(opts.get("max_len", 60) or 60),
+                               bgm=clip_bgm,
+                               hook=opts.get("hook", ""),
                                progress=_pp)
             with lock:
                 done["n"] += 1
@@ -772,7 +943,8 @@ def run_job(job_id: str, url: str, opts: dict):
             jobs[job_id].update(status="done", pct=100, stage="готово", clips=clips)
             title = jobs[job_id].get("title", url)
         log_job(job_id, title, url, "done", clips,
-                jobs.get(job_id, {}).get("scorer", "heuristic"))
+                jobs.get(job_id, {}).get("scorer", "heuristic"),
+                tags=opts.get("tags"))
         # исходник отъел своё — удаляем, иначе ночная пачка из 10 видео сожрёт диск
         try:
             if src and os.path.exists(src):
@@ -813,9 +985,10 @@ def api_start():
     story = str(data.get("vmode") or "") == "story"
     if not data.get("api_key"):
         data["api_key"] = cfg.get("drex_key", "")
-    for k in ("want", "gameplay", "limit_min", "vmode", "captions", "facetrack", "antidetect", "mirror", "banner", "asr_model", "drex_key"):
+    for k in ("want", "gameplay", "limit_min", "vmode", "captions", "facetrack", "antidetect", "mirror", "banner", "clip_music", "asr_model", "asr_api_key", "asr_api_base", "drex_key"):
         if k not in data or data[k] in ("", None):
             data[k] = cfg.get(k)
+    data["gameplay"] = ac.gameplay_value(data.get("gameplay"))
     if story:
         kind = str(data.get("story_kind") or "parts")
         if kind not in ("parts", "moments"):
@@ -837,7 +1010,8 @@ def api_start():
         except (TypeError, ValueError):
             nv = 1
         data["story_variants"] = max(1, min(3, nv))
-        data["asr_model"] = "giga"
+        if data.get("asr_model") not in ("base", "small", "giga", "whisper-large-v3"):
+            data["asr_model"] = "giga"
         data["facetrack"] = True
     elif not data.get("min_len") or not data.get("max_len"):
         try:
@@ -855,7 +1029,8 @@ def api_start():
         with lock:
             jobs[job_id] = {"id": job_id, "url": url, "title": url,
                             "status": "queued", "pct": 0, "stage": "в очереди…",
-                            "started": time.time()}
+                            "started": time.time(),
+                            "kind": "story" if story else "clip"}
         threading.Thread(target=run_job, args=(job_id, url, {
             "api_key": data.get("api_key", ""), "want": want,
             "min_len": int(data.get("min_len", 20)), "max_len": int(data.get("max_len", 60)),
@@ -866,8 +1041,12 @@ def api_start():
             "mirror": bool(data.get("mirror", False)),
             "banner": bool(data.get("banner", True)),
             "banner_path": resolve_banner(data.get("banner_file", "")),
-            "gameplay": data.get("gameplay", "subway") if data.get("gameplay") in ("subway", "minecraft") else "subway",
-            "asr_model": data.get("asr_model", "giga") if data.get("asr_model") in ("base", "small", "giga") else "giga",
+            "gameplay": data["gameplay"],
+            "hook": str(data.get("hook") or "").strip()[:120],
+            "tags": _parse_tag_ids(data.get("tags")),
+            "asr_model": data.get("asr_model", "giga") if data.get("asr_model") in ("base", "small", "giga", "whisper-large-v3") else "giga",
+            "asr_api_key": data.get("asr_api_key", ""),
+            "asr_api_base": data.get("asr_api_base", ""),
             "fast": bool(data.get("fast", False)),
             "vmode": data.get("vmode", "blur"), "stamps": stamps,
             "story_blur_subs": bool(data.get("story_blur_subs", True)),
@@ -967,7 +1146,9 @@ def run_twitch_job(job_id: str, url: str, opts: dict):
         prog(10, "транскрибация…")
         segs, lang = ac.transcribe(src, opts.get("limit_min", 0),
                                    progress=lambda p, s: prog(int(10 + p * 0.7), s),
-                                   model_name=opts.get("asr_model", "giga"))
+                                   model_name=opts.get("asr_model", "giga"),
+                                   api_key=opts.get("asr_api_key", ""),
+                                   api_base=opts.get("asr_api_base", ""))
         prog(82, "оценка моментов…")
         moments, scorer = ac.pick_moments(
             segs, lang, opts.get("api_key", ""),
@@ -1034,7 +1215,8 @@ def run_twitch_job(job_id: str, url: str, opts: dict):
             jobs[job_id].update(status="done", pct=100, stage="готово", clips=clips)
             title = jobs[job_id].get("title", url)
         log_job(job_id, title, url, "done", clips,
-                jobs.get(job_id, {}).get("scorer", "drex"))
+                jobs.get(job_id, {}).get("scorer", "drex"),
+                tags=opts.get("tags"))
         try:
             if src and os.path.exists(src):
                 os.remove(src)
@@ -1066,6 +1248,9 @@ def api_twitch_start():
     cfg = get_settings()
     if not data.get("api_key"):
         data["api_key"] = cfg.get("drex_key", "")
+    for k in ("asr_model", "asr_api_key", "asr_api_base"):
+        if not data.get(k):
+            data[k] = cfg.get(k, "")
     if not data.get("min_len") or not data.get("max_len"):
         try:
             mn, mx = str(data.get("lens", "40-59")).split("-")
@@ -1086,7 +1271,7 @@ def api_twitch_start():
         with lock:
             jobs[job_id] = {"id": job_id, "url": url, "title": url,
                             "status": "queued", "pct": 0, "stage": "в очереди…",
-                            "started": time.time()}
+                            "started": time.time(), "kind": "twitch"}
         threading.Thread(target=run_twitch_job, args=(job_id, url, {
             "api_key": data.get("api_key", ""), "want": want,
             "min_len": int(data.get("min_len", 40)), "max_len": int(data.get("max_len", 59)),
@@ -1096,7 +1281,10 @@ def api_twitch_start():
             "mirror": bool(data.get("mirror", False)),
             "banner": bool(data.get("banner", True)),
             "banner_path": resolve_banner(data.get("banner_file", "")),
-            "asr_model": "giga"}), daemon=True).start()
+            "tags": _parse_tag_ids(data.get("tags")),
+            "asr_model": data.get("asr_model", "giga") if data.get("asr_model") in ("base", "small", "giga", "whisper-large-v3") else "giga",
+            "asr_api_key": data.get("asr_api_key", ""),
+            "asr_api_base": data.get("asr_api_base", "")}), daemon=True).start()
         ids.append(job_id)
     return jsonify({"ok": True, "jobs": ids})
 
@@ -1112,6 +1300,99 @@ def api_job(job_id):
     return jsonify(out)
 
 
+@app.get("/api/jobs")
+def api_jobs():
+    """Задачи для восстановления очереди после F5 и после перезапуска
+    сервера: память сессии + последние готовые задачи из истории."""
+    keys = ("id", "url", "title", "status", "pct", "stage",
+            "started", "error", "kind", "scorer")
+    with lock:
+        items = []
+        known = set()
+        for j in jobs.values():
+            it = {k: j.get(k) for k in keys}
+            it["clips"] = [c for c in (j.get("clips") or [])
+                           if not c.get("hidden")]
+            items.append(it)
+            known.add(j.get("id"))
+    try:
+        c = _connect()
+        try:
+            rows = c.execute(
+                "SELECT id,title,url,status,created,finished,scorer"
+                " FROM jobs ORDER BY finished DESC LIMIT 12").fetchall()
+            for r in rows:
+                if r["id"] in known:
+                    continue
+                cr = c.execute(
+                    "SELECT idx,title,score,verdict,hook,dur,size,views,story,part,\"of\""
+                    " FROM clips WHERE job_id=? AND hidden=0 ORDER BY idx",
+                    (r["id"],)).fetchall()
+                story = any((x["story"] or 0) for x in cr)
+                items.append({
+                    "id": r["id"], "url": r["url"], "title": r["title"],
+                    "status": r["status"], "pct": 100,
+                    "stage": "готово", "started": r["created"],
+                    "error": "" if r["status"] == "done" else "задача из истории завершилась с ошибкой — детали в логе сервера",
+                    "kind": "story" if story else "clip",
+                    "scorer": r["scorer"] or "heuristic",
+                    "clips": [{"i": x["idx"], "title": x["title"], "score": x["score"],
+                               "verdict": x["verdict"] or "", "hook": x["hook"] or "",
+                               "dur": x["dur"], "size": x["size"],
+                               "views": x["views"], "story": x["story"] or 0,
+                               "part": x["part"] or 0, "of": x["of"] or 1}
+                              for x in cr]})
+        finally:
+            c.close()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+    items.sort(key=lambda x: x.get("started") or 0)
+    tmap = _clip_tag_map()
+    for it in items:
+        for cl in (it.get("clips") or []):
+            cl["tags"] = tmap.get((it.get("id"), int(cl.get("i", -1))), [])
+    return jsonify({"ok": True, "items": items})
+
+
+@app.delete("/api/job/<job_id>")
+def api_job_delete(job_id):
+    """Удалить задачу: память + история + файлы клипов на диске."""
+    with lock:
+        j = jobs.get(job_id)
+        if j and j.get("status") in ("queued", "work"):
+            return jsonify({"ok": False,
+                            "error": "Задача ещё выполняется — удалить можно после завершения"}), 409
+        jobs.pop(job_id, None)
+    removed = 0
+    try:
+        for name in os.listdir(OUT_DIR):
+            if name.startswith(job_id + "_") and name.endswith(".mp4"):
+                try:
+                    os.remove(os.path.join(OUT_DIR, name))
+                    removed += 1
+                except OSError:
+                    pass
+                _drop_thumb("short", name)
+    except Exception:
+        pass
+    try:
+        c = _connect()
+        try:
+            with c:
+                c.execute("DELETE FROM clip_tags WHERE job_id=?", (job_id,))
+                c.execute("UPDATE account_videos SET clip_job=NULL, clip_idx=NULL,"
+                          " link_source='' WHERE clip_job=?", (job_id,))
+                c.execute("DELETE FROM clips WHERE job_id=?", (job_id,))
+                c.execute("DELETE FROM jobs WHERE id=?", (job_id,))
+        finally:
+            c.close()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+    return jsonify({"ok": True, "removed": removed})
+
+
 @app.get("/api/clip/<job_id>/<int:idx>")
 def api_clip(job_id, idx):
     p = os.path.join(OUT_DIR, f"{job_id}_{idx + 1}.mp4")
@@ -1122,6 +1403,1236 @@ def api_clip(job_id, idx):
     clips = j.get("clips", [])
     name = (clips[idx]["title"][:50] + ".mp4") if idx < len(clips) else f"short{idx + 1}.mp4"
     return send_file(p, as_attachment=True, download_name=name)
+
+
+@app.post("/api/clip/<job_id>/<int:idx>/hide")
+def api_clip_hide(job_id, idx):
+    """Скрыть/вернуть готовый клип: файл остаётся на диске, из списков
+    (очередь, история, клипы) он пропадает. Возврат — кнопкой во вкладке
+    Клипы (галочка «скрытые»)."""
+    data = request.get_json(force=True, silent=True) or {}
+    hid = 1 if data.get("hidden", True) else 0
+    with lock:
+        j = jobs.get(job_id)
+        if j:
+            for c in (j.get("clips") or []):
+                if int(c.get("i", -1)) == idx:
+                    c["hidden"] = hid
+    try:
+        c = _connect()
+        try:
+            with c:
+                c.execute("UPDATE clips SET hidden=? WHERE job_id=? AND idx=?",
+                          (hid, job_id, idx))
+        finally:
+            c.close()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+    return jsonify({"ok": True, "hidden": bool(hid)})
+
+
+@app.delete("/api/clip/<job_id>/<int:idx>")
+def api_clip_delete(job_id, idx):
+    """Удалить один готовый клип: файл, постер и запись в истории."""
+    name = f"{job_id}_{idx + 1}.mp4"
+    try:
+        p = os.path.join(OUT_DIR, name)
+        if os.path.exists(p):
+            os.remove(p)
+    except OSError:
+        pass
+    _drop_thumb("short", name)
+    with lock:
+        j = jobs.get(job_id)
+        if j:
+            j["clips"] = [c for c in (j.get("clips") or [])
+                          if int(c.get("i", -1)) != idx]
+    try:
+        c = _connect()
+        try:
+            with c:
+                c.execute("DELETE FROM clip_tags WHERE job_id=? AND idx=?",
+                          (job_id, idx))
+                c.execute("DELETE FROM clips WHERE job_id=? AND idx=?",
+                          (job_id, idx))
+        finally:
+            c.close()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+    return jsonify({"ok": True})
+
+
+def _clip_tag_map():
+    out = {}
+    try:
+        c = _connect()
+        try:
+            for r in c.execute("SELECT job_id, idx, tag_id FROM clip_tags"):
+                out.setdefault((r["job_id"], r["idx"]), []).append(r["tag_id"])
+        finally:
+            c.close()
+    except Exception:
+        pass
+    return out
+
+
+def _norm_hashtags(value):
+    """'#драма, истории' -> '#драма #истории' (без дублей)."""
+    if isinstance(value, (list, tuple)):
+        parts = value
+    else:
+        parts = re.split(r"[\s,]+", str(value or ""))
+    out, seen = [], set()
+    for p in parts:
+        p = re.sub(r"[^\w\-а-яё]+", "", str(p or "").strip().lstrip("#"),
+                   flags=re.I)[:40]
+        if not p:
+            continue
+        h = "#" + p
+        if h.lower() not in seen:
+            seen.add(h.lower())
+            out.append(h)
+        if len(out) >= 15:
+            break
+    return " ".join(out)
+
+
+def _tag_accounts_map(c, ids=None):
+    q = ("SELECT ta.tag_id, a.id, a.nick FROM tag_accounts ta"
+         " JOIN accounts a ON a.id=ta.account_id")
+    if ids:
+        q += " WHERE ta.tag_id IN (" + ",".join("?" * len(ids)) + ")"
+    rows = c.execute(q, tuple(ids or ())).fetchall()
+    out = {}
+    for r in rows:
+        out.setdefault(r["tag_id"], []).append({"id": r["id"], "nick": r["nick"]})
+    for v in out.values():
+        v.sort(key=lambda x: (x["nick"] or "").lower())
+    return out
+
+
+def _tag_json(r, count=0, posted=0, views=0, accounts=None):
+    accounts = accounts or []
+    acc_ids = [a["id"] for a in accounts]
+    primary = r["account_id"] if r["account_id"] in acc_ids else (acc_ids[0] if acc_ids else None)
+    mx = int(r["max_videos"] or 0)
+    return {"id": r["id"], "name": r["name"], "theme": r["theme"],
+            "hashtags": r["hashtags"] or "",
+            "max_videos": mx, "account_id": primary,
+            "account_ids": acc_ids, "accounts": accounts,
+            "account_nick": ", ".join("@" + a["nick"] for a in accounts),
+            "created": r["created"], "count": count, "posted": posted,
+            "remaining": (max(0, mx - posted) if mx else None),
+            "views": views}
+
+
+@app.get("/api/tags")
+def api_tags():
+    """Теги + клипы, публикации, просмотры и остаток лимита."""
+    items = []
+    try:
+        c = _connect()
+        try:
+            rows = c.execute(
+                "SELECT t.*,"
+                " COUNT(x.job_id) AS clips_cnt,"
+                " COALESCE(SUM(x.posted),0) AS posted_cnt,"
+                " COALESCE(SUM(x.views),0) AS views_sum"
+                " FROM tags t"
+                " LEFT JOIN ("
+                "   SELECT ct.tag_id, ct.job_id, ct.idx,"
+                "          CASE WHEN COUNT(av.video_id)>0 THEN 1 ELSE 0 END posted,"
+                "          COALESCE(SUM(av.views),0) views"
+                "   FROM clip_tags ct"
+                "   JOIN clips cl ON cl.job_id=ct.job_id AND cl.idx=ct.idx"
+                "                 AND cl.hidden=0"
+                "   LEFT JOIN account_videos av"
+                "     ON av.clip_job=ct.job_id AND av.clip_idx=ct.idx"
+                "   GROUP BY ct.tag_id, ct.job_id, ct.idx"
+                " ) x ON x.tag_id=t.id"
+                " GROUP BY t.id ORDER BY t.theme, t.name").fetchall()
+            amap = _tag_accounts_map(c)
+            for r in rows:
+                items.append(_tag_json(r, r["clips_cnt"] or 0,
+                                       r["posted_cnt"] or 0, r["views_sum"] or 0,
+                                       amap.get(r["id"], [])))
+        finally:
+            c.close()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+    return jsonify({"ok": True, "items": items})
+
+
+def _account_ids_from_body(d, c):
+    """account_ids/account_id из тела запроса + валидация существования."""
+    raw = d.get("account_ids", d.get("account_id"))
+    if raw is None:
+        raw = []
+    elif isinstance(raw, str):
+        raw = [x for x in re.split(r"[,\s]+", raw) if x]
+    elif not isinstance(raw, (list, tuple, set)):
+        raw = [raw]
+    ids = []
+    for x in raw:
+        try:
+            n = int(x)
+        except Exception:
+            return None, f"Некорректный аккаунт: {x}"
+        if n > 0 and n not in ids:
+            ids.append(n)
+    if ids:
+        q = ",".join("?" * len(ids))
+        valid = {r[0] for r in c.execute(
+            f"SELECT id FROM accounts WHERE id IN ({q})", ids).fetchall()}
+        missing = [n for n in ids if n not in valid]
+        if missing:
+            return None, "Аккаунт не найден: " + ", ".join(map(str, missing))
+    return ids, ""
+
+
+def _set_tag_accounts(c, tid, ids):
+    c.execute("DELETE FROM tag_accounts WHERE tag_id=?", (tid,))
+    if ids:
+        c.executemany("INSERT OR IGNORE INTO tag_accounts(tag_id,account_id)"
+                      " VALUES(?,?)", [(tid, a) for a in ids])
+    c.execute("UPDATE tags SET account_id=? WHERE id=?",
+              (ids[0] if ids else None, tid))
+
+
+@app.post("/api/tags")
+def api_tag_create():
+    d = request.get_json(force=True, silent=True) or {}
+    name = (d.get("name") or "").strip().lstrip("#").strip()[:40]
+    if not name:
+        return jsonify({"ok": False, "error": "Введите название тега"}), 400
+    theme = (d.get("theme") or "").strip()[:40]
+    hashtags = _norm_hashtags(d.get("hashtags"))
+    try:
+        mx = max(0, int(d.get("max_videos") or 0))
+    except Exception:
+        mx = 0
+    try:
+        c = _connect()
+        try:
+            acc_ids, err = _account_ids_from_body(d, c)
+            if acc_ids is None:
+                return jsonify({"ok": False, "error": err}), 400
+            with c:
+                c.execute("INSERT INTO tags(name,theme,max_videos,account_id,"
+                          "hashtags,created) VALUES(?,?,?,?,?,?)",
+                          (name, theme, mx, acc_ids[0] if acc_ids else None,
+                           hashtags, time.time()))
+                r = c.execute("SELECT * FROM tags WHERE name=?", (name,)).fetchone()
+                _set_tag_accounts(c, r["id"], acc_ids)
+            accounts = _tag_accounts_map(c, [r["id"]]).get(r["id"], [])
+        finally:
+            c.close()
+    except sqlite3.IntegrityError:
+        return jsonify({"ok": False, "error": "Такой тег уже есть"}), 409
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": "Не удалось создать тег"}), 500
+    return jsonify({"ok": True, "tag": _tag_json(r, accounts=accounts)})
+
+
+@app.patch("/api/tags/<int:tid>")
+def api_tag_update(tid):
+    d = request.get_json(force=True, silent=True) or {}
+    try:
+        c = _connect()
+        try:
+            r = c.execute("SELECT * FROM tags WHERE id=?", (tid,)).fetchone()
+            if not r:
+                return jsonify({"ok": False, "error": "Тег не найден"}), 404
+            name = d.get("name", r["name"])
+            name = (name or "").strip().lstrip("#").strip()[:40] or r["name"]
+            theme = ((d.get("theme", r["theme"])) or "").strip()[:40]
+            hashtags = (_norm_hashtags(d.get("hashtags", r["hashtags"]))
+                        if "hashtags" in d else (r["hashtags"] or ""))
+            try:
+                mx = max(0, int(d.get("max_videos", r["max_videos"]) or 0))
+            except Exception:
+                mx = r["max_videos"]
+            acc_ids = None
+            if "account_ids" in d or "account_id" in d:
+                acc_ids, err = _account_ids_from_body(d, c)
+                if acc_ids is None:
+                    return jsonify({"ok": False, "error": err}), 400
+            with c:
+                c.execute("UPDATE tags SET name=?,theme=?,max_videos=?,hashtags=?"
+                          " WHERE id=?", (name, theme, mx, hashtags, tid))
+                if acc_ids is not None:
+                    _set_tag_accounts(c, tid, acc_ids)
+            r = c.execute("SELECT * FROM tags WHERE id=?", (tid,)).fetchone()
+            accounts = _tag_accounts_map(c, [tid]).get(tid, [])
+        finally:
+            c.close()
+    except sqlite3.IntegrityError:
+        return jsonify({"ok": False, "error": "Такой тег уже есть"}), 409
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": "Не удалось сохранить тег"}), 500
+    return jsonify({"ok": True, "tag": _tag_json(r, accounts=accounts)})
+
+
+@app.delete("/api/tags/<int:tid>")
+def api_tag_delete(tid):
+    try:
+        c = _connect()
+        try:
+            with c:
+                c.execute("DELETE FROM tag_accounts WHERE tag_id=?", (tid,))
+                c.execute("DELETE FROM clip_tags WHERE tag_id=?", (tid,))
+                c.execute("DELETE FROM tags WHERE id=?", (tid,))
+        finally:
+            c.close()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+    return jsonify({"ok": True})
+
+
+def _parse_tag_ids(vals):
+    if isinstance(vals, str):
+        vals = vals.split(",")
+    ids = set()
+    for x in (vals or []):
+        try:
+            ids.add(int(x))
+        except Exception:
+            pass
+    return sorted(ids)
+
+
+def _do_clip_tags(c, job_id, idx, ids, replace=True):
+    valid = {r[0] for r in c.execute("SELECT id FROM tags").fetchall()}
+    ids = sorted(i for i in ids if i in valid)
+    if replace:
+        c.execute("DELETE FROM clip_tags WHERE job_id=? AND idx=?", (job_id, idx))
+    if ids:
+        c.executemany("INSERT OR IGNORE INTO clip_tags(job_id,idx,tag_id)"
+                      " VALUES(?,?,?)", [(job_id, idx, i) for i in ids])
+    return ids
+
+
+@app.post("/api/clip/<job_id>/<int:idx>/tags")
+def api_clip_tags_set(job_id, idx):
+    """Точный набор тегов одного клипа (галочки в модалке)."""
+    d = request.get_json(force=True, silent=True) or {}
+    ids = _parse_tag_ids(d.get("tags"))
+    try:
+        c = _connect()
+        try:
+            with c:
+                ids = _do_clip_tags(c, job_id, idx, ids, True)
+        finally:
+            c.close()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+    with lock:
+        j = jobs.get(job_id)
+        if j:
+            for cl in (j.get("clips") or []):
+                if int(cl.get("i", -1)) == idx:
+                    cl["tags"] = ids
+    return jsonify({"ok": True, "tags": ids})
+
+
+@app.post("/api/job/<job_id>/tags")
+def api_job_tags_add(job_id):
+    """Добавить теги сразу всем клипам задачи (для «тег на всё видео»)."""
+    d = request.get_json(force=True, silent=True) or {}
+    ids = _parse_tag_ids(d.get("tags"))
+    with lock:
+        j = jobs.get(job_id)
+        idxs = [int(c.get("i", -1)) for c in (j.get("clips") or [])] if j else []
+    try:
+        c = _connect()
+        try:
+            if not idxs:
+                idxs = [r["idx"] for r in c.execute(
+                    "SELECT idx FROM clips WHERE job_id=? AND hidden=0",
+                    (job_id,)).fetchall()]
+            with c:
+                for i in idxs:
+                    _do_clip_tags(c, job_id, i, ids, False)
+        finally:
+            c.close()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+    with lock:
+        j = jobs.get(job_id)
+        if j:
+            for cl in (j.get("clips") or []):
+                cl["tags"] = sorted(set(cl.get("tags") or []) | set(ids))
+    return jsonify({"ok": True, "tags": ids, "clips": len(idxs)})
+
+
+@app.get("/api/tag/<int:tid>/clips")
+def api_tag_clips(tid):
+    items = []
+    try:
+        c = _connect()
+        try:
+            rows = c.execute(
+                "SELECT ct.job_id, ct.idx, cl.title, cl.score, cl.dur, cl.size,"
+                " cl.story, cl.part, cl.\"of\", j.title AS job_title, j.url AS job_url,"
+                " (SELECT COUNT(*) FROM account_videos av"
+                "   WHERE av.clip_job=ct.job_id AND av.clip_idx=ct.idx) AS posts"
+                " FROM clip_tags ct"
+                " JOIN clips cl ON cl.job_id=ct.job_id AND cl.idx=ct.idx"
+                " LEFT JOIN jobs j ON j.id=ct.job_id"
+                " WHERE ct.tag_id=? AND cl.hidden=0"
+                " ORDER BY COALESCE(j.finished,0) DESC, cl.score DESC LIMIT 300",
+                (tid,)).fetchall()
+            for r in rows:
+                items.append({"job_id": r["job_id"], "i": r["idx"],
+                              "title": r["title"] or "", "score": r["score"] or 0,
+                              "dur": r["dur"] or 0, "size": r["size"] or 0,
+                              "story": r["story"] or 0, "part": r["part"] or 0,
+                              "of": r["of"] or 1, "posted": (r["posts"] or 0) > 0,
+                              "job_title": r["job_title"] or r["job_url"] or r["job_id"]})
+        finally:
+            c.close()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+    return jsonify({"ok": True, "items": items})
+
+
+def _clip_caption(title, tag_name, hashtags):
+    text = re.sub(r"\s+", " ", (title or "")).strip()
+    tags = hashtags or _norm_hashtags(tag_name)
+    caption = (text + ("\n\n" + tags if tags else "")).strip()
+    return caption[:2200]
+
+
+@app.get("/api/tag/<int:tid>/zip")
+def api_tag_zip(tid):
+    """Пакет публикации тега: клипы + captions.csv/txt.
+    max_videos — реальный стоп-лист: в пакет попадают только ещё не
+    опубликованные клипы, и не больше остатка лимита. ?all=1 — всё."""
+    import hashlib
+    import zipfile
+    all_mode = (request.args.get("all") or "").lower() in ("1", "true", "yes")
+    try:
+        c = _connect()
+        try:
+            t = c.execute("SELECT * FROM tags WHERE id=?", (tid,)).fetchone()
+            rows = c.execute(
+                "SELECT ct.job_id, ct.idx, cl.title, cl.score, j.finished,"
+                " (SELECT COUNT(*) FROM account_videos av"
+                "   WHERE av.clip_job=ct.job_id AND av.clip_idx=ct.idx) AS posts"
+                " FROM clip_tags ct"
+                " JOIN clips cl ON cl.job_id=ct.job_id AND cl.idx=ct.idx"
+                " LEFT JOIN jobs j ON j.id=ct.job_id"
+                " WHERE ct.tag_id=? AND cl.hidden=0"
+                " ORDER BY COALESCE(j.finished,0) DESC, ct.idx ASC",
+                (tid,)).fetchall()
+            accounts = _tag_accounts_map(c, [tid]).get(tid, [])
+        finally:
+            c.close()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": "Не удалось собрать архив"}), 500
+    if not t:
+        return jsonify({"ok": False, "error": "Тег не найден"}), 404
+
+    posted_clips = {(r["job_id"], int(r["idx"])) for r in rows if r["posts"]}
+    posted = len(posted_clips)
+    mx = int(t["max_videos"] or 0)
+    if all_mode:
+        selected = rows
+        package_name = "all"
+    else:
+        unposted = [r for r in rows if not r["posts"]]
+        if mx:
+            remaining = max(0, mx - posted)
+            if remaining <= 0:
+                return jsonify({
+                    "ok": False,
+                    "error": f"Лимит тега исчерпан: опубликовано {posted}/{mx}. "
+                             "Отвяжи лишнюю публикацию или увеличь лимит."}), 409
+            selected = unposted[:remaining]
+        else:
+            selected = unposted
+        if not selected:
+            return jsonify({
+                "ok": False,
+                "error": "Все клипы тега уже опубликованы. "
+                         "Кнопка «Всё» скачает архив без учёта публикаций."}), 409
+        package_name = "package"
+
+    def _safe(s):
+        s = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', " ", s or "")
+        s = re.sub(r"\s+", " ", s).strip()
+        return s[:60]
+
+    base = _safe(t["name"]) or f"tag_{tid}"
+    entries = []
+    for r in selected:
+        p = os.path.join(OUT_DIR, f"{r['job_id']}_{int(r['idx']) + 1}.mp4")
+        if os.path.isfile(p):
+            entries.append((p, r, os.path.getmtime(p), os.path.getsize(p)))
+    if not entries:
+        return jsonify({"ok": False,
+                        "error": "К этому тегу пока не привязано ни одного файла"}), 404
+
+    acc_nicks = ", ".join("@" + a["nick"] for a in accounts)
+    hashtags = t["hashtags"] or _norm_hashtags(t["name"])
+    captions = []
+    for n, (p, r, _, _) in enumerate(entries, 1):
+        nm = _safe(r["title"]) or os.path.splitext(os.path.basename(p))[0]
+        fname = f"{n:02d}_{nm}.mp4"
+        cap = _clip_caption(r["title"], t["name"], hashtags)
+        captions.append({"file": fname, "title": r["title"] or "",
+                         "caption": cap, "tag": t["name"],
+                         "theme": t["theme"] or "", "hashtags": hashtags,
+                         "accounts": acc_nicks})
+    csv_buf = io.StringIO()
+    writer = csv.writer(csv_buf, lineterminator="\n")
+    writer.writerow(["file", "title", "caption", "tag", "theme",
+                     "hashtags", "accounts"])
+    for x in captions:
+        writer.writerow([x["file"], x["title"], x["caption"], x["tag"],
+                         x["theme"], x["hashtags"], x["accounts"]])
+    csv_text = "\ufeff" + csv_buf.getvalue()
+    txt_text = "\n\n".join(f"{x['file']}\n{x['caption']}" for x in captions) + "\n"
+
+    sig = hashlib.sha1(
+        (f"{tid}|{package_name}|{base}|{all_mode}|{mx}|{posted}|"
+         f"{hashtags}|{t['theme']}|{acc_nicks}|"
+         + "|".join(f"{r['job_id']}:{r['idx']}:{r['title']}:{m}:{s}"
+                    for _, r, m, s in entries)).encode()).hexdigest()
+    zp = os.path.join(TMP_DIR, f"tag_{tid}_{package_name}.zip")
+    sf = zp + ".sig"
+    cached = False
+    try:
+        cached = (os.path.exists(zp) and os.path.getsize(zp) > 0
+                  and os.path.exists(sf)
+                  and open(sf, encoding="utf-8").read().strip() == sig)
+    except OSError:
+        cached = False
+    if not cached:
+        with zipfile.ZipFile(zp, "w", zipfile.ZIP_STORED) as z:
+            z.writestr(f"{base}/captions.csv", csv_text)
+            z.writestr(f"{base}/captions.txt", txt_text)
+            for (p, r, _, _), x in zip(entries, captions):
+                z.write(p, f"{base}/{x['file']}")
+        with open(sf, "w", encoding="utf-8") as f:
+            f.write(sig)
+    return send_file(zp, mimetype="application/zip", as_attachment=True,
+                     download_name=f"{base}_{package_name}.zip")
+
+
+TT_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+TT_BROWSERS = ("chrome", "safari", "firefox", "edge", "brave", "chromium")
+
+
+def _tt_nick(raw):
+    s = (raw or "").strip()
+    m = re.search(r"tiktok\.com/@([\w.\-]+)", s)
+    if m:
+        s = m.group(1)
+    s = s.lstrip("@").strip()
+    return s if re.fullmatch(r"[\w.\-]{1,64}", s) else ""
+
+
+def _tt_profile(nick):
+    """Подписчики/лайки/кол-во видео из SSR-страницы профиля."""
+    try:
+        p = subprocess.run(["curl", "-sL", "--max-time", "25", "-A", TT_UA,
+                            f"https://www.tiktok.com/@{nick}"],
+                           capture_output=True, text=True, timeout=35)
+        h = p.stdout or ""
+        m = re.search(
+            r'<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__"'
+            r' type="application/json">(.*?)</script>', h, re.S)
+        if not m:
+            return None
+        d = json.loads(m.group(1))
+        ui = (d.get("__DEFAULT_SCOPE__", {})
+               .get("webapp.user-detail", {})
+               .get("userInfo") or {})
+        user = ui.get("user") or {}
+        st = ui.get("stats") or {}
+        if not user:
+            return None
+        return {"nick": user.get("uniqueId") or nick,
+                "followers": int(st.get("followerCount") or 0),
+                "following": int(st.get("followingCount") or 0),
+                "likes": int(st.get("heartCount") or st.get("heart") or 0),
+                "video_count": int(st.get("videoCount") or 0)}
+    except Exception:
+        return None
+
+
+def _tt_parse_entries(j, nick):
+    out = []
+    for e in (j.get("entries") or []):
+        if not e:
+            continue
+        vid = str(e.get("id") or "")
+        if not vid:
+            continue
+        views = e.get("view_count")
+        if views is None:
+            st = e.get("stats") or {}
+            views = st.get("playCount") or st.get("viewCount")
+        try:
+            views = int(views or 0)
+        except Exception:
+            views = 0
+        try:
+            likes = int(e.get("like_count") or 0)
+        except Exception:
+            likes = 0
+        try:
+            comments = int(e.get("comment_count") or 0)
+        except Exception:
+            comments = 0
+        out.append({
+            "video_id": vid,
+            "title": (e.get("title") or "").strip(),
+            "views": views, "likes": likes, "comments": comments,
+            "url": e.get("url") or f"https://www.tiktok.com/@{nick}/video/{vid}",
+            "published": e.get("timestamp") or 0})
+    return out
+
+
+def _tt_videos(nick, progress=None):
+    """Видео аккаунта с просмотрами через yt-dlp.
+    --flat-playlist часто отдаёт view_count=0. Если весь список нулевой,
+    повторяем без flat — иначе хорошая статистика молча перезапишется
+    нулями (в БД нули всё равно не затирают старые значения)."""
+    browser = (get_settings().get("tt_cookies") or "").strip()
+    url = f"https://www.tiktok.com/@{nick}"
+
+    def _p(stage, pct):
+        if progress:
+            progress(stage, pct)
+
+    def _cmd(flat, imp):
+        cmd = ["yt-dlp", "--no-warnings", "-J", "--extractor-retries", "3"]
+        if flat:
+            cmd.append("--flat-playlist")
+        if browser in TT_BROWSERS:
+            cmd[1:1] = ["--cookies-from-browser", browser]
+        if imp:
+            cmd[1:1] = ["--impersonate", imp]
+        cmd.append(url)
+        return cmd
+
+    def _run(flat, imp, timeout):
+        try:
+            p = subprocess.run(_cmd(flat, imp), capture_output=True,
+                               text=True, timeout=timeout)
+            return _tt_parse_entries(json.loads(p.stdout or "{}"), nick)
+        except Exception:
+            return []
+
+    flat_out = []
+    for imp in ("chrome", ""):
+        _p("видео · быстрый список", 30)
+        out = _run(True, imp, 300)
+        if out:
+            flat_out = out
+            break
+    if flat_out and any(v["views"] > 0 for v in flat_out):
+        return flat_out, "flat"
+
+    # нули (или пусто) — пробуем полную выдачу, она отдаёт просмотры
+    for imp in ("chrome", ""):
+        _p("видео · полные данные", 45)
+        out = _run(False, imp, 600)
+        if not out:
+            continue
+        if flat_out:
+            merged = {v["video_id"]: v for v in flat_out}
+            merged.update({v["video_id"]: v for v in out})
+            return list(merged.values()), "full"
+        return out, "full"
+    return flat_out, ("flat-zero" if flat_out else "")
+
+
+
+REFRESH = {}
+REFRESH_LOCK = threading.Lock()
+
+
+def _norm_title(s):
+    """Нормализация заголовка для авто-привязки видео к клипу."""
+    s = (s or "").lower()
+    s = re.sub(r"https?://\S+", " ", s)
+    s = re.sub(r"#\S+", " ", s)
+    s = re.sub(r"[^\wа-яё]+", " ", s, flags=re.I)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _auto_match(c, aid, now):
+    """Аккуратная авто-привязка: точное совпадение или токены >= 0.6.
+    Ручные привязки не трогаем."""
+    clips = c.execute(
+        "SELECT job_id, idx, title FROM clips"
+        " WHERE hidden=0 AND COALESCE(title,'')!=''").fetchall()
+    exact, ambiguous = {}, set()
+    for cl in clips:
+        key = _norm_title(cl["title"])
+        if len(key) < 8:
+            continue
+        if key in exact:
+            ambiguous.add(key)
+        else:
+            exact[key] = (cl["job_id"], int(cl["idx"]))
+    keys = [(k, v) for k, v in exact.items() if k not in ambiguous]
+    vids = c.execute(
+        "SELECT video_id, title FROM account_videos"
+        " WHERE account_id=? AND (clip_job IS NULL OR clip_job='')"
+        " AND COALESCE(link_source,'')!='manual-off'",
+        (aid,)).fetchall()
+    for v in vids:
+        key = _norm_title(v["title"])
+        if len(key) < 8:
+            continue
+        match = exact.get(key) if key not in ambiguous else None
+        if not match:
+            contains = []
+            for ck, pos in keys:
+                if len(key) >= 12 and (key in ck or ck in key):
+                    contains.append((ck, pos))
+            if len(contains) == 1:
+                match = contains[0][1]
+        if not match:
+            tokens = set(key.split())
+            best, best_score = None, 0.0
+            for ck, pos in keys:
+                ct = set(ck.split())
+                inter = len(tokens & ct)
+                if inter < 3:
+                    continue
+                score = inter / max(1, len(tokens | ct))
+                if score >= 0.6 and score > best_score:
+                    best, best_score = pos, score
+            match = best
+        if match:
+            c.execute("UPDATE account_videos SET clip_job=?, clip_idx=?,"
+                      " link_source='auto' WHERE account_id=? AND video_id=?",
+                      (match[0], match[1], aid, v["video_id"]))
+
+
+def _baselines(c, account_id=None):
+    """Последние снапшоты не новее 24ч/72ч -> {key: {'24': views, ...}}."""
+    now = time.time()
+    cuts = {"24": now - 86400, "72": now - 259200}
+    q = "SELECT account_id, video_id, ts, views FROM video_metrics"
+    args = ()
+    if account_id is not None:
+        q += " WHERE account_id=?"
+        args = (account_id,)
+    res = {}
+    for r in c.execute(q, args):
+        key = (r["account_id"], r["video_id"])
+        slot = res.setdefault(key, {})
+        for k, cut in cuts.items():
+            if r["ts"] <= cut:
+                cur = slot.get(k)
+                if not cur or r["ts"] > cur[0]:
+                    slot[k] = (r["ts"], r["views"])
+    return {k: {kk: vv[1] for kk, vv in v.items()}
+            for k, v in res.items()}
+
+
+def _account_json(aid):
+    try:
+        c = _connect()
+        try:
+            r = c.execute("SELECT * FROM accounts WHERE id=?", (aid,)).fetchone()
+            if not r:
+                return None
+            vids = c.execute(
+                "SELECT av.*, cl.title AS clip_title, cl.hidden AS clip_hidden"
+                " FROM account_videos av"
+                " LEFT JOIN clips cl ON cl.job_id=av.clip_job"
+                "   AND cl.idx=av.clip_idx"
+                " WHERE av.account_id=?"
+                " ORDER BY av.views DESC, av.published DESC", (aid,)).fetchall()
+            bases = _baselines(c, aid)
+        finally:
+            c.close()
+    except Exception:
+        return None
+    vlist = []
+    d24 = d72 = 0
+    n24 = n72 = 0
+    for v in vids:
+        base = bases.get((aid, v["video_id"]), {})
+        cur = v["views"] or 0
+        x24 = (cur - base["24"]) if "24" in base else None
+        x72 = (cur - base["72"]) if "72" in base else None
+        if x24 is not None:
+            d24 += x24
+            n24 += 1
+        if x72 is not None:
+            d72 += x72
+            n72 += 1
+        vlist.append({
+            "video_id": v["video_id"], "title": v["title"] or "",
+            "views": cur, "likes": v["likes"] or 0,
+            "comments": v["comments"] or 0, "url": v["url"],
+            "published": v["published"] or 0,
+            "clip_job": v["clip_job"] or "", "clip_idx": v["clip_idx"],
+            "clip_title": v["clip_title"] or "",
+            "link_source": v["link_source"] or "",
+            "delta24": x24, "delta72": x72,
+            "first_seen": v["first_seen"], "last_seen": v["last_seen"],
+            "views_updated": v["views_updated"]})
+    n = len(vlist)
+    total_views = r["total_views"] or sum(v["views"] for v in vlist)
+    return {"id": r["id"], "nick": r["nick"], "created": r["created"],
+            "synced": r["synced"], "followers": r["followers"],
+            "following": r["following"] or 0,
+            "likes": r["likes"], "video_count": r["video_count"],
+            "total_views": total_views, "source": r["source"] or "",
+            "error": r["error"] or "",
+            "videos_total": n,
+            "sum_likes": sum(v["likes"] or 0 for v in vlist),
+            "sum_comments": sum(v["comments"] or 0 for v in vlist),
+            "avg_views": int(total_views / n) if n else 0,
+            "delta24": d24 if n24 else None,
+            "delta72": d72 if n72 else None,
+            "delta24_videos": n24, "delta72_videos": n72,
+            "videos": vlist}
+
+
+@app.get("/api/accounts")
+def api_accounts():
+    items = []
+    try:
+        c = _connect()
+        try:
+            ids = [r[0] for r in c.execute(
+                "SELECT id FROM accounts ORDER BY id").fetchall()]
+        finally:
+            c.close()
+    except Exception:
+        ids = []
+    for aid in ids:
+        a = _account_json(aid)
+        if a:
+            with REFRESH_LOCK:
+                st = dict(REFRESH.get(aid) or {})
+            if st:
+                a["refresh"] = st
+            items.append(a)
+    return jsonify({"ok": True, "items": items})
+
+
+@app.post("/api/accounts")
+def api_account_create():
+    d = request.get_json(force=True, silent=True) or {}
+    nick = _tt_nick(d.get("nick"))
+    if not nick:
+        return jsonify({"ok": False, "error": "Укажи ник или ссылку на профиль TikTok"}), 400
+    try:
+        c = _connect()
+        try:
+            with c:
+                c.execute("INSERT INTO accounts(nick,created,error)"
+                          " VALUES(?,?,'')", (nick, time.time()))
+                aid = c.execute("SELECT id FROM accounts WHERE nick=?",
+                                (nick,)).fetchone()[0]
+        finally:
+            c.close()
+    except sqlite3.IntegrityError:
+        return jsonify({"ok": False, "error": "Этот аккаунт уже добавлен"}), 409
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": "Не удалось добавить аккаунт"}), 500
+    return jsonify({"ok": True, "account": _account_json(aid)})
+
+
+@app.delete("/api/accounts/<int:aid>")
+def api_account_delete(aid):
+    try:
+        c = _connect()
+        try:
+            with c:
+                c.execute("DELETE FROM tag_accounts WHERE account_id=?", (aid,))
+                c.execute("UPDATE tags SET account_id=(SELECT account_id FROM"
+                          " tag_accounts ta WHERE ta.tag_id=tags.id"
+                          " ORDER BY account_id LIMIT 1) WHERE account_id=?", (aid,))
+                c.execute("DELETE FROM video_metrics WHERE account_id=?", (aid,))
+                c.execute("DELETE FROM account_videos WHERE account_id=?", (aid,))
+                c.execute("DELETE FROM accounts WHERE id=?", (aid,))
+        finally:
+            c.close()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+    with REFRESH_LOCK:
+        REFRESH.pop(aid, None)
+    return jsonify({"ok": True})
+
+
+def _save_refresh(aid, a, prof, vids, source):
+    """Слить новые метрики со старыми: нули не затирают просмотры,
+    история пишется в video_metrics, связи с клипами сохраняются."""
+    now = time.time()
+    c = _connect()
+    try:
+        with c:
+            if not c.execute("SELECT 1 FROM accounts WHERE id=?", (aid,)).fetchone():
+                return
+            old = {r["video_id"]: r for r in c.execute(
+                "SELECT * FROM account_videos WHERE account_id=?", (aid,)).fetchall()}
+            fresh = 0
+            for v in vids:
+                o = old.get(v["video_id"])
+                views = int(v["views"] or 0)
+                likes = int(v["likes"] or 0)
+                comments = int(v["comments"] or 0)
+                if o:
+                    if views <= 0 and (o["views"] or 0) > 0:
+                        views = o["views"]
+                    if likes <= 0 and (o["likes"] or 0) > 0:
+                        likes = o["likes"]
+                    if comments <= 0 and (o["comments"] or 0) > 0:
+                        comments = o["comments"]
+                if views > 0:
+                    fresh += 1
+                title = (v["title"] or (o["title"] if o else "") or "")
+                url = (v["url"] or (o["url"] if o else "") or "")
+                published = (v["published"] or (o["published"] if o else 0) or 0)
+                clip_job = o["clip_job"] if o else None
+                clip_idx = o["clip_idx"] if o else None
+                link_source = (o["link_source"] if o else "") or ""
+                first_seen = (o["first_seen"] if o and o["first_seen"] else now)
+                views_updated = (now if int(v["views"] or 0) > 0
+                                 else (o["views_updated"] if o else None))
+                if int(v["views"] or 0) > 0:
+                    c.execute(
+                        "INSERT OR IGNORE INTO video_metrics"
+                        "(account_id,video_id,ts,views,likes,comments)"
+                        " VALUES(?,?,?,?,?,?)",
+                        (aid, v["video_id"], now, int(v["views"] or 0),
+                         int(v["likes"] or 0), int(v["comments"] or 0)))
+                c.execute(
+                    "INSERT INTO account_videos"
+                    "(account_id,video_id,title,views,likes,comments,url,published,"
+                    " clip_job,clip_idx,link_source,first_seen,last_seen,views_updated)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+                    " ON CONFLICT(account_id,video_id) DO UPDATE SET"
+                    " title=excluded.title, views=excluded.views,"
+                    " likes=excluded.likes, comments=excluded.comments,"
+                    " url=excluded.url, published=excluded.published,"
+                    " clip_job=excluded.clip_job, clip_idx=excluded.clip_idx,"
+                    " link_source=excluded.link_source, last_seen=excluded.last_seen,"
+                    " views_updated=excluded.views_updated",
+                    (aid, v["video_id"], title[:500], views, likes, comments,
+                     url[:500], published, clip_job, clip_idx, link_source,
+                     first_seen, now, views_updated))
+            c.execute(
+                "UPDATE account_videos SET clip_job=NULL, clip_idx=NULL,"
+                " link_source='' WHERE account_id=? AND clip_job IS NOT NULL"
+                " AND NOT EXISTS (SELECT 1 FROM clips cl"
+                "   WHERE cl.job_id=account_videos.clip_job"
+                "   AND cl.idx=account_videos.clip_idx)", (aid,))
+            c.execute("DELETE FROM video_metrics WHERE account_id=? AND ts<?",
+                      (aid, now - 120 * 86400))
+            _auto_match(c, aid, now)
+            total = c.execute(
+                "SELECT COALESCE(SUM(views),0) FROM account_videos"
+                " WHERE account_id=?", (aid,)).fetchone()[0]
+            n_vids = c.execute(
+                "SELECT COUNT(*) FROM account_videos WHERE account_id=?",
+                (aid,)).fetchone()[0]
+            if vids:
+                err = ""
+                if fresh == 0:
+                    err = ("TikTok отдал нули — просмотры сохранены "
+                           "с прошлого сбора" if total else
+                           "TikTok отдал нули по просмотрам — включи cookies")
+                c.execute(
+                    "UPDATE accounts SET synced=?, followers=?, following=?,"
+                    " likes=?, video_count=?, total_views=?, source=?, error=?"
+                    " WHERE id=?",
+                    (now,
+                     prof["followers"] if prof else (a["followers"] or 0),
+                     prof["following"] if prof else (a["following"] or 0),
+                     prof["likes"] if prof else (a["likes"] or 0),
+                     max(prof["video_count"] if prof else 0, n_vids),
+                     total, source or "yt-dlp", err, aid))
+            elif prof:
+                c.execute(
+                    "UPDATE accounts SET synced=?, followers=?, following=?,"
+                    " likes=?, video_count=?, source='profile', error=?"
+                    " WHERE id=?",
+                    (now, prof["followers"], prof["following"], prof["likes"],
+                     prof["video_count"],
+                     "просмотры по видео TikTok не отдал — "
+                     "включи cookies браузера в настройках вкладки", aid))
+            else:
+                c.execute("UPDATE accounts SET error=? WHERE id=?",
+                          ("TikTok не отдал данные — проверь ник "
+                           "или включи cookies браузера", aid))
+    finally:
+        c.close()
+
+
+def _refresh_worker(aid):
+    def state(**kw):
+        with REFRESH_LOCK:
+            st = REFRESH.setdefault(aid, {})
+            st.update(kw)
+            st["updated"] = time.time()
+
+    try:
+        c = _connect()
+        try:
+            a = c.execute("SELECT * FROM accounts WHERE id=?", (aid,)).fetchone()
+        finally:
+            c.close()
+        if not a:
+            raise RuntimeError("аккаунт удалён")
+        state(status="work", stage="подписчики и профиль", pct=5, error="")
+        prof = _tt_profile(a["nick"])
+        state(stage="видео · быстрый список", pct=25)
+        vids, source = _tt_videos(
+            a["nick"], progress=lambda stage, pct: state(stage=stage, pct=pct))
+        state(stage="сохраняю метрики", pct=80)
+        c = _connect()
+        try:
+            alive = c.execute("SELECT 1 FROM accounts WHERE id=?",
+                              (aid,)).fetchone()
+        finally:
+            c.close()
+        if not alive:
+            raise RuntimeError("аккаунт удалён")
+        _save_refresh(aid, a, prof, vids, source)
+        state(status="done", stage="готово", pct=100, finished=time.time(),
+              videos=len(vids), source=source)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        msg = str(e)[:300]
+        state(status="error", stage="ошибка", error=msg,
+              finished=time.time())
+        try:
+            c = _connect()
+            try:
+                with c:
+                    c.execute("UPDATE accounts SET error=? WHERE id=?", (msg, aid))
+            finally:
+                c.close()
+        except Exception:
+            pass
+
+
+@app.post("/api/accounts/<int:aid>/refresh")
+def api_account_refresh(aid):
+    """Асинхронный сбор аналитики. HTTP отвечает сразу, прогресс — GET."""
+    c = _connect()
+    try:
+        a = c.execute("SELECT id FROM accounts WHERE id=?", (aid,)).fetchone()
+    finally:
+        c.close()
+    if not a:
+        return jsonify({"ok": False, "error": "Аккаунт не найден"}), 404
+    with REFRESH_LOCK:
+        st = REFRESH.get(aid)
+        if st and st.get("status") == "work":
+            return jsonify({"ok": True, "state": dict(st)})
+        REFRESH[aid] = {"status": "work", "stage": "в очереди", "pct": 0,
+                        "started": time.time(), "finished": 0, "error": "",
+                        "videos": 0}
+        out = dict(REFRESH[aid])
+    threading.Thread(target=_refresh_worker, args=(aid,), daemon=True).start()
+    return jsonify({"ok": True, "state": out})
+
+
+@app.get("/api/accounts/<int:aid>/refresh")
+def api_account_refresh_status(aid):
+    with REFRESH_LOCK:
+        st = dict(REFRESH.get(aid) or {"status": "idle", "stage": "",
+                                       "pct": 0, "error": ""})
+    return jsonify({"ok": True, "state": st})
+
+
+@app.post("/api/account-videos/<int:aid>/<video_id>/link")
+def api_account_video_link(aid, video_id):
+    """Ручная привязка видео TikTok к клипу: {job_id, idx} или пустой job_id."""
+    d = request.get_json(force=True, silent=True) or {}
+    job_id = str(d.get("job_id") or "").strip()
+    try:
+        idx = int(d.get("idx"))
+    except Exception:
+        idx = -1
+    try:
+        c = _connect()
+        try:
+            if not c.execute("SELECT 1 FROM accounts WHERE id=?", (aid,)).fetchone():
+                return jsonify({"ok": False, "error": "Аккаунт не найден"}), 404
+            with c:
+                if job_id:
+                    if idx < 0 or not c.execute(
+                            "SELECT 1 FROM clips WHERE job_id=? AND idx=?",
+                            (job_id, idx)).fetchone():
+                        return jsonify({"ok": False,
+                                        "error": "Клип не найден"}), 404
+                    c.execute(
+                        "UPDATE account_videos SET clip_job=?, clip_idx=?,"
+                        " link_source='manual' WHERE account_id=? AND video_id=?",
+                        (job_id, idx, aid, video_id))
+                else:
+                    c.execute(
+                        "UPDATE account_videos SET clip_job=NULL, clip_idx=NULL,"
+                        " link_source='manual-off' WHERE account_id=? AND video_id=?",
+                        (aid, video_id))
+                changed = c.total_changes
+        finally:
+            c.close()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": "Не удалось сохранить привязку"}), 500
+    if not changed:
+        return jsonify({"ok": False, "error": "Видео не найдено"}), 404
+    return jsonify({"ok": True})
+
+
+@app.get("/api/analytics/tags")
+def api_analytics_tags():
+    """Просмотры по тегам и тематикам + дельты 24ч/72ч."""
+    try:
+        c = _connect()
+        try:
+            tag_rows = c.execute(
+                "SELECT * FROM tags ORDER BY theme, name").fetchall()
+            rows = c.execute(
+                "SELECT t.id AS tag_id, t.name, t.theme, t.max_videos,"
+                " t.hashtags, ct.job_id, ct.idx, cl.title, cl.score,"
+                " av.account_id, av.video_id, av.views, av.likes, av.comments"
+                " FROM clip_tags ct"
+                " JOIN tags t ON t.id=ct.tag_id"
+                " JOIN clips cl ON cl.job_id=ct.job_id AND cl.idx=ct.idx"
+                "   AND cl.hidden=0"
+                " LEFT JOIN account_videos av"
+                "   ON av.clip_job=ct.job_id AND av.clip_idx=ct.idx"
+                " ORDER BY t.theme, t.name").fetchall()
+            bases = _baselines(c)
+            amap = _tag_accounts_map(c)
+        finally:
+            c.close()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": "Не удалось посчитать статистику"}), 500
+
+    def empty_tag(t):
+        mx = int(t["max_videos"] or 0)
+        return {"tag_id": t["id"], "name": t["name"], "theme": t["theme"] or "",
+                "hashtags": t["hashtags"] or "", "max_videos": mx,
+                "account_ids": [a["id"] for a in amap.get(t["id"], [])],
+                "accounts": amap.get(t["id"], []),
+                "clips": set(), "posts": set(), "posted_clips": set(),
+                "views": 0, "likes": 0,
+                "comments": 0, "d24": 0, "d72": 0, "n24": 0, "n72": 0}
+
+    tags = {t["id"]: empty_tag(t) for t in tag_rows}
+    themes = {}
+    for t in tag_rows:
+        th = t["theme"] or "Без тематики"
+        st = themes.setdefault(th, {"theme": th, "tags": set(), "clips": set(),
+                                    "posts": set(), "posted_clips": set(),
+                                    "views": 0, "likes": 0,
+                                    "comments": 0, "d24": 0, "d72": 0,
+                                    "n24": 0, "n72": 0})
+        st["tags"].add(t["id"])
+    theme_posts = {}
+
+    for r in rows:
+        tag = tags.get(r["tag_id"])
+        if not tag:
+            continue
+        clip_key = (r["job_id"], int(r["idx"]))
+        th = r["theme"] or "Без тематики"
+        theme = themes[th]
+        tag["clips"].add(clip_key)
+        theme["clips"].add(clip_key)
+        if not r["video_id"]:
+            continue
+        aid, vid = r["account_id"], r["video_id"]
+        views = int(r["views"] or 0)
+        likes = int(r["likes"] or 0)
+        comments = int(r["comments"] or 0)
+        base = bases.get((aid, vid), {})
+        x24 = (views - base["24"]) if "24" in base else None
+        x72 = (views - base["72"]) if "72" in base else None
+        tag["posts"].add((aid, vid))
+        tag["posted_clips"].add(clip_key)
+        tag["views"] += views
+        tag["likes"] += likes
+        tag["comments"] += comments
+        if x24 is not None:
+            tag["d24"] += x24
+            tag["n24"] += 1
+        if x72 is not None:
+            tag["d72"] += x72
+            tag["n72"] += 1
+        pkey = (th, clip_key, aid, vid)
+        if pkey not in theme_posts:
+            theme_posts[pkey] = (views, likes, comments, x24, x72)
+            theme["posts"].add(pkey)
+            theme["posted_clips"].add(clip_key)
+            theme["views"] += views
+            theme["likes"] += likes
+            theme["comments"] += comments
+            if x24 is not None:
+                theme["d24"] += x24
+                theme["n24"] += 1
+            if x72 is not None:
+                theme["d72"] += x72
+                theme["n72"] += 1
+
+    def public(st, key):
+        posted = len(st["posted_clips"])
+        mx = int(st.get("max_videos") or 0)
+        out = {key: st.get("name") or st.get("theme"),
+               "theme": st.get("theme") or "",
+               "clips": len(st["clips"]), "posted": posted,
+               "views": st["views"], "likes": st["likes"],
+               "comments": st["comments"],
+               "avg_views": int(st["views"] / posted) if posted else 0,
+               "delta24": st["d24"] if st["n24"] else None,
+               "delta72": st["d72"] if st["n72"] else None,
+               "delta24_posts": st["n24"], "delta72_posts": st["n72"]}
+        if key == "tag_id":
+            out.update({"tag_id": st["tag_id"], "hashtags": st["hashtags"],
+                        "max_videos": mx,
+                        "remaining": (max(0, mx - posted) if mx else None),
+                        "account_ids": st["account_ids"],
+                        "accounts": st["accounts"]})
+        else:
+            out["tags"] = len(st["tags"])
+        return out
+
+    return jsonify({
+        "ok": True,
+        "themes": [public(x, "theme") for x in
+                   sorted(themes.values(), key=lambda x: x["theme"].lower())],
+        "tags": [public(x, "tag_id") for x in
+                 sorted(tags.values(), key=lambda x: (x["theme"].lower(),
+                                                      x["name"].lower()))]})
 
 
 @app.get("/api/tiktok-check/<job_id>/<int:idx>")
@@ -1189,7 +2700,8 @@ def api_history():
             for r in rows:
                 cr = c.execute(
                     "SELECT idx,title,score,verdict,hook,dur,size,views,story,part,\"of\""
-                    " FROM clips WHERE job_id=? ORDER BY idx", (r["id"],)).fetchall()
+                    " FROM clips WHERE job_id=? AND hidden=0 ORDER BY idx",
+                    (r["id"],)).fetchall()
                 items.append({
                     "id": r["id"], "title": r["title"], "url": r["url"],
                     "status": r["status"], "created": r["created"],
@@ -1635,6 +3147,17 @@ def api_learn_train():
 @app.get("/api/library")
 def api_library():
     from urllib.parse import quote
+    hidden = set()
+    try:
+        c = _connect()
+        try:
+            for r in c.execute(
+                    "SELECT job_id, idx FROM clips WHERE hidden=1").fetchall():
+                hidden.add(f"{r['job_id']}_{r['idx'] + 1}.mp4")
+        finally:
+            c.close()
+    except Exception:
+        pass
     items = []
     for d, kind in ((OUT_DIR, "short"), (LEGACY_DIR, "legacy")):
         try:
@@ -1646,6 +3169,7 @@ def api_library():
             if os.path.isfile(p) and not f.endswith((".part", ".ytdl", ".temp")):
                 items.append({"name": f, "kind": kind, "size": os.path.getsize(p),
                               "mtime": os.path.getmtime(p),
+                              "hidden": (kind == "short" and f in hidden),
                               "url": f"/dl/{kind}/{quote(f)}",
                               "thumb": f"/api/thumb/{kind}/{quote(f)}"})
     items.sort(key=lambda x: x["mtime"], reverse=True)
@@ -2262,6 +3786,11 @@ def resolve_banner(name):
 @app.get("/api/banners")
 def api_banners():
     return jsonify({"ok": True, "banners": list_banners()})
+
+
+@app.get("/api/gameplays")
+def api_gameplays():
+    return jsonify({"ok": True, "gameplays": ac.gameplay_items()})
 
 
 @app.get("/dluniq/<name>")

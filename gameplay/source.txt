@@ -1,3 +1,20 @@
-https://youtu.be/bdmG3oh-ZD8
-Subway Surfers Classic (2026) - Gameplay (PC UHD) [4K60FPS]
-Качается сам при первом рендере (ai_clips.ensure_gameplay), либо положи сюда subway.mp4.
+# Геймплеи для низа сплита (1080x1152). Качаются сами при первом рендере
+# (ai_clips.ensure_gameplay) либо кладутся сюда вручную.
+#
+# ВАЖНО: только 30fps-файлы. Лимит TikTok — 30fps, а дроп 60→30 в рендере
+# давал строб «как будто 10fps». 60fps-источники конвертировать фильтром:
+#   -vf "tmix=frames=2:weights=1 1,fps=30"   (бленд кадров = сглаживание)
+
+subway.mp4
+  Subway Surfers Classic (2026) - Gameplay (PC UHD) [4K60FPS]
+  https://youtu.be/bdmG3oh-ZD8
+  Скачан 1080p60 (формат 299), первые 30с меню/логотип обрезаны,
+  сконвертирован в 30fps с блендом (tmix). Городской уровень, без зимы.
+
+minecraft.mp4
+  Minecraft паркур (ytsearch1:minecraft parkour gameplay no commentary)
+
+wall_kickers.mp4
+  Wall Kickers - Gameplay Walkthrough Part 1 (iOS, Android)
+  https://youtu.be/gpOqOFqYgMo
+  Скачан 1080p60, сконвертирован в 30fps с блендом.

@@ -3,13 +3,18 @@ import json
 import os
 import re
 import subprocess
+import threading
 import urllib.request
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 MODELS = os.path.join(BASE, "models")
 ASR_MODELS = {"base": "⚡ База — быстро", "small": "🎯 Small — точнее, медленнее",
-              "giga": "GigaAM v3 — топ для русского"}
+              "giga": "GigaAM v3 — топ для русского",
+              "whisper-large-v3": "Whisper Large v3 — API"}
+ASR_API_DEFAULT_BASE = "https://gw.lunaroute.com/v1"
+ASR_API_MODEL = "whisper-large-v3"
 _MODEL_CACHE = {}
+_GAMEPLAY_ENC_LOCK = threading.Lock()
 
 
 def _whisper_model(name: str):
@@ -48,7 +53,8 @@ def _transcribe_giga(path: str, limit_min: int = 0, progress=None):
         s += WIN
     for k, st in enumerate(starts):
         cs = max(0.0, st - (OV if st > 0 else 0))
-        chunk = os.path.join(tempfile.gettempdir(), f"giga_{os.getpid()}_{k}.wav")
+        fd, chunk = tempfile.mkstemp(prefix="giga_", suffix=".wav")
+        os.close(fd)
         try:
             subprocess.run([FFMPEG, "-y", "-v", "error", "-ss", str(round(cs, 2)),
                             "-t", str(WIN + OV), "-i", path,
@@ -104,16 +110,187 @@ def _transcribe_giga(path: str, limit_min: int = 0, progress=None):
         segs.append({"start": cur[0]["s"], "end": cur[-1]["e"],
                      "text": " ".join(x["w"] for x in cur), "words": cur})
     return segs, "ru"
+
+
+def _asr_api_url(base: str) -> str:
+    base = (base or ASR_API_DEFAULT_BASE).strip().rstrip("/")
+    if base.endswith("/audio/transcriptions"):
+        return base
+    return base + "/audio/transcriptions"
+
+
+def _transcribe_whisper_api(path: str, limit_min: int = 0, progress=None,
+                            api_key: str = "", api_base: str = ""):
+    """Whisper Large v3 через OpenAI-совместимый API.
+    Длинные видео режем на окна по 10 минут (25 МБ лимит аудио), слова
+    склеиваем по глобальным таймкодам и чистим дубли на швах."""
+    import tempfile
+    import time as _time
+    import requests
+
+    key = (api_key or os.environ.get("ASR_API_KEY") or "").strip()
+    if not key:
+        raise RuntimeError(
+            "нет API-ключа Whisper Large v3 — добавь его в Настройках")
+    total = float(media_duration(path) or 0.0)
+    if limit_min and limit_min > 0:
+        total = min(total, limit_min * 60.0) if total else limit_min * 60.0
+    if total <= 0:
+        raise RuntimeError("не удалось определить длительность видео для Whisper API")
+    url = _asr_api_url(api_base)
+    win, overlap = 600.0, 2.0
+    starts = []
+    s = 0.0
+    while s < total:
+        starts.append(s)
+        s += win
+    if progress:
+        progress(2, "транскрибация Whisper Large…")
+    words, lang = [], "ru"
+    for k, st in enumerate(starts):
+        cs = max(0.0, st - (overlap if st > 0 else 0.0))
+        dur = min(win + overlap, total - cs)
+        if dur <= 0.3:
+            continue
+        fd, chunk = tempfile.mkstemp(prefix="asr_", suffix=".wav")
+        os.close(fd)
+        cut_end = total if k == len(starts) - 1 else st + win + 1.0
+        try:
+            subprocess.run(
+                [FFMPEG, "-y", "-v", "error",
+                 "-ss", f"{cs:.3f}", "-t", f"{dur:.3f}", "-i", path,
+                 "-vn", "-ar", "16000", "-ac", "1", chunk],
+                check=True, timeout=600)
+            form = [("model", ASR_API_MODEL),
+                    ("response_format", "verbose_json"),
+                    ("language", "ru"), ("temperature", "0"),
+                    ("timestamp_granularities[]", "word")]
+            j = None
+            for attempt in range(3):
+                try:
+                    with open(chunk, "rb") as f:
+                        r = requests.post(
+                            url, headers={"Authorization": "Bearer " + key},
+                            data=form,
+                            files={"file": ("audio.wav", f, "audio/wav")},
+                            timeout=(30, 600))
+                    if r.status_code in (429, 500, 502, 503, 504) and attempt < 2:
+                        _time.sleep(2 * (attempt + 1))
+                        continue
+                    if r.status_code >= 400:
+                        try:
+                            msg = ((r.json().get("error") or {}).get("message")
+                                   or r.text)
+                        except Exception:
+                            msg = r.text
+                        raise RuntimeError(
+                            f"Whisper API {r.status_code}: {str(msg)[:220]}")
+                    j = r.json()
+                    break
+                except requests.RequestException as e:
+                    if attempt >= 2:
+                        raise RuntimeError(
+                            f"Whisper API недоступен: {str(e)[:180]}")
+                    _time.sleep(2 * (attempt + 1))
+            if not j:
+                raise RuntimeError("Whisper API вернул пустой ответ")
+            if j.get("language"):
+                lang = str(j["language"])
+            raw = j.get("words") or []
+            if not raw:
+                raw = [w for seg in (j.get("segments") or [])
+                       for w in (seg.get("words") or [])]
+            if raw:
+                for w in raw:
+                    try:
+                        a = float(w.get("start", 0)) + cs
+                        b = float(w.get("end", 0)) + cs
+                    except (TypeError, ValueError):
+                        continue
+                    tw = str(w.get("word", "")).strip()
+                    if not tw:
+                        continue
+                    if st > 0 and a < st + 1.0:
+                        continue
+                    if a >= cut_end:
+                        continue
+                    if b <= a:
+                        b = a + 0.08
+                    words.append({"w": tw, "s": round(a, 2),
+                                  "e": round(b, 2)})
+            else:
+                raw_segs = j.get("segments") or []
+                if not raw_segs and j.get("text"):
+                    raw_segs = [{"start": 0, "end": dur, "text": j["text"]}]
+                for seg in raw_segs:
+                    toks = str(seg.get("text", "")).split()
+                    if not toks:
+                        continue
+                    try:
+                        a0 = float(seg.get("start", 0)) + cs
+                        b0 = float(seg.get("end", 0)) + cs
+                    except (TypeError, ValueError):
+                        continue
+                    step = max((b0 - a0) / len(toks), 0.05)
+                    for n, tok in enumerate(toks):
+                        a = a0 + n * step
+                        b = a + step
+                        if st > 0 and a < st + 1.0:
+                            continue
+                        if a >= cut_end:
+                            continue
+                        words.append({"w": tok, "s": round(a, 2),
+                                      "e": round(b, 2)})
+        finally:
+            try:
+                if os.path.exists(chunk):
+                    os.remove(chunk)
+            except OSError:
+                pass
+        if progress:
+            progress(min(34, int(34 * (k + 1) / max(len(starts), 1))),
+                     "транскрибация Whisper Large…")
+    words.sort(key=lambda x: x["s"])
+    clean = []
+    for w in words:
+        if (clean and w["w"].lower() == clean[-1]["w"].lower()
+                and abs(w["s"] - clean[-1]["s"]) < 0.12):
+            continue
+        clean.append(w)
+    if not clean:
+        raise RuntimeError("Whisper API не вернул слова — проверь ключ и модель")
+    segs, cur = [], []
+    for w in clean:
+        if cur and ((w["s"] - cur[-1]["e"] > 0.8
+                     and cur[-1]["e"] - cur[0]["s"] >= 1.5)
+                    or (w["e"] - cur[0]["s"] > 12)):
+            segs.append({"start": cur[0]["s"], "end": cur[-1]["e"],
+                         "text": " ".join(x["w"] for x in cur), "words": cur})
+            cur = []
+        cur.append(w)
+    if cur:
+        segs.append({"start": cur[0]["s"], "end": cur[-1]["e"],
+                     "text": " ".join(x["w"] for x in cur), "words": cur})
+    if lang.lower().startswith("ru"):
+        lang = "ru"
+    return segs, lang
+
+
 GAMEPLAY_DIR = os.path.join(BASE, "gameplay")
 GAMEPLAYS = {
-    # subway: захардкожен проверенный ландшафт 1080p60 (ytsearch отдавал
-    # вертикалку 384x854 — низ выглядел как 144p после апскейла в 2.8 раза)
+    # subway: захардкожен проверенный ландшафт 1080p (ytsearch отдавал
+    # вертикалку 384x854 — низ выглядел как 144p после апскейла в 2.8 раза).
+    # Файл лежит 30fps с блендом кадров (tmix): лимит TikTok — 30fps, а
+    # дроп 60→30 в рендере давал строб «как будто 10fps».
     "subway": {"file": "subway.mp4",
-               "query": "https://www.youtube.com/watch?v=7ghSziUQnhs",
-               "format": "299/298/bv*[height<=1080]+ba/b[height<=1080]/b"},
+               "query": "https://www.youtube.com/watch?v=bdmG3oh-ZD8",
+               "format": "137+ba/299+ba/bv*[height<=1080]+ba/b[height<=1080]/b"},
     "minecraft": {"file": "minecraft.mp4",
                    "query": "ytsearch1:minecraft parkour gameplay no commentary",
                    "format": "bv*[height<=1080]+ba/b[height<=1080]/b"},
+    "wall_kickers": {"file": "wall_kickers.mp4",
+                     "query": "https://www.youtube.com/watch?v=gpOqOFqYgMo",
+                     "format": "bv*[height<=1080][width>=1600]+ba/b[width>=1600]/b"},
 }
 GAMEPLAY_FILE = os.path.join(GAMEPLAY_DIR, "subway.mp4")
 
@@ -148,6 +325,9 @@ def _has_videotoolbox() -> bool:
 
 
 _VT = _has_videotoolbox()
+_CODEC_BASE = ["-profile:v", "high", "-level", "4.1",
+               "-color_primaries", "bt709", "-color_trc", "bt709",
+               "-colorspace", "bt709", "-color_range", "tv"]
 
 
 def _video_codec_args(hq: bool = False) -> list:
@@ -165,22 +345,24 @@ def _video_codec_args(hq: bool = False) -> list:
     if hq:
         if _VT:
             br = _r.randint(9, 11)
-            return ["-c:v", "h264_videotoolbox", "-pix_fmt", "yuv420p",
+            return ["-c:v", "h264_videotoolbox", *_CODEC_BASE,
+                    "-pix_fmt", "yuv420p",
                     "-b:v", f"{br}M", "-maxrate", f"{br + 3}M",
                     "-bufsize", f"{2 * br}M", "-allow_sw", "1",
                     "-g", str(_r.randint(48, 72))]
-        return ["-c:v", "libx264", "-pix_fmt", "yuv420p",
+        return ["-c:v", "libx264", *_CODEC_BASE, "-pix_fmt", "yuv420p",
                 "-preset", "veryfast", "-crf", "19", "-tune", "film",
                 "-g", str(_r.randint(48, 72))]
     if _VT:
         br = _r.randint(6, 8)
-        return ["-c:v", "h264_videotoolbox", "-pix_fmt", "yuv420p",
+        return ["-c:v", "h264_videotoolbox", *_CODEC_BASE,
+                "-pix_fmt", "yuv420p",
                 "-b:v", f"{br}M", "-maxrate", f"{br + 3}M",
                 "-bufsize", f"{2 * br}M", "-allow_sw", "1",
                 "-g", str(_r.randint(48, 72))]
-    return ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", str(_r.randint(20, 22)),
-            "-preset", "fast", "-tune", "film",
-            "-g", str(_r.randint(48, 72))]
+    return ["-c:v", "libx264", *_CODEC_BASE, "-pix_fmt", "yuv420p",
+            "-crf", str(_r.randint(20, 22)), "-preset", "fast",
+            "-tune", "film", "-g", str(_r.randint(48, 72))]
 
 
 # Единая громкость под ленту: тихие сериалы подтягиваем к уровню TikTok.
@@ -206,12 +388,68 @@ def _tiktok_af(*parts: str) -> str:
 _AUDIO_OUT = ["-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2"]
 
 
+def _bgm_dur(path: str) -> float:
+    """Длительность фонового трека через ffmpeg Duration (аудио cv2 не читает)."""
+    try:
+        r = subprocess.run([FFMPEG, "-i", path], capture_output=True,
+                           text=True, timeout=30)
+        m = __import__("re").search(r"Duration: (\d+):(\d+):(\d+)\.(\d+)",
+                                    r.stderr or "")
+        if m:
+            return (int(m.group(1)) * 3600 + int(m.group(2)) * 60 +
+                    int(m.group(3)) + int(m.group(4)) / 100.0)
+    except Exception:
+        pass
+    return 0.0
+
+
+def _bgm_args(path: str, dur: float, mute=None):
+    """Фон под нарезку: входные аргументы + фильтр трека.
+    Параметры случайные на каждый рендер — офсет, темп, тёмбр, фейды:
+    отпечаток аудио у клипов не совпадает один-в-один (Content ID / audio ID).
+    Громкость вдвое тише прежней (0.045–0.075 вместо 0.09–0.15).
+    mute — окна выходного таймлайна [(a, b), ...], где фон молчит
+    (вставка баннера: под ней играет только звук самого баннера).
+    Возвращает (args, filter)."""
+    import random
+    off = 0.0
+    bd = _bgm_dur(path)
+    if bd > dur + 2.0:
+        off = random.uniform(0.0, max(bd - dur - 1.0, 0.0))
+    args = []
+    if off > 0.05:
+        args += ["-ss", f"{off:.3f}"]
+    args += ["-stream_loop", "-1", "-i", path]
+    k = random.uniform(0.985, 1.015)
+    vol = random.uniform(0.045, 0.075)
+    fd_in = random.uniform(0.4, 1.0)
+    fd_out = random.uniform(0.8, 1.6)
+    st = max(dur - fd_out, 0.0)
+    _mute = ""
+    if mute:
+        _expr = "+".join(f"between(t,{float(a):.3f},{float(b):.3f})"
+                         for a, b in mute if float(b) - float(a) > 0.05)
+        if _expr:
+            _mute = f"volume=enable='{_expr}':volume=0,"
+    af = (f"atempo={k:.4f},aresample=48000,"
+          f"bass=g={random.uniform(-4.0, 4.0):.2f}:f=110,"
+          f"treble=g={random.uniform(-3.0, 3.0):.2f}:f=8000,"
+          f"volume={vol:.3f},{_mute}"
+          f"afade=t=in:st=0:d={fd_in:.2f},"
+          f"afade=t=out:st={st:.2f}:d={min(fd_out, max(dur, 0.1)):.2f},"
+          f"aformat=sample_fmts=fltp:channel_layouts=stereo")
+    return args, af
+
+
 # ---------- 1. Транскрибация ----------
 
-def transcribe(path: str, limit_min: int = 0, progress=None, model_name: str = "giga"):
-    """faster-whisper / GigaAM -> segments[{start,end,text,words[]}]."""
+def transcribe(path: str, limit_min: int = 0, progress=None, model_name: str = "giga",
+               api_key: str = "", api_base: str = ""):
+    """faster-whisper / GigaAM / Whisper API -> segments[{start,end,text,words[]}]."""
     if model_name == "giga":
         return _transcribe_giga(path, limit_min, progress)
+    if model_name in ("whisper-large-v3", "whisper-api"):
+        return _transcribe_whisper_api(path, limit_min, progress, api_key, api_base)
     src = path
     tmp_cut = None
     if limit_min and limit_min > 0:
@@ -2192,7 +2430,7 @@ def tiktok_safety_check(path: str) -> dict:
         dur = int(md.group(1)) * 3600 + int(md.group(2)) * 60 + float(md.group(3))
         info["dur"] = round(dur, 1)
         if dur < 5:
-            problems.append("короче 5с — неINFOрмативно для ленты")
+            problems.append("короче 5с — неинформативно для ленты")
     # первый кадр не чёрный (обложка решает CTR). Смотрим кадр на ~1с:
     # fade-in 0.3-0.5с гасит самый старт штатно, это не брак
     try:
@@ -2229,6 +2467,102 @@ def _gameplay_ok(path: str) -> bool:
         return False
 
 
+def _gameplay_30fps(path: str) -> str:
+    """Нормализует 60fps-геймплей в 30fps с блендом кадров (tmix)."""
+    try:
+        _, _, _, fps = _probe_wh_fps(path)
+        if not fps or fps <= 30.5:
+            return path
+        with _GAMEPLAY_ENC_LOCK:
+            _, _, _, fps = _probe_wh_fps(path)
+            if not fps or fps <= 30.5:
+                return path
+            tmp = path + ".30fps.mp4"
+            try:
+                subprocess.run(
+                    [FFMPEG, "-y", "-v", "error", "-i", path,
+                     "-vf", "tmix=frames=2:weights=1 1,fps=30",
+                     "-map", "0:v:0", "-map", "0:a?",
+                     *_video_codec_args(),
+                     "-c:a", "aac", "-b:a", "160k",
+                     "-movflags", "+faststart", tmp],
+                    timeout=3600, check=True)
+                if _readable_video(tmp):
+                    os.replace(tmp, path)
+            finally:
+                try:
+                    if os.path.exists(tmp):
+                        os.remove(tmp)
+                except OSError:
+                    pass
+    except Exception:
+        pass
+    return path
+
+
+GAMEPLAY_EXTS = (".mp4", ".webm", ".mkv", ".mov")
+
+
+def gameplay_items() -> list[dict]:
+    """Валидные файлы из gameplay/ для выбора в UI."""
+    items = []
+    try:
+        names = sorted(os.listdir(GAMEPLAY_DIR), key=str.lower)
+    except OSError:
+        return items
+    for base in names:
+        if (base.startswith(".") or ".30fps." in base
+                or not base.lower().endswith(GAMEPLAY_EXTS)):
+            continue
+        p = os.path.join(GAMEPLAY_DIR, base)
+        if not os.path.isfile(p) or not _gameplay_ok(p):
+            continue
+        try:
+            w, h, n, fps = _probe_wh_fps(p)
+            dur = round((n / fps), 1) if n and fps else 0
+        except Exception:
+            w = h = 0
+            fps = 0
+            dur = 0
+        try:
+            size = os.path.getsize(p)
+        except OSError:
+            size = 0
+        items.append({"id": base, "name": base, "dur": dur,
+                      "size": size, "w": w, "h": h, "fps": fps})
+    return items
+
+
+def gameplay_value(value: str | None) -> str:
+    """Имя из UI/конфига -> существующий файл gameplay/ (для настроек)."""
+    raw = os.path.basename(str(value or "").strip())
+    if raw in GAMEPLAYS:
+        return GAMEPLAYS[raw]["file"]
+    if raw and os.path.isfile(os.path.join(GAMEPLAY_DIR, raw)):
+        return raw
+    return GAMEPLAYS["subway"]["file"]
+
+
+def resolve_gameplay(value: str | None) -> str | None:
+    """Имя/путь геймплея -> готовый 30fps-путь; неизвестное имя качаем."""
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if os.path.isfile(raw):
+        p = raw
+    else:
+        base = os.path.basename(raw)
+        p = os.path.join(GAMEPLAY_DIR, base)
+        if not os.path.isfile(p):
+            key = base.rsplit(".", 1)[0] if "." in base else base
+            if key in GAMEPLAYS:
+                return ensure_gameplay(key)
+            return None
+    if not _gameplay_ok(p):
+        return None
+    return _gameplay_30fps(p)
+
+
 def ensure_gameplay(name: str = "subway") -> str | None:
     """Возвращает путь к закэшированному геймплею; если нет — качает с YouTube."""
     meta = GAMEPLAYS.get(name) or GAMEPLAYS["subway"]
@@ -2246,7 +2580,7 @@ def ensure_gameplay(name: str = "subway") -> str | None:
     if os.path.exists(dest):
         # мелкий/вертикальный мусор (был 384x854) — в .bad, молча не принимаем
         if _gameplay_ok(dest):
-            return dest
+            return _gameplay_30fps(dest)
         _to_bad(dest)
     os.makedirs(GAMEPLAY_DIR, exist_ok=True)
     try:
@@ -2261,7 +2595,7 @@ def ensure_gameplay(name: str = "subway") -> str | None:
     except Exception:
         return None
     if _gameplay_ok(dest):
-        return dest
+        return _gameplay_30fps(dest)
     if os.path.exists(dest):
         _to_bad(dest)
     return None
@@ -2870,7 +3204,8 @@ def _ass_captions(segs, start: float, spd: float, wins, b_eff: float,
                   font_size: int = 64, max_words: int = 4,
                   max_chars: int = 40, title_color: str = "",
                   title_pos: int = 100, hook_text: str = "",
-                  hook_pos: int = 0, hook_size: int = 40) -> bool:
+                  hook_pos: int = 0, hook_size: int = 40,
+                  hook_color: str = "") -> bool:
     """ASS-субтитры с пословным караоке (белый -> жёлтый, как было в PIL).
     Время — уже в координатах итога (фризы баннеров учтены).
     pos_y/font_size/max_words — для 4:3-формата историй, где сабы стоят
@@ -2899,12 +3234,16 @@ def _ass_captions(segs, start: float, spd: float, wins, b_eff: float,
             "Alignment, MarginL, MarginR, MarginV, Encoding",
             f"Style: Hook,Arial,{int(font_size)},&H00FFFFFF,&H000AD6FF,"
             "&H80000000,&H80000000,-1,0,0,0,100,100,0,0,1,3,1,5,40,40,40,1",
-            f"Style: HookTop,Arial,{int(hook_size)},&H00FFFFFF,&H00FFFFFF,"
-            "&HCC101010,&HCC101010,-1,0,0,0,100,100,0,0,3,6,0,8,80,80,40,1",
+            f"Style: HookTop,Arial,{int(hook_size)},&H00{hook_color or 'FFFFFF'},"
+            f"&H00{hook_color or 'FFFFFF'},&H00000000,&H80000000,"
+            "-1,0,0,0,100,100,0,0,1,4,0,8,80,80,40,1",
+            f"Style: HookPlate,Arial,{int(hook_size)},&HFF000000,&HFF000000,"
+            "&H00FFFFFF,&H00FFFFFF,-1,0,0,0,100,100,0,0,3,10,0,8,80,80,40,1",
             "[Events]",
             "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, "
             "Effect, Text"]
     body = []
+    n_dlgs = 0
     if part_title:
         _title = part_title.replace("{", "(").replace("}", ")")
         _col = f"{{\\c&H{title_color}&}}" if title_color else ""
@@ -2913,9 +3252,23 @@ def _ass_captions(segs, start: float, spd: float, wins, b_eff: float,
     if hook_text and hook_pos > 0:
         _hk = (hook_text.replace("{", "(").replace("}", ")")
                .replace("\\", "/"))
-        body.append("Dialogue: 0,0:00:00.00,9:59:59.00,HookTop,,0,0,0,,"
-                    f"{{\\an8\\pos(540,{int(hook_pos)})}}" + _hk)
-    n_dlgs = 0
+        # под окнами баннера хук не показываем: рисуем его отдельными
+        # репликами на все «видимые» промежутки итогового таймлайна
+        _cur, _spans = 0.0, []
+        for _a, _b, _c in sorted(wins):
+            if float(_a) - 0.05 > _cur:
+                _spans.append((_cur, float(_a) - 0.05))
+            _cur = max(_cur, float(_b) + 0.05)
+        _spans.append((_cur, 35999.0))
+        for _a, _b in _spans:
+            if _b - _a < 0.3:
+                continue
+            # снизу — сплошная белая плашка, сверху — текст с чёрной обводкой
+            body.append(f"Dialogue: 0,{_ts(_a)},{_ts(_b)},HookPlate,,0,0,0,,"
+                        f"{{\\an8\\pos(540,{int(hook_pos)})}}" + _hk)
+            body.append(f"Dialogue: 0,{_ts(_a)},{_ts(_b)},HookTop,,0,0,0,,"
+                        f"{{\\an8\\pos(540,{int(hook_pos)})}}" + _hk)
+            n_dlgs += 1
     dlgs = []
     for s in segs:
         ws = [w for w in (s.get("words") or [])
@@ -3214,14 +3567,14 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
                       progress=None, antidetect: bool = False,
                       mirror: bool = False, gameplay: str | None = None,
                       banner: bool = True, banner_path: str | None = None,
-                      max_total: float | None = None):
+                      max_total: float | None = None, bgm: str | None = None,
+                      hook: str = ""):
     """Вертикаль 1080x1920: верх 40% — сериал (кроп за лицом по 2с / центр),
     низ 60% — геймплей (закольцован, немой). Сабы ASS с караоке у шва.
     Звук — только из сериала. Сборка одним графом ffmpeg (без покадрового цикла)."""
     import cv2
     import random
-    gp = (gameplay if gameplay and os.path.exists(gameplay) else
-          ensure_gameplay(gameplay if gameplay in GAMEPLAYS else "subway"))
+    gp = resolve_gameplay(gameplay) or ensure_gameplay("subway")
     if not gp or not os.path.exists(gp):
         raise RuntimeError("нет геймплея — положи gameplay/subway.mp4")
     start, end = float(moment["start"]), float(moment["end"])
@@ -3357,8 +3710,13 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
         fc.append("[vtop0]null[vtop]")
     # --- низ: геймплей кольцом. Случайный флип низа у каждого клипа:
     # одинаковый subway сверху разных моментов даёт разный низ-хеш.
+    # Wall Kickers не зеркалим: подсказки уровня («Hold to Jump Higher»)
+    # при hflip выглядят перевёрнутым текстом.
     # Белую браузерную полосу (poki) режем заранее по детекту. ---
-    _gflip = ",hflip" if random.random() < 0.5 else ""
+    if "wall_kicker" in os.path.basename(gp).lower():
+        _gflip = ""
+    else:
+        _gflip = ",hflip" if random.random() < 0.5 else ""
     _gbar = _gameplay_bar(gp)
     _gpre = f"crop=iw:ih-{_gbar}:0:0," if _gbar else ""
     fc.append(f"[1:v]fps=30{_gflip},{_gpre}scale=1080:1152:flags=lanczos:"
@@ -3430,10 +3788,14 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
     fc.append(f"{vlink}hqdn3d=5:4:3:3,unsharp=5:5:0.5:5:5:0.0{vf_ad}[vqual]")
     asspath = out + ".ass"
     ass_ok = False
-    if captions:
+    _hook = str(hook or "").strip()
+    if captions or _hook:
         try:
-            ass_ok = _ass_captions(segs, start, spd, wins, b_eff, asspath,
-                                   str(moment.get("part_title") or ""))
+            ass_ok = _ass_captions(
+                segs if captions else [], start, spd, wins, b_eff, asspath,
+                str(moment.get("part_title") or ""),
+                hook_text=_hook, hook_pos=TOP_H + 40, hook_size=84,
+                hook_color="00FFFF")
         except Exception:
             ass_ok = False
     if ass_ok:
@@ -3491,12 +3853,28 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
         aorder2.append(aorder[-1])
         aorder = aorder2
         fc.append("".join(aorder) + f"concat=n={len(aorder)}:v=0:a=1[acat]")
-        fc.append(f"[acat]{_LOUDNORM},volume={random.uniform(0.95, 1.05):.3f},"
-                  f"{_TIKTOK_AF_TAIL}[aout]")
+        fc.append(f"[acat]{_LOUDNORM},volume={random.uniform(0.95, 1.05):.3f}[avoice]")
+    elif has_src_a:
+        fc.append(f"[aa]{_LOUDNORM},volume={random.uniform(0.95, 1.05):.3f}[avoice]")
+    # --- фон под нарезкой: свой трек/офсет/тёмбр на каждый рендер.
+    # Голос сериала остаётся главным, фон тихий, но отпечаток аудио
+    # у каждого клипа пачки свой (Content ID не матчит фон один-в-один). ---
+    use_bgm = bool(bgm) and os.path.exists(bgm)
+    bargs = []
+    if use_bgm:
+        # под баннером фон молчит (звук баннера играет сам по себе)
+        _bwin = [(oA, oB) for (oA, oB, _cA) in wins] if use_banner else None
+        bargs, baf = _bgm_args(bgm, out_dur, mute=_bwin)
+        bgi = 3 if use_banner else 2
+        fc.append(f"[{bgi}:a]{baf}[bg0]")
+        if has_src_a:
+            fc.append(f"[avoice][bg0]amix=inputs=2:duration=first:normalize=0,"
+                      f"alimiter=limit=0.95,{_TIKTOK_AF_TAIL}[aout]")
+        else:
+            fc.append(f"[bg0]{_TIKTOK_AF_TAIL}[aout]")
         amap = ["-map", "[aout]"]
     elif has_src_a:
-        fc.append(f"[aa]{_LOUDNORM},volume={random.uniform(0.95, 1.05):.3f},"
-                  f"{_TIKTOK_AF_TAIL}[aout]")
+        fc.append(f"[avoice]{_TIKTOK_AF_TAIL}[aout]")
         amap = ["-map", "[aout]"]
     else:
         amap = []
@@ -3506,6 +3884,8 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
            "-i", gp]
     if use_banner:
         cmd += ["-i", bpath]
+    if bargs:
+        cmd += bargs
     cmd += ["-filter_complex", ";".join(fc),
             "-map", "[vout]"] + amap + _rand_meta() + _video_codec_args(hq=True) + [
                 "-pix_fmt", "yuv420p", "-r", "30",
@@ -5241,7 +5621,8 @@ def compute_parts(segs, min_len: float = 45.0, max_len: float = 59.0):
 
 def render_blur9(src: str, moment: dict, segs, out: str,
                  captions: bool = True, progress=None,
-                 antidetect: bool = False, mirror: bool = False):
+                 antidetect: bool = False, mirror: bool = False,
+                 bgm: str | None = None):
     """Блюр 9:16 под кражу у конкурентов: фон — блюр копия кадра,
     центр — резкий fit (края с вотермарками режутся), зеркало + зум +
     сдвиг цвета против Content ID. Сабы наши, звук оригинала."""
@@ -5266,21 +5647,36 @@ def render_blur9(src: str, moment: dict, segs, out: str,
            "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "1080x1920",
            "-r", str(fps),
            "-i", "pipe:0",
-           "-ss", str(start), "-t", str(round(dur, 2)), "-i", src,
-           "-map", "0:v", "-map", "1:a?"]
+           "-ss", str(start), "-t", str(round(dur, 2)), "-i", src]
     qvf = _quality_vf()
     if antidetect:
         vf, af = _antidetect_filters()
         qvf += "," + vf
-        cmd += ["-vf", qvf, "-af", _tiktok_af(
-            af, _LOUDNORM, f"volume={_brnd.uniform(0.95, 1.05):.3f}")]
+        voice_af = _tiktok_af(
+            af, _LOUDNORM, f"volume={_brnd.uniform(0.95, 1.05):.3f}")
     else:
         # always-on: лёгкий питч + громкость, иначе звук 1:1 с оригиналом
         _bk = _brnd.uniform(1.005, 1.012)
-        cmd += ["-vf", qvf, "-af", _tiktok_af(
+        voice_af = _tiktok_af(
             f"aresample=44100,asetrate=44100*{_bk:.4f},"
             f"aresample=44100,atempo={1 / _bk:.4f}",
-            _LOUDNORM, f"volume={_brnd.uniform(0.95, 1.05):.3f}")]
+            _LOUDNORM, f"volume={_brnd.uniform(0.95, 1.05):.3f}")
+    use_bgm = bool(bgm) and os.path.exists(bgm)
+    if use_bgm:
+        # фон под блюр-нарезкой: свой аудио-отпечаток на каждый рендер
+        bargs, baf = _bgm_args(bgm, dur)
+        cmd += bargs
+        if _has_audio_stream(src):
+            fc = (f"[1:a]{voice_af}[av];[2:a]{baf}[bg];"
+                  f"[av][bg]amix=inputs=2:duration=first:normalize=0,"
+                  f"alimiter=limit=0.95,{_TIKTOK_AF_TAIL}[aout]")
+        else:
+            fc = f"[2:a]{baf}[aout]"
+        cmd += ["-filter_complex", fc, "-map", "0:v", "-map", "[aout]",
+                "-vf", qvf]
+    else:
+        cmd += ["-map", "0:v", "-map", "1:a?", "-vf", qvf, "-af", voice_af]
+    cmd += _rand_meta()
     cmd += _video_codec_args(hq=True) + ["-pix_fmt", "yuv420p",
             *_AUDIO_OUT, "-movflags", "+faststart",
             "-t", str(round(dur, 2)), out]
@@ -5406,7 +5802,7 @@ def render_story_part(src: str, moment: dict, segs, out: str,
                       captions: bool = True, blur_subs: bool = True,
                       unique: bool = True, mirror: bool = False,
                       cta: bool = True, bgm: str | None = None,
-                      bgm_vol: float = 0.14, progress=None):
+                      bgm_vol: float = 0.14, hq: bool = False, progress=None):
     """Китайская история в TikTok-формате: ролик 4:3 по центру на блюр-фоне,
     кроп всегда с зумом за героем, китайские сабы снизу размыты, русские —
     под роликом. Звук — оригинальная русская озвучка, без перевода."""
@@ -5539,7 +5935,7 @@ def render_story_part(src: str, moment: dict, segs, out: str,
         fc = (f"[2:a]volume={bgm_vol:.3f},aresample=48000,"
               f"aformat=channel_layouts=stereo[aout]")
         cmd += ["-filter_complex", fc, "-map", "0:v", "-map", "[aout]"]
-    cmd += _video_codec_args(hq=False) + ["-pix_fmt", "yuv420p",
+    cmd += _video_codec_args(hq=hq) + ["-pix_fmt", "yuv420p",
             *_AUDIO_OUT, "-movflags", "+faststart",
             "-t", str(round(out_dur, 2))] + _rand_meta() + [out]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
@@ -5674,6 +6070,27 @@ def pick_story_music() -> str | None:
         return None
     pri = [c for c in cs if "fallen" in os.path.basename(c).lower()]
     return random.choice(pri or cs)
+
+
+_CLIP_MUSIC_BAG = {"bag": []}
+
+
+def pick_clip_music() -> str | None:
+    """Фон нарезок: один фиксированный трек на все клипы — тот самый,
+    что попал в «Момент 1» ручной пачки 19.10 (LAKEY INSPIRED — Better
+    Days). Никакой ротации: одинаковый фон везде, темп/офсет/тёмбр всё
+    равно рандомизируются в _bgm_args, а громкость вдвое ниже прежней.
+    Fallen Down зарезервирован за историями и сюда не попадает."""
+    cs = [c for c in list_story_music()
+          if "fallen" not in os.path.basename(c).lower()]
+    if not cs:
+        cs = list_story_music()
+    if not cs:
+        return None
+    for c in cs:
+        if os.path.basename(c).lower() == "lakey_better_days.m4a":
+            return c
+    return cs[0]
 
 
 def find_story_music() -> str | None:
@@ -5843,19 +6260,21 @@ def render_clip(src: str, moment: dict, segs, out: str, facetrack: bool = True,
                 captions: bool = True, progress=None, vmode: str = "face",
                 antidetect: bool = False, mirror: bool = False,
                 banner: bool = True, gameplay: str = "subway",
-                max_total: float | None = None, banner_path: str | None = None):
+                max_total: float | None = None, banner_path: str | None = None,
+                bgm: str | None = None, hook: str = ""):
     if vmode == "split":
         return render_split_clip(src, moment, segs, out, facetrack=facetrack,
                                  captions=captions, progress=progress,
                                  antidetect=antidetect, mirror=mirror,
                                  banner=banner, gameplay=gameplay,
                                  banner_path=banner_path,
-                                 max_total=max_total)
+                                 max_total=max_total, bgm=bgm, hook=hook)
     if vmode == "blur9":
         return render_blur9(src, moment, segs, out,
                             captions=captions, progress=progress,
-                            antidetect=antidetect, mirror=mirror)
+                            antidetect=antidetect, mirror=mirror, bgm=bgm)
     import cv2
+    import random as _rnd
     from PIL import Image, ImageDraw
     start, end = float(moment["start"]), float(moment["end"])
     cap = cv2.VideoCapture(src)
@@ -5877,22 +6296,38 @@ def render_clip(src: str, moment: dict, segs, out: str, facetrack: bool = True,
     cmd = [FFMPEG, "-y", "-v", "error",
            "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "1080x1920", "-r", str(fps),
            "-i", "pipe:0",
-           "-ss", str(start), "-t", str(round(dur, 2)), "-i", src,
-           "-map", "0:v", "-map", "1:a?"] + _rand_meta()
+           "-ss", str(start), "-t", str(round(dur, 2)), "-i", src]
     qvf = _quality_vf()
     if antidetect:
         vf, af = _antidetect_filters()
         qvf += "," + vf
-        cmd += ["-vf", qvf, "-af", _tiktok_af(
-            af, _LOUDNORM, f"volume={_rnd.uniform(0.95, 1.05):.3f}")]
+        voice_af = _tiktok_af(
+            af, _LOUDNORM, f"volume={_rnd.uniform(0.95, 1.05):.3f}")
     else:
         # Базовый always-on слой: даже без чекбокса звук чуть отличается
         # от оригинала (иначе Content ID по аудио = 0 просмотров).
         _ck = _rnd.uniform(1.005, 1.012)
-        cmd += ["-vf", qvf, "-af", _tiktok_af(
+        voice_af = _tiktok_af(
             f"aresample=44100,asetrate=44100*{_ck:.4f},"
             f"aresample=44100,atempo={1 / _ck:.4f}",
-            _LOUDNORM, f"volume={_rnd.uniform(0.95, 1.05):.3f}")]
+            _LOUDNORM, f"volume={_rnd.uniform(0.95, 1.05):.3f}")
+    use_bgm = bool(bgm) and os.path.exists(bgm)
+    has_src_a = _has_audio_stream(src) if use_bgm else True
+    if use_bgm:
+        # фон под нарезкой: глушит «голый» звук оригинала в отпечатке платформы
+        bargs, baf = _bgm_args(bgm, dur)
+        cmd += bargs
+        if has_src_a:
+            fc = (f"[1:a]{voice_af}[av];[2:a]{baf}[bg];"
+                  f"[av][bg]amix=inputs=2:duration=first:normalize=0,"
+                  f"alimiter=limit=0.95,{_TIKTOK_AF_TAIL}[aout]")
+        else:
+            fc = f"[2:a]{baf}[aout]"
+        cmd += ["-filter_complex", fc, "-map", "0:v", "-map", "[aout]",
+                "-vf", qvf]
+    else:
+        cmd += ["-map", "0:v", "-map", "1:a?", "-vf", qvf, "-af", voice_af]
+    cmd += _rand_meta()
     cmd += _video_codec_args(hq=True) + ["-pix_fmt", "yuv420p",
             *_AUDIO_OUT, "-movflags", "+faststart",
             "-t", str(round(dur, 2)), out]
@@ -5901,7 +6336,6 @@ def render_clip(src: str, moment: dict, segs, out: str, facetrack: bool = True,
     _warm_start(cap)  # первый кадр не чёрный
     total = max(int(round(dur * fps)), 1)
     last = None
-    import random as _rnd
     zm = _rnd.uniform(1.03, 1.06) if antidetect else _rnd.uniform(1.01, 1.02)
     try:
         for k in range(total):
