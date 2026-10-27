@@ -24,6 +24,47 @@ app = Flask(__name__)
 BASE = os.path.dirname(os.path.abspath(__file__))
 OUT_DIR = os.path.join(BASE, "shorts")
 TMP_DIR = os.path.join(BASE, "tmp")
+
+
+def _safe_stem(name: str) -> str:
+    s = re.sub(r"[^\w\-. ]+", "", str(name or ""), flags=re.UNICODE)
+    s = re.sub(r"\s+", " ", s).strip(" ._-")
+    if s.lower().endswith(".mp4"):
+        s = s[:-4].rstrip(" ._-")
+    return s[:60]
+
+
+def _clip_filename(job_id: str, idx: int, out_name: str = "") -> str:
+    stem = _safe_stem(out_name)
+    if stem:
+        return f"{stem}_{job_id}_{int(idx) + 1}.mp4"
+    return f"{job_id}_{int(idx) + 1}.mp4"
+
+
+def _clip_path(job_id: str, idx: int):
+    canonical = os.path.join(OUT_DIR, f"{job_id}_{int(idx) + 1}.mp4")
+    if os.path.isfile(canonical):
+        return canonical
+    suffix = f"_{job_id}_{int(idx) + 1}.mp4"
+    try:
+        names = os.listdir(OUT_DIR)
+    except OSError:
+        return None
+    found = [os.path.join(OUT_DIR, f) for f in names
+             if f.endswith(suffix) and os.path.isfile(os.path.join(OUT_DIR, f))]
+    return max(found, key=os.path.getmtime) if found else None
+
+
+def _job_clip_files(job_id: str) -> list[str]:
+    try:
+        names = os.listdir(OUT_DIR)
+    except OSError:
+        return []
+    pat = re.compile(rf"(?:^|_){re.escape(job_id)}_\d+(?:v\d+)?\.mp4$")
+    return sorted(f for f in names
+                  if pat.search(f) and os.path.isfile(os.path.join(OUT_DIR, f)))
+
+
 LEGACY_DIR = os.path.join(BASE, "legacy")
 THUMB_DIR = os.path.join(BASE, "thumbs")
 os.makedirs(OUT_DIR, exist_ok=True)
@@ -585,7 +626,7 @@ def run_manual_job(job_id: str, url: str, opts: dict, stamps: list, prog) -> lis
         mm = {"start": 0.0, "end": dur, "score": 100, "title": title_m,
               "verdict": f"Вручную {_fmt_ts(s)}–{_fmt_ts(e)}",
               "hook": title_m[:40]}
-        out = os.path.join(OUT_DIR, f"{job_id}_{i + 1}.mp4")
+        out = os.path.join(OUT_DIR, _clip_filename(job_id, i, opts.get("out_name", "")))
         if mode == "fast":
             ac.fast_cut(stage_in, {"start": 0.0, "end": dur}, out)
         else:
@@ -607,6 +648,7 @@ def run_manual_job(job_id: str, url: str, opts: dict, stamps: list, prog) -> lis
             "i": i, "title": title_m, "score": 100,
             "verdict": f"Вручную {_fmt_ts(s)}–{_fmt_ts(e)}",
             "hook": title_m[:40], "story": 0, "part": 0, "of": 1,
+            "file": os.path.basename(out),
             "dur": ac.media_duration(out) or round(dur, 1),
             "size": os.path.getsize(out) if os.path.exists(out) else 0})
         _pp(1.0)
@@ -815,7 +857,7 @@ def run_job(job_id: str, url: str, opts: dict):
 
         def one(i_m):
             i, m = i_m
-            out = os.path.join(OUT_DIR, f"{job_id}_{i + 1}.mp4")
+            out = os.path.join(OUT_DIR, _clip_filename(job_id, i, opts.get("out_name", "")))
             total_n = len(moments)
 
             def _pp(p, _i=i):
@@ -908,6 +950,7 @@ def run_job(job_id: str, url: str, opts: dict):
                     "hook": str(m.get("hook", ""))[:40],
                     "story": int(m.get("story", 0)), "part": int(m.get("part", 0)),
                     "of": int(m.get("of", 1)),
+                    "file": os.path.basename(out),
                     "dur": ac.media_duration(out) or round(float(m["end"]) - float(m["start"]), 1),
                     "size": os.path.getsize(out)}
             if not extra:
@@ -917,6 +960,7 @@ def run_job(job_id: str, url: str, opts: dict):
                 d = dict(base)
                 d["i"] = i + _vi / 10.0
                 d["title"] = base["title"] + f" · вар.{_vi + 1}"
+                d["file"] = os.path.basename(_o)
                 d["dur"] = ac.media_duration(_o) or base["dur"]
                 try:
                     d["size"] = os.path.getsize(_o)
@@ -989,6 +1033,7 @@ def api_start():
         if k not in data or data[k] in ("", None):
             data[k] = cfg.get(k)
     data["gameplay"] = ac.gameplay_value(data.get("gameplay"))
+    out_name = _safe_stem(data.get("out_name"))
     if story:
         kind = str(data.get("story_kind") or "parts")
         if kind not in ("parts", "moments"):
@@ -1042,6 +1087,7 @@ def api_start():
             "banner": bool(data.get("banner", True)),
             "banner_path": resolve_banner(data.get("banner_file", "")),
             "gameplay": data["gameplay"],
+            "out_name": out_name,
             "hook": str(data.get("hook") or "").strip()[:120],
             "tags": _parse_tag_ids(data.get("tags")),
             "asr_model": data.get("asr_model", "giga") if data.get("asr_model") in ("base", "small", "giga", "whisper-large-v3") else "giga",
@@ -1166,7 +1212,7 @@ def run_twitch_job(job_id: str, url: str, opts: dict):
 
         def one(i_m):
             i, m = i_m
-            out = os.path.join(OUT_DIR, f"{job_id}_{i + 1}.mp4")
+            out = os.path.join(OUT_DIR, _clip_filename(job_id, i, opts.get("out_name", "")))
             total_n = len(moments)
 
             def _pp(p, _i=i):
@@ -1199,6 +1245,7 @@ def run_twitch_job(job_id: str, url: str, opts: dict):
                     "verdict": str(m.get("verdict", ""))[:300],
                     "hook": str(m.get("hook", "") or m.get("title", ""))[:40],
                     "story": 0, "part": 0, "of": 1,
+                    "file": os.path.basename(out),
                     "dur": ac.media_duration(out) or round(float(m["end"]) - float(m["start"]), 1),
                     "size": os.path.getsize(out)}
 
@@ -1366,14 +1413,13 @@ def api_job_delete(job_id):
         jobs.pop(job_id, None)
     removed = 0
     try:
-        for name in os.listdir(OUT_DIR):
-            if name.startswith(job_id + "_") and name.endswith(".mp4"):
-                try:
-                    os.remove(os.path.join(OUT_DIR, name))
-                    removed += 1
-                except OSError:
-                    pass
-                _drop_thumb("short", name)
+        for name in _job_clip_files(job_id):
+            try:
+                os.remove(os.path.join(OUT_DIR, name))
+                removed += 1
+            except OSError:
+                pass
+            _drop_thumb("short", name)
     except Exception:
         pass
     try:
@@ -1395,13 +1441,17 @@ def api_job_delete(job_id):
 
 @app.get("/api/clip/<job_id>/<int:idx>")
 def api_clip(job_id, idx):
-    p = os.path.join(OUT_DIR, f"{job_id}_{idx + 1}.mp4")
-    if not os.path.exists(p):
+    p = _clip_path(job_id, idx)
+    if not p:
         return jsonify({"ok": False}), 404
+    base = os.path.basename(p)
     with lock:
         j = jobs.get(job_id, {})
     clips = j.get("clips", [])
-    name = (clips[idx]["title"][:50] + ".mp4") if idx < len(clips) else f"short{idx + 1}.mp4"
+    if f"_{job_id}_" in base:
+        name = base
+    else:
+        name = (clips[idx]["title"][:50] + ".mp4") if idx < len(clips) else f"short{idx + 1}.mp4"
     return send_file(p, as_attachment=True, download_name=name)
 
 
@@ -1435,10 +1485,10 @@ def api_clip_hide(job_id, idx):
 @app.delete("/api/clip/<job_id>/<int:idx>")
 def api_clip_delete(job_id, idx):
     """Удалить один готовый клип: файл, постер и запись в истории."""
-    name = f"{job_id}_{idx + 1}.mp4"
+    p = _clip_path(job_id, idx)
+    name = os.path.basename(p) if p else f"{job_id}_{idx + 1}.mp4"
     try:
-        p = os.path.join(OUT_DIR, name)
-        if os.path.exists(p):
+        if p and os.path.exists(p):
             os.remove(p)
     except OSError:
         pass
@@ -1793,7 +1843,9 @@ def api_tag_clips(tid):
                 " ORDER BY COALESCE(j.finished,0) DESC, cl.score DESC LIMIT 300",
                 (tid,)).fetchall()
             for r in rows:
+                fp = _clip_path(r["job_id"], r["idx"])
                 items.append({"job_id": r["job_id"], "i": r["idx"],
+                              "file": os.path.basename(fp) if fp else "",
                               "title": r["title"] or "", "score": r["score"] or 0,
                               "dur": r["dur"] or 0, "size": r["size"] or 0,
                               "story": r["story"] or 0, "part": r["part"] or 0,
@@ -1879,8 +1931,8 @@ def api_tag_zip(tid):
     base = _safe(t["name"]) or f"tag_{tid}"
     entries = []
     for r in selected:
-        p = os.path.join(OUT_DIR, f"{r['job_id']}_{int(r['idx']) + 1}.mp4")
-        if os.path.isfile(p):
+        p = _clip_path(r["job_id"], r["idx"])
+        if p and os.path.isfile(p):
             entries.append((p, r, os.path.getmtime(p), os.path.getsize(p)))
     if not entries:
         return jsonify({"ok": False,
@@ -2642,8 +2694,8 @@ def api_tiktok_check(job_id, idx):
     import re
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", job_id or ""):
         return jsonify({"ok": False}), 404
-    p = os.path.join(OUT_DIR, f"{job_id}_{idx + 1}.mp4")
-    if not os.path.exists(p):
+    p = _clip_path(job_id, idx)
+    if not p:
         return jsonify({"ok": False, "error": "клип не найден"}), 404
     try:
         res = ac.tiktok_safety_check(p)
@@ -2744,13 +2796,7 @@ def api_zip(job_id):
     import zipfile
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", job_id or ""):
         return jsonify({"ok": False}), 404
-    try:
-        files = sorted(
-            f for f in os.listdir(OUT_DIR)
-            if f.startswith(job_id + "_") and f.endswith(".mp4")
-            and os.path.isfile(os.path.join(OUT_DIR, f)))
-    except OSError:
-        files = []
+    files = _job_clip_files(job_id)
     if not files:
         return jsonify({"ok": False, "error": "клипы не найдены"}), 404
     zp = os.path.join(TMP_DIR, f"all_{job_id}.zip")
@@ -2796,10 +2842,7 @@ def api_zip_multi():
     made, newest = [], 0
     try:
         for job_id in ids:
-            files = sorted(
-                f for f in os.listdir(OUT_DIR)
-                if f.startswith(job_id + "_") and f.endswith(".mp4")
-                and os.path.isfile(os.path.join(OUT_DIR, f)))
+            files = _job_clip_files(job_id)
             if not files:
                 continue
             title = job_id
@@ -2846,9 +2889,9 @@ def api_debug_stacks():
 
 
 def _clip_id(name: str):
-    """job_id, idx из имени файла <job>_<i>.mp4."""
+    """job_id, idx из <job>_<i>.mp4 или <название>_<job>_<i>.mp4."""
     import re
-    m = re.fullmatch(r"([A-Za-z0-9_-]{1,32})_(\d+)\.mp4", name or "")
+    m = re.fullmatch(r"(?:.*_)?([A-Za-z0-9_-]{1,32})_(\d+)\.mp4", name or "")
     return (m.group(1), int(m.group(2)) - 1) if m else (None, None)
 
 
@@ -3153,7 +3196,9 @@ def api_library():
         try:
             for r in c.execute(
                     "SELECT job_id, idx FROM clips WHERE hidden=1").fetchall():
-                hidden.add(f"{r['job_id']}_{r['idx'] + 1}.mp4")
+                p = _clip_path(r["job_id"], r["idx"])
+                hidden.add(os.path.basename(p) if p
+                           else f"{r['job_id']}_{r['idx'] + 1}.mp4")
         finally:
             c.close()
     except Exception:
@@ -3561,6 +3606,128 @@ def api_cs2():
     return jsonify({"ok": True, "id": jid})
 
 
+def _bnov_worker(jid: str, vpath: str, bpath: str, base: str,
+                 cleanup_b: bool = True, speed: float | None = None,
+                 force_key: bool | None = None):
+    """Своё видео + баннер (свой файл или из готовых): ИИ уникализирует
+    баннер, ускоряет (своё «х» или стандарт), вычитает хромакей,
+    ставит 95% непрозрачности и запускает ровно с середины видео."""
+
+    def prog(pct, stage="готовлю…"):
+        st = UNIQ_JOBS.get(jid)
+        if st is not None:
+            st.update(pct=int(pct), stage=stage)
+
+    try:
+        out = os.path.join(UNIQ_OUT, f"{jid}_{base}_banner.mp4")
+        info = ac.overlay_banner_mid(vpath, out, banner_path=bpath,
+                                     progress=prog, speed=speed,
+                                     force_key=force_key)
+        st = UNIQ_JOBS.get(jid)
+        if st is not None:
+            st.update(status="done", pct=100, stage="готово", title=base,
+                      url="/dluniq/" + os.path.basename(out),
+                      size=os.path.getsize(out),
+                      removed=[f"видео {info['dur']}с -> баннер ровно с {info['mid']}с",
+                               f"баннер ускорен x{info['speed']} со звуком, без обрезок",
+                               "баннер до краёв экрана, по центру",
+                               "видео на паузе под баннер",
+                               "без прозрачности",
+                               "видео баннера уникализировано"])
+    except Exception as e:
+        st = UNIQ_JOBS.get(jid)
+        if st is not None:
+            st.update(status="error", error=str(e)[:300])
+    finally:
+        for p, do in ((vpath, True), (bpath, cleanup_b)):
+            try:
+                # баннер из assets — общий файл, не удаляем
+                if do and p and os.path.exists(p):
+                    os.remove(p)
+            except OSError:
+                pass
+
+
+@app.post("/api/banner-ov")
+def api_banner_ov():
+    """Загрузка своего видео + баннер (файлом или из готовых) ->
+    оверлей с середины. speed — своё ускорение «х», key=1 — силой
+    вычесть зелёный хромакей."""
+    import re
+    fv = request.files.get("file")
+    fb = request.files.get("banner")
+    if fv is None or not (fv.filename or ""):
+        return jsonify({"ok": False, "error": "Приложи видеофайл"}), 400
+    form = request.form or {}
+    vname = re.sub(r"[^\w\-. ]+", "", (fv.filename or "").strip())[:60] or "video.mp4"
+    if "." not in vname or vname.rsplit(".", 1)[1].lower() not in (
+            "mp4", "mov", "mkv", "webm", "m4v"):
+        return jsonify({"ok": False, "error": "Нужно видео: mp4/mov/mkv/webm"}), 400
+    jid = uuid.uuid4().hex[:8]
+    vpath = os.path.join(UNIQ_IN, f"{jid}_v_{vname}")
+    try:
+        fv.save(vpath)
+    except Exception:
+        return jsonify({"ok": False, "error": "Не сохранилось"}), 400
+    try:
+        if os.path.getsize(vpath) > 800 * 1024 * 1024:
+            raise OSError("Файл больше 800 МБ")
+    except OSError as e:
+        try:
+            if os.path.exists(vpath):
+                os.remove(vpath)
+        except OSError:
+            pass
+        return jsonify({"ok": False, "error": str(e)}), 400
+    # баннер: свой файл важнее, иначе — выбранный из готовых (assets)
+    cleanup_b = False
+    if fb is not None and (fb.filename or "").strip():
+        bname = re.sub(r"[^\w\-. ]+", "", (fb.filename or "").strip())[:60] or "banner.mp4"
+        if "." not in bname or bname.rsplit(".", 1)[1].lower() not in (
+                "mp4", "mov", "mkv", "webm", "m4v"):
+            try:
+                os.remove(vpath)
+            except OSError:
+                pass
+            return jsonify({"ok": False, "error": "Баннер: нужно видео mp4/mov/mkv/webm"}), 400
+        bpath = os.path.join(UNIQ_IN, f"{jid}_b_{bname}")
+        try:
+            fb.save(bpath)
+        except Exception:
+            try:
+                os.remove(vpath)
+            except OSError:
+                pass
+            return jsonify({"ok": False, "error": "Баннер не сохранился"}), 400
+        try:
+            if os.path.getsize(bpath) > 800 * 1024 * 1024:
+                raise OSError("Баннер больше 800 МБ")
+        except OSError as e:
+            for p in (vpath, bpath):
+                try:
+                    if os.path.exists(p):
+                        os.remove(p)
+                except OSError:
+                    pass
+            return jsonify({"ok": False, "error": str(e)}), 400
+        cleanup_b = True
+    else:
+        bpath = resolve_banner(form.get("banner_file", ""))  # None = дефолтный
+    try:
+        speed = float(form.get("speed"))
+    except (TypeError, ValueError):
+        speed = None
+    force_key = {"1": True, "0": False}.get((form.get("key") or "").strip())
+    base = (vname.rsplit(".", 1)[0] or "video")[:40]
+    UNIQ_JOBS[jid] = {"id": jid, "base": base, "kind": "banner-ov",
+                      "status": "work", "pct": 0, "stage": "старт…",
+                      "started": time.time()}
+    threading.Thread(target=_bnov_worker,
+                     args=(jid, vpath, bpath, base, cleanup_b, speed, force_key),
+                     daemon=True).start()
+    return jsonify({"ok": True, "id": jid})
+
+
 @app.get("/api/uniq/<jid>")
 def api_uniq_status(jid):
     st = UNIQ_JOBS.get(jid)
@@ -3757,7 +3924,9 @@ def list_banners():
             green = bool(ac._banner_green(p))
         except Exception:
             green = False
-        if green:
+        if ac._banner_shard(p):
+            name += " · хромакей · 90% · 1.2x"
+        elif green:
             name += " · хромакей · 95%"
         elif ac._banner_trading(p):
             name += " · 70%"
@@ -3773,7 +3942,7 @@ def list_banners():
 
 
 def resolve_banner(name):
-    """Имя файла -> путь в assets или None (= дефолтный Мусордроп)."""
+    """Имя файла -> путь в assets или None (= RubUP по умолчанию)."""
     base = os.path.basename(str(name or "").strip())
     if not base or ".." in base or "/" in base:
         return None

@@ -493,6 +493,11 @@
             <select id="domain"><option value="auto" selected>Авто: сериал / игра</option><option value="series">Сериал / шоу / блог</option><option value="streams">Игра / стрим / катка</option></select></div>
         </div>
         <div style="margin-top:10px">
+          <label class="lbl" for="outName">Название файлов клипов</label>
+          <input id="outName" type="text" maxlength="60" autocomplete="off" placeholder="Например: Универ — одно на всю пачку">
+          <div class="dim" style="margin-top:5px">Одно название на всю пачку; номер клипа добавится автоматически, файлы не перезапишутся.</div>
+        </div>
+        <div style="margin-top:10px">
           <label class="lbl" for="hookText">Хук на геймплее (жёлтым, под верхним видео)</label>
           <input id="hookText" type="text" maxlength="120" autocomplete="off" placeholder="Например: НЕ ОБОРАЧИВАЙСЯ…">
         </div>
@@ -706,6 +711,28 @@
       <div id="uqLib"><div class="empty">Пока пусто</div></div>
     </section>
 
+    <!-- BANNER ON VIDEO -->
+    <section class="view" id="v-bnov">
+      <button class="btn sm ghost backbtn" data-go="more">← Остальное</button>
+      <div class="card">
+        <div class="step"><b>01</b><span>Видео и баннер</span></div>
+        <label class="lbl" for="bnVid">Видео (mp4/mov/mkv/webm)</label>
+        <input id="bnVid" type="file" accept="video/*" style="padding:10px 12px">
+        <label class="lbl" for="bnBanSel">Баннер — выбери из готовых</label>
+        <select id="bnBanSel"><option value="">По умолчанию</option></select>
+        <label class="lbl" for="bnBan">…или вставь свой файл баннера (файл важнее списка)</label>
+        <input id="bnBan" type="file" accept="video/*" style="padding:10px 12px">
+        <label class="lbl" for="bnSpeed">Ускорение баннера (x)</label>
+        <input id="bnSpeed" type="number" step="0.1" min="1" max="8" value="1.4" inputmode="decimal">
+        <label class="chk"><input type="checkbox" id="bnKeyForce"> Силой убрать зелёный хромакей (если авто не распознал и остался зелёным)</label>
+        <div class="dim" style="margin-top:6px">ИИ сделает сам: уникализирует именно видео баннера (зум, проезд камеры, зерно, питч — без единой обрезки, весь хронометраж сохраняется), ускорит на указанное «х» (пусто — стандарт 1.4) и вычтет зелёный хромакей. Баннер всегда растянут до краёв экрана и стоит ровно по центру (горизонтальные — во всю ширину, вертикальные — во всю высоту). Стартует ровно с середины видео: 30с → на 15-й секунде. На время баннера видео встаёт на паузу (стоп-кадр), баннер играет ЦЕЛИКОМ со своим звуком и без прозрачности, потом видео продолжается. Картинка и звук самого видео — как были.</div>
+        <div style="margin-top:14px"><button class="btn" id="bnGo">Уникализировать баннер и наложить</button></div>
+        <div id="bnResult" style="margin-top:10px"></div>
+      </div>
+      <h2>Готовые</h2>
+      <div id="bnLib"><div class="empty">Пока пусто</div></div>
+    </section>
+
     <!-- MORE -->
     <section class="view" id="v-more">
       <div class="moregrid">
@@ -732,6 +759,11 @@
         <button class="morecard" data-go="uniq">
           <span class="mi"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"/><path d="M19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9L19 15z"/></svg></span>
           <span class="mt"><b>Уникализатор</b><span>Перезалив: баннер, зум и уникализация звука</span></span>
+          <span class="arr">→</span>
+        </button>
+        <button class="morecard" data-go="bnov">
+          <span class="mi"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="3"/><rect x="12" y="12" width="7" height="5" rx="1.5" fill="currentColor" stroke="none"/></svg></span>
+          <span class="mt"><b>Баннер на видео</b><span>Свой баннер: ИИ уникализирует, ускоряет и ставит с середины</span></span>
           <span class="arr">→</span>
         </button>
       </div>
@@ -823,8 +855,8 @@
 
 <script>
 const $=id=>document.getElementById(id);
-const TITLES={dashboard:'Дашборд',cut:'Нарезка',twitch:'Twitch',anime:'Истории',clips:'Клипы',tags:'Теги',more:'Остальное',analytics:'Аналитика',uniq:'Уникализатор',history:'История',settings:'Настройки'};
-const SUBS={dashboard:'пачка вертикальных шортсов из серий',cut:'ссылки → сценки → серии',twitch:'стримы: вебка сверху, катка снизу',anime:'китайские страшилки → части 3–4 мин на обрывах',clips:'готовое с постерами и скором',tags:'разделяй клипы по тематикам, лимитам и аккаунтам',more:'клипы, история и остальные разделы',analytics:'TikTok: просмотры, подписчики и все видео',uniq:'залил видео → получил уникальное',history:'все запуски и их движки',settings:'ключи, дефолты, воркеры'};
+const TITLES={dashboard:'Дашборд',cut:'Нарезка',twitch:'Twitch',anime:'Истории',clips:'Клипы',tags:'Теги',more:'Остальное',analytics:'Аналитика',uniq:'Уникализатор',bnov:'Баннер на видео',history:'История',settings:'Настройки'};
+const SUBS={dashboard:'пачка вертикальных шортсов из серий',cut:'ссылки → сценки → серии',twitch:'стримы: вебка сверху, катка снизу',anime:'китайские страшилки → части 3–4 мин на обрывах',clips:'готовое с постерами и скором',tags:'разделяй клипы по тематикам, лимитам и аккаунтам',more:'клипы, история и остальные разделы',analytics:'TikTok: просмотры, подписчики и все видео',uniq:'залил видео → получил уникальное',bnov:'свой баннер: ИИ уникализирует, ускоряет и ставит с середины',history:'все запуски и их движки',settings:'ключи, дефолты, воркеры'};
 let SETTINGS={};
 let live=new Map();
 let HIST=[];
@@ -835,7 +867,7 @@ function ago(t){const d=(Date.now()/1000-t);if(d<60)return 'только что'
 function esc(s){return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 
 function show(v){
-  const navV=['twitch','analytics','uniq','clips','history'].includes(v)?'more':v;
+  const navV=['twitch','analytics','uniq','bnov','clips','history'].includes(v)?'more':v;
   document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('on',b.dataset.v===navV));
   document.querySelectorAll('section.view').forEach(s=>s.classList.toggle('on',s.id==='v-'+v));
   $('viewTitle').textContent=TITLES[v]||v;
@@ -847,6 +879,7 @@ function show(v){
   if(v==='history')loadHistory();
   if(v==='settings'){loadGameplays();loadSettings();loadLearn();}
   if(v==='uniq'){loadUniq();loadBanners();}
+  if(v==='bnov'){loadUniq('bnLib');loadBanners();}
   if(v==='twitch'){fillKeys();loadBanners();}
   if(v==='anime'){fillKeys();loadBanners();}
   if(v==='cut'){loadBanners();loadGameplays();}
@@ -855,6 +888,7 @@ document.querySelectorAll('#nav button').forEach(b=>b.onclick=()=>show(b.dataset
 document.querySelectorAll('[data-go]').forEach(b=>b.onclick=()=>show(b.dataset.go));
 
 function doneText(s){return 'Готово: '+(s.clips||[]).length+' клипов'+(s.scorer==='drex'?' · DREX AI':s.scorer==='gemini'?' · Gemini AI':s.scorer==='manual'?' · вручную':' · эвристика');}
+function clipFileName(id,c){return c.file||id+'_'+(c.i+1)+'.mp4';}
 function fillClips(t,id,s){
   if(!t.box)return;
   t.box.innerHTML='';
@@ -866,14 +900,15 @@ function fillClips(t,id,s){
     if(c.verdict)d.querySelector('.cv').innerHTML='<b>AI:</b> '+esc(c.verdict);
     d.querySelector('.cs').textContent=c.dur+' сек · '+fmtSize(c.size);
     paintTagChips(d.querySelector('.tgs'),c.tags||[]);
+    const fn=clipFileName(id,c);
     d.querySelector('video').src='/api/clip/'+id+'/'+c.i;
-    d.querySelector('video').poster='/api/thumb/short/'+id+'_'+(c.i+1)+'.mp4';
+    d.querySelector('video').poster='/api/thumb/short/'+encodeURIComponent(fn);
     const links=d.querySelectorAll('.row a');
     links[0].href='/api/clip/'+id+'/'+c.i;
-    links[1].href='/api/thumb/short/'+id+'_'+(c.i+1)+'.mp4';
+    links[1].href='/api/thumb/short/'+encodeURIComponent(fn);
     links[1].setAttribute('download','');
     const bs=d.querySelectorAll('.row button');
-    bs[0].onclick=()=>copyCaption(c,id+'_'+(c.i+1)+'.mp4');
+    bs[0].onclick=()=>copyCaption(c,fn);
     if(bs[1])bs[1].onclick=()=>openTagModal(id,c.i,s,c,d);
     if(bs[2])bs[2].onclick=()=>hideClip(id,c.i,d);
     if(bs[3])bs[3].onclick=()=>delClip(id,c.i,d);
@@ -978,7 +1013,7 @@ $('go').onclick=async ()=>{
         min_len:+$('lens').value.split('-')[0],max_len:+$('lens').value.split('-')[1],
         limit_min:+$('limit').value,
         captions:$('caps').checked&&mode!=='fast',facetrack:mode==='face'||mode==='split',
-        antidetect:$('anti').checked,mirror:$('mir').checked,banner:$('ban').checked,clip_music:$('clipMusic').checked,banner_file:$('banFile').value,asr_model:$('asd').value,gameplay:$('game').value,fast:mode==='fast',vmode:mode==='fast'?'blur':mode,domain:$('domain').value,
+        antidetect:$('anti').checked,mirror:$('mir').checked,banner:$('ban').checked,clip_music:$('clipMusic').checked,banner_file:$('banFile').value,asr_model:$('asd').value,gameplay:$('game').value,out_name:$('outName').value.trim(),fast:mode==='fast',vmode:mode==='fast'?'blur':mode,domain:$('domain').value,
         hook:$('hookText').value.trim(),
         tags:formTagIds('cutTags'),
         stamps:$('manualChk').checked?$('stamps').value:''})});
@@ -1172,7 +1207,7 @@ function makeCustom(id){
   sel._cs={sync};sync();
 }
 function refreshCustom(){document.querySelectorAll('select').forEach(s=>{if(s._cs)s._cs.sync();});}
-  ['want','game','lens','limit','mode','asd','sWant','sLens','sLimit','sVmode','sAsd','sGame','sW','twWant','twLens','twLimit','anMode','anWant','anLens','anVar','anLen','anLimit','banFile','twBanFile','uqBanFile','anBanFile'].forEach(makeCustom);
+  ['want','game','lens','limit','mode','asd','sWant','sLens','sLimit','sVmode','sAsd','sGame','sW','twWant','twLens','twLimit','anMode','anWant','anLens','anVar','anLen','anLimit','banFile','twBanFile','uqBanFile','anBanFile','bnBanSel'].forEach(makeCustom);
 
 /* ---------- клипы ---------- */
 let LIB=[];
@@ -1272,7 +1307,7 @@ function fmtDur(s){s=Math.round(+s||0);return Math.floor(s/60)+':'+String(s%60).
 function fmtViews(v){v=+v||0;if(v<0)return 'брак';if(v>=1e6)return (v/1e6).toFixed(1)+'M';if(v>=1e3)return (v/1e3).toFixed(1)+'K';return String(v);}
 function clipMeta(name){
   for(const it of HIST){
-    const m=/^([a-f0-9]{8})_(\d+)\.mp4$/.exec(name);
+    const m=/^(?:.*_)?([a-f0-9]{8})_(\d+)\.mp4$/.exec(name);
     if(m&&m[1]===it.id){
       const c=(it.clips||[]).find(x=>x.i===+m[2]-1);
       if(c)return {title:c.title,score:c.score,verdict:c.verdict||'',hook:c.hook||'',story:c.story||0,part:c.part||0,of:c.of||1,dur:c.dur||0,views:c.views||0,src:it.title};
@@ -1280,7 +1315,7 @@ function clipMeta(name){
   }
   return null;
 }
-function prettyName(n){return n.replace(/^[a-f0-9]{8}_/,'').replace(/\.mp4$/i,'')}
+function prettyName(n){const m=/^(.*)_([a-f0-9]{8})_(\d+)\.mp4$/i.exec(n);if(m&&m[1])return m[1];return n.replace(/^[a-f0-9]{8}_/,'').replace(/\.mp4$/i,'')}
 function paintClips(flt){
   const g=$('fGrid');g.innerHTML='';
   const items=LIB.filter(f=>{
@@ -1339,7 +1374,7 @@ function paintClips(flt){
     del.onclick=async ev=>{ev.stopPropagation();
       if(!confirm('Удалить файл?'))return;
       try{
-        if(f.kind==='short'&&/^[a-f0-9]{8}_\d+\.mp4$/.test(f.name)){await delClipByName(f);}
+        if(f.kind==='short'&&/^(?:.*_)?[a-f0-9]{8}_\d+\.mp4$/.test(f.name)){await delClipByName(f);}
         else{await fetch('/api/del/'+f.kind+'/'+encodeURIComponent(f.name),{method:'DELETE'});loadClips();loadDashQuiet();toast('Удалено');}
       }catch(e){toast(e.message,'err');}
       SEL.delete(selKey(f));};
@@ -1381,7 +1416,7 @@ $('fHidden').addEventListener('change',()=>{
   SHOWHIDDEN=$('fHidden').checked;
   paintClips(($('fSearch')||{value:''}).value.trim().toLowerCase());
 });
-function clipParts(f){const m=/^([a-f0-9]{8})_(\d+)\.mp4$/.exec(f.name||'');return m?[m[1],+m[2]-1]:null;}
+function clipParts(f){const m=/^(?:.*_)?([a-f0-9]{8})_(\d+)\.mp4$/.exec(f.name||'');return m?[m[1],+m[2]-1]:null;}
 async function setHidden(f,hid){
   const p=clipParts(f);if(!p)throw new Error('Скрыть можно только клипы задач');
   const r=await fetch('/api/clip/'+p[0]+'/'+p[1]+'/hide',{method:'POST',
@@ -1628,7 +1663,7 @@ async function showTagClips(t){
         '<span class="sp"></span>'+(it.posted?'<span class="badge ok">опубликован</span>':'')+
         '<span class="dim">'+(it.score||0)+'/100 · '+(it.dur||0)+'с</span>'+
         '<a href="/api/clip/'+it.job_id+'/'+it.i+'">MP4</a>'+
-        '<a href="/api/thumb/short/'+it.job_id+'_'+(it.i+1)+'.mp4" target="_blank">Обложка</a>';
+        '<a href="/api/thumb/short/'+encodeURIComponent(it.file||(it.job_id+'_'+(it.i+1)+'.mp4'))+'" target="_blank">Обложка</a>';
       const cap=document.createElement('button');cap.textContent='Подпись';
       cap.title='Скопировать подпись с хэштегами тега';
       cap.onclick=()=>{
@@ -2033,11 +2068,11 @@ async function uqTick(){
         v.controls=true;v.style.width='100%';v.style.maxHeight='40vh';v.style.borderRadius='12px';v.src=s.url;
         const a=document.createElement('a');a.textContent='Скачать MP4';a.href=s.url;a.setAttribute('download','');a.className='btn';a.style.marginTop='8px';a.style.display='inline-block';
         res.appendChild(v);res.appendChild(a);
-        loadUniq();
+        loadUniq();loadUniq('bnLib');
       }
     }catch(e){}
   }
-  if(!uqLive.size){loadUniq();toast('Готово','ok');}
+  if(!uqLive.size){loadUniq();loadUniq('bnLib');toast('Готово','ok');}
 }
 $('uqGo').onclick=async ()=>{
   const urls=$('uqUrls').value.split('\n').map(s=>s.trim()).filter(Boolean).slice(0,5);
@@ -2080,11 +2115,34 @@ $('cs2Go').onclick=async ()=>{
   }catch(e){toast(e.message,'err');}
   $('cs2Go').disabled=false;
 };
+$('bnGo').onclick=async ()=>{
+  const fv=$('bnVid').files, fb=$('bnBan').files;
+  if(!fv||!fv.length){toast('Приложи видеофайл','err');return;}
+  const fd=new FormData();
+  fd.append('file',fv[0]);
+  if(fb&&fb.length)fd.append('banner',fb[0]);
+  fd.append('banner_file',$('bnBanSel').value);
+  fd.append('speed',$('bnSpeed').value.trim());
+  if($('bnKeyForce').checked)fd.append('key','1');
+  $('bnGo').disabled=true;
+  try{
+    const r=await fetch('/api/banner-ov',{method:'POST',body:fd});
+    const j=await r.json();
+    if(!j.ok)throw new Error(j.error||'Не вышло');
+    uqRow(j.id,'bnResult');
+    uqLive.add(j.id);
+    if(uqPoll)clearInterval(uqPoll);
+    uqPoll=setInterval(uqTick,2000);
+    uqTick();
+    toast('Погнали','ok');
+  }catch(e){toast(e.message,'err');}
+  $('bnGo').disabled=false;
+};
 async function loadBanners(){
   try{
     const j=await (await fetch('/api/banners')).json();
     const sig='|'+(j.banners||[]).map(b=>b.id).join('|');
-    for(const id of ['banFile','twBanFile','uqBanFile','anBanFile']){
+    for(const id of ['banFile','twBanFile','uqBanFile','anBanFile','bnBanSel']){
       const sel=$(id);
       if(!sel)continue;
       const cur=sel.value;
@@ -2106,7 +2164,7 @@ async function loadBanners(){
         sel.style.display='';
       }
     }
-    ['banFile','twBanFile','uqBanFile','anBanFile'].forEach(makeCustom);
+    ['banFile','twBanFile','uqBanFile','anBanFile','bnBanSel'].forEach(makeCustom);
     refreshCustom();
   }catch(e){console.error('banners:',e);}
 }
@@ -2140,10 +2198,12 @@ async function loadGameplays(){
     refreshCustom();
   }catch(e){console.error('gameplays:',e);}
 }
-async function loadUniq(){
+async function loadUniq(boxId){
+  const g=$(boxId||'uqLib');
+  if(!g)return;
   try{
     const j=await (await fetch('/api/uniq-lib')).json();
-    const g=$('uqLib');g.innerHTML='';
+    g.innerHTML='';
     const items=j.files||[];
     if(!items.length){g.innerHTML='<div class="empty">Пока пусто</div>';return;}
     items.forEach(f=>{

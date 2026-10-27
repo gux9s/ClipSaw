@@ -304,8 +304,30 @@ MIN_START = 15.0
 
 # Баннер: вставка строго по середине итога, ЦЕЛИКОМ без кропа, ускорен x1.4,
 # по центру, фон выбит хромакеем (≥25% экрана — норма рекламодателя)
-BANNER_FILE = os.path.join(BASE, "assets", "banner.mp4")
+BANNER_FILE = os.path.join(BASE, "assets",
+                           "RubUP upgrade bez nadpisey green-screen sound on.mp4")
 BANNER_SPEED = 1.4
+_SHARD_BANNER = "vid_20261019_013750_864.mp4"
+
+
+def _banner_shard(path: str | None = None) -> bool:
+    try:
+        n = os.path.basename(path or BANNER_FILE).lower()
+    except Exception:
+        return False
+    return n == _SHARD_BANNER or "shard" in n or "vpn" in n
+
+
+def _banner_speed(path: str | None = None) -> float:
+    return 1.2 if _banner_shard(path) else BANNER_SPEED
+
+
+def _banner_alpha(path: str | None = None) -> float:
+    if _banner_shard(path):
+        return 0.90
+    if _banner_trading(path):
+        return 0.70
+    return 0.95
 BANNER_W = 1022  # бокс 1022×537 = 26.5% экрана (норма рекламодателя 25%+)
 BANNER_ZOOM = 1.0  # без наезда: весь баннер виден целиком, ничего не режем
 BANNER_GAP = 8  # зазор под фильмом: баннер висит прямо под верхом, не задевая
@@ -2076,25 +2098,23 @@ def render_twitch_clip(src: str, moment: dict, segs, out: str,
         bcap = cv2.VideoCapture(bpath)
         bn = int(bcap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
         bfps = bcap.get(cv2.CAP_PROP_FPS) or 60
-        b_eff = (bn / max(bfps, 1)) / BANNER_SPEED
+        b_eff = (bn / max(bfps, 1)) / _banner_speed(bpath)
         n = max(1, min(6, int(round(od / 50.0))))
         if od < b_eff + 3:
             use_banner = False
         else:
+            total = od + n * b_eff
             for k in range(n):
-                if n == 1:
-                    oA = (od + b_eff) / 2  # старт строго по середине итога
-                    cA = oA
-                else:
-                    cA = od * (k + 1) / (n + 1) - b_eff / 2
-                    cA = min(max(cA, 0.5), max(od - b_eff - 0.5, 0.5))
-                    oA = cA + k * b_eff
+                cA = (total * (k + 1) / (n + 1)
+                      - b_eff / 2 - k * b_eff)
+                cA = min(max(cA, 0.5), max(od - b_eff - 0.5, 0.5))
+                oA = cA + k * b_eff
                 wins.append((oA, oA + b_eff, cA))
-            b_step = max(bfps, 1) * BANNER_SPEED / max(fps, 1)
+            b_step = max(bfps, 1) * _banner_speed(bpath) / max(fps, 1)
         bj = {"dy": random.randint(-6, 6),
               "gain": random.uniform(0.97, 1.03),
               "ns": random.uniform(0.8, 1.6),
-              "asp": BANNER_SPEED}
+              "asp": _banner_speed(bpath)}
     cmd = [FFMPEG, "-y", "-v", "error",
            "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "1080x1920",
            "-r", str(fps),
@@ -2286,8 +2306,7 @@ def render_twitch_clip(src: str, moment: dict, segs, out: str,
                     if not _tw_placed:
                         _by = ((OUT_H2 - _boxh) // 2
                                + random.randint(-15, 15))
-                    # Trading — 0.7, остальные — 0.95
-                    _bop = 0.7 if _banner_trading(bpath) else 0.95
+                    _bop = _banner_alpha(bpath)
                     frame = _banner_overlay(
                         frame, bfr, y_top=_by, box_w=_boxw, box_h=_boxh,
                         zoom=_gr_zoom, bj=bj, stretch=_gr_stretch,
@@ -2788,7 +2807,7 @@ _KEY_SIM, _KEY_BLEND = 0.20, 0.10
 def _banner_green(path: str | None = None) -> bool:
     """У баннера зелёный фон под хромакей? Смотрим УГЛЫ кадров с отступом
     0.5%: у хромакей-файлов (RubUP green-screen) зелень идёт по самой
-    кромке, у обычных креативов (banner.mp4) углы чёрные.
+    кромке, у обычных креативов углы чёрные.
     Важно смотреть именно кромку, а не долю зелени: у обычных креативов
     зелёного контента внутри может быть даже больше (зелёный бак)."""
     key = path or BANNER_FILE
@@ -2841,10 +2860,71 @@ def _banner_green(path: str | None = None) -> bool:
 def _banner_key_vf(path: str | None = None) -> str:
     """Кусок ffmpeg-цепочки для вычитания зелени (или '' для обычных
     креативов). Вставлять ПЕРЕД format=yuva420p."""
-    if _banner_green(path):
+    if _banner_green(path) or _banner_shard(path):
         return (f"chromakey=0x00FF00:{_KEY_SIM}:{_KEY_BLEND},"
                 f"despill=type=green,")
     return ""
+
+
+_GREEN_RING = {}
+
+
+def _banner_green_ring(path: str | None = None) -> bool:
+    """Зелёный хромакей по КОЛЬЦУ краёв кадра, а не только по 4 углам:
+    у хромакей-баннеров зелень сплошняком идёт по кромке, у обычных
+    креативов чистого зелёного по краям почти не бывает. Ловит и те
+    файлы, где у углов скругления/рамки и точечная проверка углов
+    (как в _banner_green) промахивается."""
+    key = path or BANNER_FILE
+    if key in _GREEN_RING:
+        return _GREEN_RING[key]
+    res = False
+    try:
+        import cv2
+        import numpy as _np
+        import tempfile
+        _w, _h, _n, _f = _probe_wh_fps(key)
+        dur = _n / max(_f, 1) if _n and _f else 0
+        if dur > 0:
+            hits, total = 0, 0
+            for frac in (0.15, 0.5, 0.85):
+                tmp = os.path.join(tempfile.gettempdir(),
+                                   f"bring_{os.getpid()}.png")
+                try:
+                    subprocess.run(
+                        [FFMPEG, "-y", "-v", "error",
+                         "-ss", f"{dur * frac:.2f}", "-i", key,
+                         "-frames:v", "1", tmp],
+                        timeout=60, check=False)
+                    fr = cv2.imread(tmp)
+                    if fr is None:
+                        continue
+                    h0, w0 = fr.shape[:2]
+                    b = max(int(min(h0, w0) * 0.02), 2)
+                    ring = _np.concatenate(
+                        [fr[:b, :].reshape(-1, 3),
+                         fr[h0 - b:, :].reshape(-1, 3),
+                         fr[:, :b].reshape(-1, 3),
+                         fr[:, w0 - b:].reshape(-1, 3)])
+                    B, G, R = (ring[:, 0].astype(int),
+                               ring[:, 1].astype(int),
+                               ring[:, 2].astype(int))
+                    gm = (G > 150) & ((G - R) > 60) & ((G - B) > 60)
+                    total += int(gm.size)
+                    hits += int(gm.sum())
+                except Exception:
+                    continue
+                finally:
+                    try:
+                        if os.path.exists(tmp):
+                            os.remove(tmp)
+                    except OSError:
+                        pass
+            res = total > 0 and hits / total >= 0.35
+    except Exception:
+        res = False
+    _GREEN_RING[key] = res
+    return res
 
 
 def _banner_trading(bpath: str | None = None) -> bool:
@@ -2869,7 +2949,10 @@ def _banner_fmt(bpath: str | None = None, aa: float | None = None) -> str:
     (хромакей-файлы — после вычитания зелени). Сквозь баннер чуть
     видно видео. aa можно дрожать по рендерам (уникализация).
     Вставлять ПЕРЕД setpts."""
-    a = 0.95 if aa is None else max(0.5, min(1.0, float(aa)))
+    if _banner_shard(bpath):
+        a = 0.90
+    else:
+        a = 0.95 if aa is None else max(0.5, min(1.0, float(aa)))
     _key = _banner_key_vf(bpath)
     if _key:
         return f"{_key}format=yuva420p,colorchannelmixer=aa={a:.3f}"
@@ -3193,7 +3276,7 @@ def _banner_eff(path: str | None = None) -> float:
             n = int(c.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
             f = c.get(cv2.CAP_PROP_FPS) or 60
             c.release()
-            _BANNER_EFF[key] = (n / max(f, 1)) / BANNER_SPEED if n else 4.22
+            _BANNER_EFF[key] = (n / max(f, 1)) / _banner_speed(key) if n else 4.22
         except Exception:
             _BANNER_EFF[key] = 4.22
     return _BANNER_EFF[key]
@@ -3643,14 +3726,12 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
         if od < b_eff + 3:
             use_banner = False  # клип короче баннера — пропускаем
         else:
+            total = od + n * b_eff
             for k in range(n):
-                if n == 1:
-                    oA = (od + b_eff) / 2
-                    cA = oA
-                else:
-                    cA = od * (k + 1) / (n + 1) - b_eff / 2
-                    cA = min(max(cA, 0.5), max(od - b_eff - 0.5, 0.5))
-                    oA = cA + k * b_eff
+                cA = (total * (k + 1) / (n + 1)
+                      - b_eff / 2 - k * b_eff)
+                cA = min(max(cA, 0.5), max(od - b_eff - 0.5, 0.5))
+                oA = cA + k * b_eff
                 wins.append((oA, oA + b_eff, cA))
     out_dur = od + b_eff * len(wins)
     # --- верх: куски по 2с со статичным кропом за лицом (или центр) ---
@@ -3774,7 +3855,7 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
             _bn_scale = f"scale={_bn_w}:-2"
         fc.append(f"[2:v]{_bn_scale},fps=30,"
                   f"{_banner_fmt(bpath, random.uniform(0.94, 0.96))},"
-                  f"setpts=PTS/{BANNER_SPEED:.3f}[bn0]")
+                  f"setpts=PTS/{_banner_speed(bpath):.3f}[bn0]")
         fc.append(f"[bn0]split={len(wins)}" + "".join(f"[bb{i}]" for i in range(len(wins))))
         for wi, (oA, oB, cA) in enumerate(wins):
             fc.append(f"[f{wi}][bb{wi}]overlay=(W-w)/2:{_bn_y}:eof_action=pass[m{wi}]")
@@ -3838,7 +3919,7 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
                   f"asetpts=PTS-STARTPTS[a{len(wins)}]")
         aorder.append(f"[a{len(wins)}]")
         if _banner_has_audio(bpath):
-            fc.append(f"[2:a]atempo={BANNER_SPEED:.3f},aresample=44100,"
+            fc.append(f"[2:a]atempo={_banner_speed(bpath):.3f},aresample=44100,"
                       f"volume=0.5,aformat=sample_fmts=fltp:channel_layouts=stereo[ba0]")
         else:
             # у баннера нет своей дорожки — кладём тишину, иначе звук
@@ -4576,7 +4657,7 @@ def swap_banner(src: str, out: str, banner_path: str | None = None,
                 cutranges: list | None = None) -> dict:
     """Замена чужого баннера: вырезает найденные вставки (или заданные
     cutranges=[(s,e)] — ручной отрезок) и ставит свой баннер
-    (по умолчанию assets/banner.mp4) СТРОГО по середине итога либо в at.
+    (по умолчанию RubUP) СТРОГО по середине итога либо в at.
     Возвращает {removed, mid, total}."""
     import os as _os
     import random
@@ -4588,7 +4669,7 @@ def swap_banner(src: str, out: str, banner_path: str | None = None,
         raise RuntimeError("не читается видео")
     dur = N / FPS
     bw, bh, bn, bfps = _probe_wh_fps(bpath)
-    b_eff = (bn / max(bfps, 1)) / BANNER_SPEED if bn and bfps else 4.0
+    b_eff = (bn / max(bfps, 1)) / _banner_speed(bpath) if bn and bfps else 4.0
     freezes = analyze_inserts(src) if (remove and cutranges is None) else {
         "freeze": [], "fullscreen": [], "overlay": [], "rect": [], "sig": []}
     if cutranges is not None:
@@ -4727,7 +4808,7 @@ def swap_banner(src: str, out: str, banner_path: str | None = None,
         _tcx, _tcy, _tcw, _tch = _BANNER_TR_CROP
         _sw_pre = f"crop={_tcw}:{_tch}:{_tcx}:{_tcy},"
     bfs = f"[cbs0]{_sw_pre}scale={sw}:{sh},fps={fps_i},{_sw_fmt}"
-    bfs += ",setpts=PTS/{:.3f}[vb]".format(BANNER_SPEED)
+    bfs += ",setpts=PTS/{:.3f}[vb]".format(_banner_speed(bpath))
     vparts.append(bfs)
     vparts.append(f"[vf][vb]overlay={ox}:{oy}:eof_action=pass[vmid]")
     # итоговая склейка: куски + середина с баннером ровно на total/2
@@ -4787,7 +4868,7 @@ def swap_banner(src: str, out: str, banner_path: str | None = None,
         fc += ";".join(aparts) + ";"
         fc += f"anullsrc=r=48000:cl=stereo:d={b_eff:.3f}[asil];"
         if ban_audio:
-            fc += (f"[2:a]atempo={BANNER_SPEED:.3f},atrim=0:{b_eff:.3f},"
+            fc += (f"[2:a]atempo={_banner_speed(bpath):.3f},atrim=0:{b_eff:.3f},"
                    f"asetpts=PTS-STARTPTS,"
                    f"volume=0.5,aresample=48000,"
                    f"aformat=channel_layouts=stereo[ba];"
@@ -4830,6 +4911,141 @@ def swap_banner(src: str, out: str, banner_path: str | None = None,
                          "sig": freezes.get("sig", []),
                          "base": freezes.get("base", 0),
                          "dur": round(dur, 2)}}
+
+
+def overlay_banner_mid(src: str, out: str, banner_path: str | None = None,
+                       progress=None, speed: float | None = None,
+                       force_key: bool | None = None) -> dict:
+    """Свой баннер поверх своего видео. ИИ делает сам: уникализирует
+    именно видео баннера (тот же жёсткий пресет, что в уникализаторе —
+    зум, Ken Burns, поворот, зерно; без субтитров — это плашка),
+    ускоряет (по умолчанию BANNER_SPEED, можно задать своё «х»),
+    вычитает зелёный хромакей (авто по кольцу краёв или силой) и
+    запускает РОВНО с середины видео (30с -> баннер на 15-й секунде).
+    На время баннера видео встаёт на паузу (стоп-кадр), баннер играет
+    целиком СО СВОИМ ЗВУКОМ, без прозрачности, после — видео продолжается.
+    Итог длиннее исходника на длительность баннера.
+    Возвращает {mid, dur, b_eff, speed, total}."""
+    import os as _os
+    bpath = banner_path if banner_path and _os.path.exists(banner_path) else BANNER_FILE
+    if not _os.path.exists(bpath):
+        raise RuntimeError("нет баннера")
+    W, H, N, FPS = _probe_wh_fps(src)
+    if W <= 0 or H <= 0 or N <= 0 or FPS <= 0:
+        raise RuntimeError("не читается видео")
+    dur = _real_dur(src) or N / FPS
+    if dur < 2.0:
+        raise RuntimeError("видео короче 2с — середины не получится")
+    mid = dur / 2.0  # ровно середина: 30с -> старт баннера на 15-й
+    if progress:
+        progress(5, "уникализирую баннер…")
+    # 1) уникализируется именно видео баннера — ЦЕЛИКОМ, без обрезок
+    #    (cut=False), только зум/проезд/зерно/питч, затем своё ускорение
+    uniq_b = out + ".uniqban.mp4"
+    try:
+        uniqualize_video(
+            bpath, uniq_b, {"caps": False, "cut": False},
+            progress=(lambda p, s: progress(5 + min(p, 100) * 0.4,
+                                            "уникализирую баннер… " + s))
+            if progress else None)
+        ubw, ubh, ubn, ubf = _probe_wh_fps(uniq_b)
+        if ubw <= 0 or ubh <= 0 or ubn <= 0 or ubf <= 0:
+            raise RuntimeError("пустой уникализированный баннер")
+    except Exception:
+        try:
+            if _os.path.exists(uniq_b):
+                _os.remove(uniq_b)
+        except OSError:
+            pass
+        uniq_b = bpath  # не уникализировался — берём как есть
+        ubw, ubh, ubn, ubf = _probe_wh_fps(uniq_b)
+    try:
+        _spd = float(speed) if speed is not None else _banner_speed(bpath)
+    except (TypeError, ValueError):
+        _spd = _banner_speed(bpath)
+    speed = min(8.0, max(0.5, _spd))
+    b_eff = (ubn / max(ubf, 1)) / speed if ubn and ubf else 4.0
+    # 2) баннер всегда растянут до краёв экрана и ровно по центру:
+    #    горизонтальные — во всю ширину (касается левого и правого края),
+    #    вертикальные/высокие — во всю высоту (касается верха и низа),
+    #    остаток центрируется (чётные размеры — под yuv420p)
+    sh = int(round((ubh or H) * W / max(ubw or W, 1)))
+    if sh <= H:
+        sw = W
+    else:
+        sh = H
+        sw = int(round((ubw or W) * H / max(ubh or H, 1)))
+    sw, sh = max(sw // 2 * 2, 2), max(sh // 2 * 2, 2)
+    ox, oy = (W - sw) // 2, (H - sh) // 2
+    fps_i = max(int(round(FPS)), 1)
+    # хромакей: авто — зелень по кольцу краёв кадра (или шарды),
+    # force_key=True — вычитать силой, force_key=False — не трогать
+    if force_key is None:
+        use_key = _banner_green_ring(bpath) or _banner_shard(bpath)
+    else:
+        use_key = bool(force_key)
+    _key = (f"chromakey=0x00FF00:{_KEY_SIM}:{_KEY_BLEND},despill=type=green,"
+            if use_key else "")
+    # без прозрачности: никакого colorchannelmixer — баннер целиком
+    _fmt = _key + "format=yuva420p"
+    # 3) стоп-кадр: кадр на середине замирает на весь баннер
+    frame_png = out + ".mid.png"
+    if progress:
+        progress(48, "стоп-кадр под баннер…")
+    subprocess.run(
+        [FFMPEG, "-y", "-v", "error", "-ss", f"{mid:.3f}", "-i", src,
+         "-frames:v", "1", frame_png],
+        timeout=120, check=True)
+    # видео: до середины + заморозка с баннером + после середины (двинулось на b_eff)
+    fc = (
+        f"[0:v]trim=start=0:end={mid:.3f},setpts=PTS-STARTPTS[v0];"
+        f"[0:v]trim=start={mid:.3f},setpts=PTS-STARTPTS[v1];"
+        f"[2:v]trim=start=0:end={b_eff:.3f},setpts=PTS-STARTPTS[frz];"
+        f"[1:v]setpts=PTS/{speed:.4f},trim=end={b_eff:.3f},setpts=PTS-STARTPTS,"
+        f"scale={sw}:{sh},fps={fps_i},{_fmt}[bb];"
+        f"[frz][bb]overlay={ox}:{oy}:eof_action=pass[vmid];"
+        f"[v0][vmid][v1]concat=n=3:v=1:a=0,copy[vout]")
+    if _has_audio_stream(src):
+        fc += (";"
+               f"[0:a]atrim=start=0:end={mid:.3f},asetpts=PTS-STARTPTS[a0];"
+               f"[0:a]atrim=start={mid:.3f},asetpts=PTS-STARTPTS[a1];"
+               f"anullsrc=r=48000:cl=stereo:d={b_eff:.3f}[asil]")
+        if _has_audio_stream(uniq_b):
+            # пауза родного звука: под баннером играет звук баннера
+            fc += (";"
+                   f"[1:a]atempo={speed:.4f},atrim=end={b_eff:.3f},"
+                   f"asetpts=PTS-STARTPTS,volume=0.5,aresample=48000,"
+                   f"aformat=channel_layouts=stereo[ba];"
+                   f"[asil][ba]amix=inputs=2:duration=first[amid]")
+        else:
+            fc += ";[asil]anull[amid]"
+        fc += ";[a0][amid][a1]concat=n=3:v=0:a=1[aout]"
+        amap = ["-map", "[aout]"]
+    else:
+        amap = []
+    if progress:
+        progress(60, "ставлю баннер на паузу видео…")
+    subprocess.run(
+        [FFMPEG, "-y", "-v", "error", "-i", src, "-i", uniq_b,
+         "-loop", "1", "-framerate", str(fps_i), "-t", f"{b_eff:.3f}",
+         "-i", frame_png,
+         "-filter_complex", fc,
+         "-map", "[vout]"] + amap + _rand_meta()
+        + _video_codec_args() + [*_AUDIO_OUT, "-movflags", "+faststart", out],
+        timeout=1800, check=True)
+    for p in (uniq_b, frame_png):
+        try:
+            if _os.path.exists(p):
+                _os.remove(p)
+        except OSError:
+            pass
+    if progress:
+        progress(100, "готово")
+    if not _has_video(out):
+        raise RuntimeError("наложение баннера не удалось")
+    return {"mid": round(mid, 2), "dur": round(dur, 2),
+            "b_eff": round(b_eff, 2), "speed": speed,
+            "total": round(dur + b_eff, 2)}
 
 
 def _real_dur(path: str) -> float:
@@ -4886,6 +5102,8 @@ def uniqualize_video(src: str, out: str, opts: dict | None = None,
     pitch = bool(opts.get("pitch", True))
     # подрезка краёв: ломает точное совпадение длины и стартовых кадров.
     # Жёстко: по 0.5-1.2с с каждой стороны (интро/аутро — самые заезженные).
+    # opts["cut"]=False — без подрезки: файл целиком, только скорость/зум
+    # (баннеры: каждый кадр на вес золота, никакой обрезки).
     th, te = 0.0, 0.0
     _w, _h = 0, 0
     try:
@@ -4893,7 +5111,7 @@ def uniqualize_video(src: str, out: str, opts: dict | None = None,
         _dur = _n / max(_f, 1) if _n and _f else 0
     except Exception:
         _dur = 0
-    if _dur > 5:
+    if _dur > 5 and opts.get("cut", True):
         _tlo, _thi = (0.5, 1.2) if _auto else (0.3, 0.8)
         th = round(random.uniform(_tlo, _thi), 2)
         te = round(_dur - random.uniform(_tlo, _thi), 2)
@@ -6134,7 +6352,9 @@ def insert_banners(src: str, out: str, banner_path: str | None = None,
     fps_i = max(int(round(min(fps, 30.0))), 15)
     _bw, _bh, _bn, _bf = _probe_wh_fps(bpath)
     bdur = (_bn / _bf) if (_bn and _bf) else 0.0
-    bspd = BANNER_SPEED * random.uniform(0.95, 1.05)
+    bspd = _banner_speed(bpath)
+    if not _banner_shard(bpath):
+        bspd *= random.uniform(0.95, 1.05)
     b_eff = max((bdur / bspd) if bdur else b_eff, 1.0)
     _baa = random.uniform(0.94, 0.96)
     _beq = (f"eq=brightness={random.uniform(-0.012, 0.012):.4f}:"
