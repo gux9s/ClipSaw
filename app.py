@@ -84,8 +84,8 @@ DB = os.path.join(BASE, "data.db")
 CFG = os.path.join(BASE, "config.json")
 DEFAULT_CFG = {"gemini_key": "", "drex_key": "", "want": 8, "gameplay": "subway.mp4", "lens": "40-59", "limit_min": 0,
                "vmode": "split", "captions": True, "facetrack": True,
-               "antidetect": False, "mirror": False, "banner": True,
-               "clip_music": True, "tt_cookies": "",
+               "antidetect": True, "mirror": False, "banner": True,
+               "clip_music": True, "remove_pauses": True, "tt_cookies": "",
                "asr_model": "giga", "asr_api_key": "",
                "asr_api_base": "https://gw.lunaroute.com/v1", "max_workers": 2}
 
@@ -312,9 +312,21 @@ def log_job(job_id, title, url, status, clips=None, scorer="heuristic", tags=Non
 def get_settings():
     try:
         with open(CFG, encoding="utf-8") as f:
-            out = {**DEFAULT_CFG, **json.load(f)}
+            saved = json.load(f)
     except Exception:
-        out = dict(DEFAULT_CFG)
+        saved = {}
+    out = {**DEFAULT_CFG, **saved}
+    if saved and "remove_pauses" not in saved:
+        # конфиг прошлой версии: включаем новые дефолты один раз,
+        # дальше уважаем выбор пользователя в настройках
+        out["antidetect"] = True
+        out["remove_pauses"] = True
+        try:
+            with open(CFG, "w", encoding="utf-8") as f:
+                json.dump({k: out[k] for k in DEFAULT_CFG if k in out},
+                          f, ensure_ascii=False)
+        except OSError:
+            pass
     out["gameplay"] = ac.gameplay_value(out.get("gameplay"))
     return out
 
@@ -604,12 +616,25 @@ def run_manual_job(job_id: str, url: str, opts: dict, stamps: list, prog) -> lis
                             stage=f"момент {_i + 1}/{total}…", pct=npct)
 
         s, e = float(m["start"]), float(m["end"])
-        # паузы внутри момента — вон (файл-слайс начинается с s-pad)
+        # паузы внутри момента — вон. Рендерим ровно [s, e]: слайс начинается
+        # с s-pad, поэтому окно = (pre, pre + длина), иначе в клип попадали
+        # лишние 8 секунд до таймкода.
+        pre = s - max(s - 8.0, 0.0)
+        clip_len = max(e - s, 1.0)
         clean = os.path.join(TMP_DIR, uuid.uuid4().hex + ".mp4")
         try:
             got = ac.remove_silence(
-                p, clean, progress=lambda q, st: _pp(q * 0.10, ))
-        except Exception:
+                p, clean,
+                window=(pre, pre + clip_len),
+                detect=bool(opts.get("remove_pauses", True)),
+                progress=lambda q, st: _pp(q * 0.10, ))
+        except Exception as ex:
+            print("[manual pauses]", ex)
+            try:
+                if os.path.exists(clean):
+                    os.remove(clean)
+            except OSError:
+                pass
             got = p
         stage_in = got
         # субтитры: транскрибация ТОЛЬКО этих минут, а не всего видео
@@ -621,7 +646,7 @@ def run_manual_job(job_id: str, url: str, opts: dict, stamps: list, prog) -> lis
                 api_base=opts.get("asr_api_base", ""))
         except Exception:
             segs_i = []
-        dur = ac.media_duration(stage_in) or round(e - s + 16.0, 1)
+        dur = ac.media_duration(stage_in) or round(clip_len, 1)
         title_m = f"Момент {i + 1} · {_fmt_ts(s)}–{_fmt_ts(e)}"
         mm = {"start": 0.0, "end": dur, "score": 100, "title": title_m,
               "verdict": f"Вручную {_fmt_ts(s)}–{_fmt_ts(e)}",
@@ -713,14 +738,41 @@ def run_job(job_id: str, url: str, opts: dict):
         # дальше все режимы работают с чистым кадром
         src = ac.strip_bar_file(src)
         mode = opts.get("vmode", "blur")
+        # паузы — один раз ДО сцен/транскрибации: дальше сцены, сегменты
+        # и моменты живут в одной шкале чистого видео (без рассинхрона).
+        # parts/story чистят паузы у себя, fast — только режет без перекода.
+        if (mode not in ("parts", "story", "fast")
+                and not opts.get("fast")
+                and opts.get("remove_pauses", True)):
+            prog(6, "чищу паузы…")
+            clean = os.path.join(TMP_DIR, uuid.uuid4().hex + ".mp4")
+            try:
+                stage_in = ac.remove_silence(
+                    src, clean,
+                    progress=lambda p, s: prog(int(6 + p * 0.03), "чищу паузы…"))
+            except Exception as ex:
+                print("[pauses]", ex)
+                try:
+                    if os.path.exists(clean):
+                        os.remove(clean)
+                except OSError:
+                    pass
+                stage_in = src
+            if stage_in != src:
+                try:
+                    if os.path.exists(src):
+                        os.remove(src)
+                except OSError:
+                    pass
+                src = stage_in
         if mode == "story":
             # истории: русская озвучка уже в исходнике. Авто-режим чистит
             # паузы и ищет обрывы через DREX; ручные таймкоды режут ровно
             # выбранные отрезки по исходной шкале времени.
             manual = bool(stamps)
             if not manual:
-                prog(6, "чищу паузы…")
                 if opts.get("story_remove_pauses", True):
+                    prog(6, "чищу паузы…")
                     clean = os.path.join(TMP_DIR, uuid.uuid4().hex + ".mp4")
                     try:
                         stage_in = ac.remove_silence(
@@ -788,21 +840,27 @@ def run_job(job_id: str, url: str, opts: dict):
         elif mode == "parts":
             # режим частей: сцены и DREX не нужны вообще.
             # Сначала чистим паузы, потом ОДНА транскрибация, потом резка.
-            prog(6, "чищу паузы…")
-            clean = os.path.join(TMP_DIR, uuid.uuid4().hex + ".mp4")
-            try:
-                stage_in = ac.remove_silence(
-                    src, clean,
-                    progress=lambda p, s: prog(int(6 + p * 0.04), "чищу паузы…"))
-            except Exception:
-                stage_in = src
-            if stage_in != src:
+            if opts.get("remove_pauses", True):
+                prog(6, "чищу паузы…")
+                clean = os.path.join(TMP_DIR, uuid.uuid4().hex + ".mp4")
                 try:
-                    if os.path.exists(src):
-                        os.remove(src)
-                except OSError:
-                    pass
-                src = stage_in
+                    stage_in = ac.remove_silence(
+                        src, clean,
+                        progress=lambda p, s: prog(int(6 + p * 0.04), "чищу паузы…"))
+                except Exception:
+                    try:
+                        if os.path.exists(clean):
+                            os.remove(clean)
+                    except OSError:
+                        pass
+                    stage_in = src
+                if stage_in != src:
+                    try:
+                        if os.path.exists(src):
+                            os.remove(src)
+                    except OSError:
+                        pass
+                    src = stage_in
             scenes = []
             prog(10, "транскрибация…")
             segs, lang = ac.transcribe(src, opts.get("limit_min", 0),
@@ -1029,7 +1087,7 @@ def api_start():
     story = str(data.get("vmode") or "") == "story"
     if not data.get("api_key"):
         data["api_key"] = cfg.get("drex_key", "")
-    for k in ("want", "gameplay", "limit_min", "vmode", "captions", "facetrack", "antidetect", "mirror", "banner", "clip_music", "asr_model", "asr_api_key", "asr_api_base", "drex_key"):
+    for k in ("want", "gameplay", "limit_min", "vmode", "captions", "facetrack", "antidetect", "mirror", "banner", "clip_music", "remove_pauses", "asr_model", "asr_api_key", "asr_api_base", "drex_key"):
         if k not in data or data[k] in ("", None):
             data[k] = cfg.get(k)
     data["gameplay"] = ac.gameplay_value(data.get("gameplay"))
@@ -1084,6 +1142,8 @@ def api_start():
             "facetrack": bool(data.get("facetrack", True)),
             "antidetect": bool(data.get("antidetect", False)),
             "mirror": bool(data.get("mirror", False)),
+            "clip_music": bool(data.get("clip_music", True)),
+            "remove_pauses": bool(data.get("remove_pauses", True)),
             "banner": bool(data.get("banner", True)),
             "banner_path": resolve_banner(data.get("banner_file", "")),
             "gameplay": data["gameplay"],
@@ -1184,6 +1244,30 @@ def run_twitch_job(job_id: str, url: str, opts: dict):
             jobs[job_id].update(title=title)
         # белая полоса снизу — срезаем сразу, дальше все режимы с чистым кадром
         src = ac.strip_bar_file(src)
+        # паузы: стример молчит между катками — вырезаем до сцен/транскрибации,
+        # чтобы все координаты дальше были по одному чистому таймлайну
+        if opts.get("remove_pauses", True):
+            prog(6, "чищу паузы…")
+            clean = os.path.join(TMP_DIR, uuid.uuid4().hex + ".mp4")
+            try:
+                stage_in = ac.remove_silence(
+                    src, clean,
+                    progress=lambda p, s: prog(int(6 + p * 0.03), "чищу паузы…"))
+            except Exception as ex:
+                print("[twitch pauses]", ex)
+                try:
+                    if os.path.exists(clean):
+                        os.remove(clean)
+                except OSError:
+                    pass
+                stage_in = src
+            if stage_in != src:
+                try:
+                    if os.path.exists(src):
+                        os.remove(src)
+                except OSError:
+                    pass
+                src = stage_in
         prog(6, "ищу сцены…")
         try:
             scenes = ac.detect_scenes(src)
@@ -1231,6 +1315,8 @@ def run_twitch_job(job_id: str, url: str, opts: dict):
                                   mirror=opts.get("mirror", False),
                                   banner=opts.get("banner", True),
                                   banner_path=opts.get("banner_path"),
+                                  bgm=(ac.pick_clip_music()
+                                       if opts.get("clip_music", True) else None),
                                   max_total=float(opts.get("max_len", 59) or 59),
                                   progress=_pp)
             with lock:
@@ -1328,6 +1414,8 @@ def api_twitch_start():
             "mirror": bool(data.get("mirror", False)),
             "banner": bool(data.get("banner", True)),
             "banner_path": resolve_banner(data.get("banner_file", "")),
+            "clip_music": bool(data.get("clip_music", cfg.get("clip_music", True))),
+            "remove_pauses": bool(data.get("remove_pauses", cfg.get("remove_pauses", True))),
             "tags": _parse_tag_ids(data.get("tags")),
             "asr_model": data.get("asr_model", "giga") if data.get("asr_model") in ("base", "small", "giga", "whisper-large-v3") else "giga",
             "asr_api_key": data.get("asr_api_key", ""),
@@ -1437,6 +1525,47 @@ def api_job_delete(job_id):
         import traceback
         traceback.print_exc()
     return jsonify({"ok": True, "removed": removed})
+
+
+def _short_path(name: str):
+    """Файл шортса по имени (варианты историй живут как _1v2.mp4 и в int-роут
+    не попадают). Только basename из shorts/legacy — без обхода путей."""
+    raw = str(name or "")
+    safe = os.path.basename(raw)
+    if not safe or safe != raw or not safe.lower().endswith(".mp4"):
+        return None, ""
+    for d in (OUT_DIR, LEGACY_DIR):
+        p = os.path.join(d, safe)
+        if os.path.isfile(p):
+            return p, safe
+    return None, safe
+
+
+@app.get("/api/short/<path:name>")
+def api_short(name):
+    p, safe = _short_path(name)
+    if not p:
+        return jsonify({"ok": False, "error": "нет файла"}), 404
+    return send_file(p, as_attachment=True, download_name=safe)
+
+
+@app.delete("/api/short/<path:name>")
+def api_short_delete(name):
+    p, safe = _short_path(name)
+    if not p:
+        return jsonify({"ok": False, "error": "нет файла"}), 404
+    try:
+        os.remove(p)
+    except OSError:
+        return jsonify({"ok": False, "error": "файл не удалился"}), 500
+    _drop_thumb("short", safe)
+    with lock:
+        for j in jobs.values():
+            cl = j.get("clips") or []
+            for c in list(cl):
+                if c.get("file") == safe:
+                    cl.remove(c)
+    return jsonify({"ok": True})
 
 
 @app.get("/api/clip/<job_id>/<int:idx>")

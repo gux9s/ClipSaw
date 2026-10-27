@@ -508,6 +508,7 @@
         <label class="chk"><input type="checkbox" id="mir"> Зеркало (отразить видео)</label>
         <label class="chk"><input type="checkbox" id="ban" checked> Баннер в середине</label>
         <label class="chk"><input type="checkbox" id="clipMusic" checked> Музыка на фон (ломает аудио-отпечаток)</label>
+        <label class="chk"><input type="checkbox" id="pauseCut" checked> Вырезать паузы из речи</label>
         <div><label class="lbl" for="banFile">Какой баннер</label>
           <select id="banFile"><option value="">По умолчанию</option></select></div>
         <label class="chk"><input type="checkbox" id="manualChk"> Свои таймкоды вместо ИИ</label>
@@ -551,6 +552,8 @@
           <label class="chk"><input type="checkbox" id="twAnti"> Анти-детект (цвет · зум · зерно · звук)</label>
           <label class="chk"><input type="checkbox" id="twMir"> Зеркало (отразить видео)</label>
           <label class="chk"><input type="checkbox" id="twBan" checked> Баннер в середине</label>
+          <label class="chk"><input type="checkbox" id="twMusic" checked> Музыка на фон (ломает аудио-отпечаток)</label>
+          <label class="chk"><input type="checkbox" id="twPause" checked> Вырезать паузы из речи</label>
           <div><label class="lbl" for="twBanFile">Какой баннер</label>
             <select id="twBanFile"><option value="">По умолчанию</option></select></div>
         </div>
@@ -813,6 +816,7 @@
         <label class="chk"><input type="checkbox" id="sMir"> Зеркало по умолчанию</label>
         <label class="chk"><input type="checkbox" id="sBan" checked> Баннер по умолчанию</label>
         <label class="chk"><input type="checkbox" id="sMusic" checked> Музыка на фон по умолчанию</label>
+        <label class="chk"><input type="checkbox" id="sPause" checked> Вырезать паузы по умолчанию</label>
         <button class="btn" id="sSave">Сохранить настройки</button>
         <div class="subttl">Обучение ранкера</div>
         <div class="dim" id="learnBox" style="margin-bottom:10px">Загрузка…</div>
@@ -901,17 +905,19 @@ function fillClips(t,id,s){
     d.querySelector('.cs').textContent=c.dur+' сек · '+fmtSize(c.size);
     paintTagChips(d.querySelector('.tgs'),c.tags||[]);
     const fn=clipFileName(id,c);
-    d.querySelector('video').src='/api/clip/'+id+'/'+c.i;
+    const src='/api/short/'+encodeURIComponent(fn);
+    const variant=!/^\d+$/.test(String(c.i))||/v\d+\.mp4$/i.test(fn);
+    d.querySelector('video').src=src;
     d.querySelector('video').poster='/api/thumb/short/'+encodeURIComponent(fn);
     const links=d.querySelectorAll('.row a');
-    links[0].href='/api/clip/'+id+'/'+c.i;
+    links[0].href=src;
     links[1].href='/api/thumb/short/'+encodeURIComponent(fn);
     links[1].setAttribute('download','');
     const bs=d.querySelectorAll('.row button');
     bs[0].onclick=()=>copyCaption(c,fn);
-    if(bs[1])bs[1].onclick=()=>openTagModal(id,c.i,s,c,d);
-    if(bs[2])bs[2].onclick=()=>hideClip(id,c.i,d);
-    if(bs[3])bs[3].onclick=()=>delClip(id,c.i,d);
+    if(bs[1])bs[1].onclick=()=>openTagModal(id,Math.trunc(c.i),s,c,d);
+    if(bs[2])bs[2].onclick=()=>hideClip(id,Math.trunc(c.i),d);
+    if(bs[3])bs[3].onclick=()=>variant?delShortByName(fn,d):delClip(id,c.i,d);
     t.box.appendChild(d);
   });
   const za=document.createElement('a');za.className='zipall';
@@ -1013,7 +1019,7 @@ $('go').onclick=async ()=>{
         min_len:+$('lens').value.split('-')[0],max_len:+$('lens').value.split('-')[1],
         limit_min:+$('limit').value,
         captions:$('caps').checked&&mode!=='fast',facetrack:mode==='face'||mode==='split',
-        antidetect:$('anti').checked,mirror:$('mir').checked,banner:$('ban').checked,clip_music:$('clipMusic').checked,banner_file:$('banFile').value,asr_model:$('asd').value,gameplay:$('game').value,out_name:$('outName').value.trim(),fast:mode==='fast',vmode:mode==='fast'?'blur':mode,domain:$('domain').value,
+        antidetect:$('anti').checked,mirror:$('mir').checked,banner:$('ban').checked,clip_music:$('clipMusic').checked,remove_pauses:$('pauseCut').checked,banner_file:$('banFile').value,asr_model:$('asd').value,gameplay:$('game').value,out_name:$('outName').value.trim(),fast:mode==='fast',vmode:mode==='fast'?'blur':mode,domain:$('domain').value,
         hook:$('hookText').value.trim(),
         tags:formTagIds('cutTags'),
         stamps:$('manualChk').checked?$('stamps').value:''})});
@@ -1274,7 +1280,7 @@ $('twGo').onclick=async ()=>{
       urls:urls.join('\n'),api_key:$('twKey').value.trim(),
       want:+$('twWant').value,min_len:+mm[0],max_len:+mm[1],
       limit_min:+$('twLimit').value,tags:formTagIds('twTags'),
-      antidetect:$('twAnti').checked,mirror:$('twMir').checked,banner:$('twBan').checked,banner_file:$('twBanFile').value})});
+      antidetect:$('twAnti').checked,mirror:$('twMir').checked,banner:$('twBan').checked,clip_music:$('twMusic').checked,remove_pauses:$('twPause').checked,banner_file:$('twBanFile').value})});
     const j=await r.json();
     if(!j.ok)throw new Error(j.error||'Не вышло');
     for(const id of (j.jobs||[]))twLive.set(id,{});
@@ -1428,6 +1434,16 @@ async function delClipByName(f){
   const r=await fetch('/api/clip/'+p[0]+'/'+p[1],{method:'DELETE'});
   const j=await r.json();if(!j.ok)throw new Error(j.error||'Не вышло');
   loadClips();loadHistory();loadDashQuiet();toast('Удалено','ok');
+}
+async function delShortByName(fn,cardEl){
+  if(!confirm('Удалить этот клип с диска?'))return;
+  try{
+    const r=await fetch('/api/short/'+encodeURIComponent(fn),{method:'DELETE'});
+    const j=await r.json();if(!j.ok)throw new Error(j.error||'Не вышло');
+    if(cardEl)cardEl.remove();
+    toast('Клип удалён','ok');
+    loadClips();loadHistory();loadDashQuiet();
+  }catch(e){toast(e.message,'err');}
 }
 async function hideClip(id,idx,cardEl){
   try{
@@ -2280,6 +2296,7 @@ async function loadSettings(){
     $('sMir').checked=!!SETTINGS.mirror;
     $('sBan').checked=SETTINGS.banner!==false;
     $('sMusic').checked=SETTINGS.clip_music!==false;
+    $('sPause').checked=SETTINGS.remove_pauses!==false;
     refreshCustom();
     $('workerPill').textContent='workers · '+SETTINGS.max_workers;
     const s=await (await fetch('/api/stats')).json();
@@ -2291,7 +2308,7 @@ $('sSave').onclick=async ()=>{
     body:JSON.stringify({drex_key:$('sDrex').value.trim(),asr_api_key:$('sAsrKey').value.trim(),
       asr_api_base:$('sAsrBase').value.trim()||'https://gw.lunaroute.com/v1',want:+$('sWant').value,
       lens:$('sLens').value,limit_min:+$('sLimit').value,vmode:$('sVmode').value,asr_model:$('sAsd').value,gameplay:$('sGame').value,
-      max_workers:+$('sW').value,captions:$('sCaps').checked,antidetect:$('sAnti').checked,mirror:$('sMir').checked,banner:$('sBan').checked,clip_music:$('sMusic').checked})});
+      max_workers:+$('sW').value,captions:$('sCaps').checked,antidetect:$('sAnti').checked,mirror:$('sMir').checked,banner:$('sBan').checked,clip_music:$('sMusic').checked,remove_pauses:$('sPause').checked})});
   const j=await r.json();
   if(j.ok){SETTINGS={...SETTINGS,...j.settings};applyDefaults();toast('Настройки сохранены','ok');loadDashQuiet()}
 };
@@ -2315,6 +2332,10 @@ function applyDefaults(){
   $('mir').checked=!!SETTINGS.mirror;
   $('ban').checked=SETTINGS.banner!==false;
   $('clipMusic').checked=SETTINGS.clip_music!==false;
+  $('pauseCut').checked=SETTINGS.remove_pauses!==false;
+  $('twMusic').checked=SETTINGS.clip_music!==false;
+  $('twPause').checked=SETTINGS.remove_pauses!==false;
+  $('twAnti').checked=!!SETTINGS.antidetect;
   refreshCustom();
 }
 

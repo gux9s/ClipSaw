@@ -410,6 +410,18 @@ def _tiktok_af(*parts: str) -> str:
 _AUDIO_OUT = ["-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2"]
 
 
+def _mezz_codec_args() -> list:
+    """Промежуточник (чистка пауз, склейки) — почти без потерь:
+    VT 14М / x264 CRF15. Финальный рендер не складывает два
+    заметных сжатия подряд."""
+    if _VT:
+        return ["-c:v", "h264_videotoolbox", *_CODEC_BASE,
+                "-pix_fmt", "yuv420p", "-b:v", "14M", "-maxrate", "20M",
+                "-bufsize", "28M", "-allow_sw", "1", "-g", "60"]
+    return ["-c:v", "libx264", *_CODEC_BASE, "-pix_fmt", "yuv420p",
+            "-preset", "veryfast", "-crf", "15", "-tune", "film", "-g", "60"]
+
+
 def _bgm_dur(path: str) -> float:
     """Длительность фонового трека через ffmpeg Duration (аудио cv2 не читает)."""
     try:
@@ -2044,11 +2056,12 @@ def render_twitch_clip(src: str, moment: dict, segs, out: str,
                        captions: bool = True, progress=None,
                        antidetect: bool = False, mirror: bool = False,
                        banner: bool = True, banner_path: str | None = None,
-                       max_total: float | None = None):
+                       max_total: float | None = None,
+                       bgm: str | None = None):
     """Вертикаль 1080x1920 для стримов: верх 30% — вебка стримера
     (авто-поиск рамкой), низ 70% — его катка (вебка там затемнена).
     Режимы как в клипах: антидетект, зеркало, баннер Мусордроп по середине
-    (целиком, 95%, 1.4х). Сабы у шва, звук оригинала."""
+    (целиком, 95%, 1.4х). Сабы у шва, звук оригинала + свой фон (bgm)."""
     import cv2
     from PIL import Image, ImageDraw
     OUT_W2, OUT_H2 = 1080, 1920
@@ -2168,12 +2181,26 @@ def render_twitch_clip(src: str, moment: dict, segs, out: str,
         if antidetect:
             vf, _ = _antidetect_filters()
             qvf += "," + vf
+        else:
+            qvf += "," + _soft_unique_vf()
+        use_bgm = bool(bgm) and os.path.exists(bgm)
+        if use_bgm:
+            bargs, baf = _bgm_args(bgm, out_dur,
+                                   mute=[(oA, oB) for (oA, oB, _cA) in wins])
+            cmd += bargs
         cmd += ["-vf", qvf]
-        cmd += ["-map", "0:v", "-map", "1:a"] + _rand_meta()
+        if use_bgm:
+            cmd += ["-filter_complex",
+                    f"[1:a]{_TIKTOK_AF_TAIL}[av];[2:a]{baf}[bg];"
+                    f"[av][bg]amix=inputs=2:duration=first:normalize=0,"
+                    f"alimiter=limit=0.95[aout]",
+                    "-map", "0:v", "-map", "[aout]"]
+        else:
+            cmd += ["-map", "0:v", "-map", "1:a"]
+        cmd += _rand_meta()
     else:
         out_dur = od
-        cmd += ["-ss", str(start), "-t", str(round(dur, 2)), "-i", src,
-                "-map", "0:v", "-map", "1:a?"] + _rand_meta()
+        cmd += ["-ss", str(start), "-t", str(round(dur, 2)), "-i", src]
         qvf = _quality_vf()
         spd_af = [_LOUDNORM]
         if antidetect:
@@ -2181,12 +2208,30 @@ def render_twitch_clip(src: str, moment: dict, segs, out: str,
             qvf += "," + vf
             spd_af.append(af)
         else:
+            qvf += "," + _soft_unique_vf()
             _tk = random.uniform(1.005, 1.012)
             spd_af.append(
                 f"aresample=44100,asetrate=44100*{_tk:.4f},"
                 f"aresample=44100,atempo={1 / _tk:.4f}")
         spd_af.append(f"volume={random.uniform(0.95, 1.05):.3f}")
-        cmd += ["-vf", qvf, "-af", _tiktok_af(*spd_af)]
+        voice_af = _tiktok_af(*spd_af)
+        use_bgm = bool(bgm) and os.path.exists(bgm)
+        if use_bgm:
+            bargs, baf = _bgm_args(bgm, out_dur)
+            cmd += bargs
+            has_src_a = _has_audio_stream(src)
+            if has_src_a:
+                fc = (f"[1:a]{voice_af}[av];[2:a]{baf}[bg];"
+                      f"[av][bg]amix=inputs=2:duration=first:normalize=0,"
+                      f"alimiter=limit=0.95[aout]")
+            else:
+                fc = f"[2:a]{baf}[aout]"
+            cmd += ["-vf", qvf, "-filter_complex", fc,
+                    "-map", "0:v", "-map", "[aout]"]
+        else:
+            cmd += ["-vf", qvf, "-map", "0:v", "-map", "1:a?",
+                    "-af", voice_af]
+        cmd += _rand_meta()
     cmd += _video_codec_args(hq=True) + ["-pix_fmt", "yuv420p",
             *_AUDIO_OUT, "-movflags", "+faststart",
             "-t", str(round(out_dur, 2)), out]
@@ -2748,8 +2793,21 @@ def _quality_vf() -> str:
     return "hqdn3d=5:4:3:3,unsharp=5:5:0.5:5:5:0.0"
 
 
+def _soft_unique_vf() -> str:
+    """Тихий always-on слой уникальности: микроколор ±0.6% и зерно силой 1.
+    На глаз не видно, но покадровые хеши у каждого рендера свои —
+    дедуп платформы не цепляется за исходник один-в-один."""
+    import random
+    return (f"eq=contrast={random.uniform(0.994, 1.006):.4f}:"
+            f"saturation={random.uniform(0.986, 1.014):.4f}:"
+            f"brightness={random.uniform(-0.004, 0.004):.4f}:"
+            f"gamma={random.uniform(0.994, 1.006):.4f},"
+            f"noise=alls=1:allf=t")
+
+
 def _rand_meta() -> list:
     """Уникальные метаданные файла: рандомные время создания, кодер, соль.
+    Главы оригинала выкидываем — их заголовки тоже отпечаток источника.
     Content ID и хэши видят каждый рендер новым файлом."""
     import random
     import time
@@ -2757,28 +2815,32 @@ def _rand_meta() -> list:
                        time.gmtime(time.time() - random.randint(0, 900 * 86400)))
     enc = f"Lavf{random.choice(['58.29', '59.27', '60.16', '61.7'])}.{random.randint(100, 104)}"
     salt = "".join(random.choice("abcdef0123456789") for _ in range(8))
-    return ["-map_metadata", "-1",
+    return ["-map_metadata", "-1", "-map_chapters", "-1",
             "-metadata", f"creation_time={ts}",
+            "-metadata", f"date={ts[:10]}",
             "-metadata", f"encoder={enc}",
-            "-metadata", f"comment={salt}"]
+            "-metadata", f"comment={salt}",
+            "-metadata:s:v:0", "handler_name=VideoHandler",
+            "-metadata:s:a:0", "handler_name=SoundHandler"]
 
 
 def _antidetect_filters():
     """Усиленный антидетект: ВСЕ параметры случайные в диапазоне —
-    каждый рендер уникален. Давим в невидимых осях: гамма по каналам
-    и микро-зерно (качество не страдает), плюс подъём питча на 1-4%
-    без смены длительности (аудио)."""
+    каждый рендер уникален. Держим сдвиги почти невидимыми (контраст
+    до 5%, гамма ±2%), зато по многим осям: каналы, оттенок, зерно,
+    срез низа и питч 1-3.5% без смены длительности (аудио)."""
     import random
-    vf = (f"eq=contrast={random.uniform(1.05, 1.09):.3f}:"
-          f"saturation={random.uniform(1.10, 1.14):.3f}:"
-          f"brightness={random.uniform(0.010, 0.020):.3f}:"
-          f"gamma_r={random.uniform(0.97, 1.03):.3f}:"
-          f"gamma_g={random.uniform(0.97, 1.03):.3f}:"
-          f"gamma_b={random.uniform(0.97, 1.03):.3f},"
-          f"hue=h={random.uniform(-4, 4):.1f},"
+    vf = (f"eq=contrast={random.uniform(1.02, 1.05):.3f}:"
+          f"saturation={random.uniform(1.05, 1.10):.3f}:"
+          f"brightness={random.uniform(0.006, 0.016):.3f}:"
+          f"gamma_r={random.uniform(0.98, 1.02):.3f}:"
+          f"gamma_g={random.uniform(0.98, 1.02):.3f}:"
+          f"gamma_b={random.uniform(0.98, 1.02):.3f},"
+          f"hue=h={random.uniform(-3, 3):.1f},"
           f"noise=alls={random.randint(1, 2)}:allf=t")
-    k = random.uniform(1.01, 1.04)
-    af = (f"aresample=44100,asetrate=44100*{k:.4f},"
+    k = random.uniform(1.01, 1.035)
+    af = (f"highpass=f=32,"
+          f"aresample=44100,asetrate=44100*{k:.4f},"
           f"aresample=44100,atempo={1 / k:.4f}")
     return vf, af
 
@@ -3245,11 +3307,14 @@ def strip_bar_file(src: str) -> str:
         if not bar:
             return src
         out = src + ".nobar.mp4"
+        _msrc = _real_dur(src)
+        _cargs = (_mezz_codec_args() if (not _msrc or _msrc <= 5400)
+                  else _video_codec_args())
         subprocess.run(
             [FFMPEG, "-y", "-v", "error", "-i", src,
              "-vf", f"crop=iw:ih-{bar}:0:0",
              "-map", "0:v", "-map", "0:a?"] + _rand_meta()
-            + _video_codec_args()
+            + _cargs
             + ["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", out],
             timeout=1800, check=True)
         if not _readable_video(out):
@@ -3758,13 +3823,11 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
         vf_ad = "," + _vf0
         af_ad = "," + _af0
     else:
-        # always-on: лёгкий питч + цвет, глаз не видит, Content ID — да
+        # always-on: лёгкий питч + тихий цвет/зерно, глаз не видит, дедуп — да
         _k = random.uniform(1.005, 1.012)
         af_ad = (f",aresample=44100,asetrate=44100*{_k:.4f},"
                  f"aresample=44100,atempo={1 / _k:.4f}")
-        vf_ad = (f",eq=contrast={random.uniform(1.02, 1.04):.3f}:"
-                 f"saturation={random.uniform(1.04, 1.08):.3f}:"
-                 f"brightness={random.uniform(0.004, 0.010):.3f}")
+        vf_ad = "," + _soft_unique_vf()
     fc = [f"[0:v]trim=start={off:.3f}:end={off + dur:.3f},setpts=(PTS-STARTPTS)/{spd:.4f}[cbase]",
           f"[cbase]split={len(segs2)}" + "".join(f"[cs{i}]" for i in range(len(segs2)))]
     # подменяем split-источник на именованные чанки
@@ -4583,46 +4646,64 @@ def _has_audio_stream(path: str) -> bool:
 
 def remove_silence(src: str, out: str, min_sil: float = 0.8,
                    thresh_db: float = -40.0, pad: float = 0.25,
-                   progress=None) -> str:
+                   progress=None, window: tuple | None = None,
+                   detect: bool = True, hq: bool | None = None) -> str:
     """Аккуратно вырезает тишину: паузы от 0.8с тише -40дБ, по краям речи
-    подушка 0.25с, короткие огрызки не трогаем. Без пауз — возвращает src
-    как есть (без перекода)."""
-    import shutil
+    подушка 0.25с, короткие огрызки не трогаем. window=(a,b) — работаем
+    только внутри окна исходной шкалы (ручные таймкоды: без 8с запаса
+    на входе), detect=False — просто точная подрезка окна. hq — промежуточник
+    почти без потерь (авто: до 90 мин 14М, длиннее — 6-8М, чтобы не забить
+    диск). Без пауз и без окна — возвращает src как есть."""
     W, H, N, FPS = _probe_wh_fps(src)
     if N <= 0 or FPS <= 0:
         raise RuntimeError("не читается видео")
-    dur = N / FPS
-    r = subprocess.run(
-        [FFMPEG, "-v", "info", "-i", src,
-         "-af", f"silencedetect=noise={thresh_db}dB:d={min_sil}",
-         "-f", "null", "-"],
-        capture_output=True, text=True, timeout=600)
+    dur = _real_dur(src) or N / FPS
+    use_hq = hq if hq is not None else dur <= 5400.0
     sils = []
-    cur_s = None
-    for line in (r.stderr or "").splitlines():
-        m1 = re.search(r"silence_start:\s*([\d.]+)", line)
-        m2 = re.search(r"silence_end:\s*([\d.]+)", line)
-        if m1:
-            cur_s = float(m1.group(1))
-        elif m2 and cur_s is not None:
-            sils.append((cur_s, float(m2.group(1))))
-            cur_s = None
-    cuts = [(max(s + pad, 0.0), min(e - pad, dur))
+    if detect:
+        r = subprocess.run(
+            [FFMPEG, "-v", "info", "-i", src,
+             "-af", f"silencedetect=noise={thresh_db}dB:d={min_sil}",
+             "-f", "null", "-"],
+            capture_output=True, text=True, timeout=600)
+        cur_s = None
+        for line in (r.stderr or "").splitlines():
+            m1 = re.search(r"silence_start:\s*([\d.]+)", line)
+            m2 = re.search(r"silence_end:\s*([\d.]+)", line)
+            if m1:
+                cur_s = float(m1.group(1))
+            elif m2 and cur_s is not None:
+                sils.append((cur_s, float(m2.group(1))))
+                cur_s = None
+    if window:
+        try:
+            w0, w1 = float(window[0]), float(window[1])
+        except (TypeError, ValueError):
+            w0, w1 = 0.0, dur
+        ws, we = max(0.0, w0), min(dur, w1)
+        if we - ws < 0.3:
+            raise RuntimeError("окно вне видео")
+    else:
+        ws, we = 0.0, dur
+    cuts = [(max(s + pad, ws), min(e - pad, we))
             for s, e in sils if e - pad > s + pad + 0.3]
-    if not cuts:
+    cuts = [(s, e) for s, e in cuts if e > s]
+    if not cuts and window is None:
         if progress:
             progress(100, "тишины нет — как есть")
         return src
-    keep, cur = [], 0.0
+    keep, cur = [], ws
     for s, e in sorted(cuts):
         if s > cur + 0.1:
             keep.append((cur, s))
         cur = max(cur, e)
-    if cur < dur - 0.1:
-        keep.append((cur, dur))
+    if cur < we - 0.1:
+        keep.append((cur, we))
     keep = [(s, e) for s, e in keep if e - s > 0.3]
     if not keep:
-        return src
+        if window is None:
+            return src
+        raise RuntimeError("в окне не осталось материала")
     if progress:
         progress(20, f"режу {len(cuts)} пауз…")
     fc = []
@@ -4641,8 +4722,10 @@ def remove_silence(src: str, out: str, min_sil: float = 0.8,
     subprocess.run(
         [FFMPEG, "-y", "-v", "error", "-i", src,
          "-filter_complex", ";".join(fc),
-         "-map", "[vout]"] + amap + _rand_meta() + _video_codec_args() + [
-             *_AUDIO_OUT, "-movflags", "+faststart", out],
+         "-map", "[vout]"] + amap + _rand_meta()
+        + (_mezz_codec_args() if use_hq else _video_codec_args())
+        + ["-c:a", "aac", "-b:a", "256k", "-ar", "48000", "-ac", "2",
+           "-movflags", "+faststart", out],
         timeout=1800, check=True)
     if progress:
         progress(100, "готово")
@@ -5004,7 +5087,8 @@ def overlay_banner_mid(src: str, out: str, banner_path: str | None = None,
         f"[1:v]setpts=PTS/{speed:.4f},trim=end={b_eff:.3f},setpts=PTS-STARTPTS,"
         f"scale={sw}:{sh},fps={fps_i},{_fmt}[bb];"
         f"[frz][bb]overlay={ox}:{oy}:eof_action=pass[vmid];"
-        f"[v0][vmid][v1]concat=n=3:v=1:a=0,copy[vout]")
+        f"[v0][vmid][v1]concat=n=3:v=1:a=0,{_soft_unique_vf()},"
+        f"scale=trunc(iw/2)*2:trunc(ih/2)*2,copy[vout]")
     if _has_audio_stream(src):
         fc += (";"
                f"[0:a]atrim=start=0:end={mid:.3f},asetpts=PTS-STARTPTS[a0];"
@@ -5031,7 +5115,7 @@ def overlay_banner_mid(src: str, out: str, banner_path: str | None = None,
          "-i", frame_png,
          "-filter_complex", fc,
          "-map", "[vout]"] + amap + _rand_meta()
-        + _video_codec_args() + [*_AUDIO_OUT, "-movflags", "+faststart", out],
+        + _video_codec_args(hq=True) + [*_AUDIO_OUT, "-movflags", "+faststart", out],
         timeout=1800, check=True)
     for p in (uniq_b, frame_png):
         try:
@@ -5873,7 +5957,8 @@ def render_blur9(src: str, moment: dict, segs, out: str,
         voice_af = _tiktok_af(
             af, _LOUDNORM, f"volume={_brnd.uniform(0.95, 1.05):.3f}")
     else:
-        # always-on: лёгкий питч + громкость, иначе звук 1:1 с оригиналом
+        # always-on: лёгкий питч + тихий цвет/зерно, иначе звук и кадры 1:1
+        qvf += "," + _soft_unique_vf()
         _bk = _brnd.uniform(1.005, 1.012)
         voice_af = _tiktok_af(
             f"aresample=44100,asetrate=44100*{_bk:.4f},"
@@ -6119,6 +6204,9 @@ def render_story_part(src: str, moment: dict, segs, out: str,
     if unique:
         uvf, _uaf = _antidetect_filters()
         vf += "," + uvf
+    else:
+        # даже без «уникализации»: тихий always-on слой, кадры не 1:1 с исходником
+        vf += "," + _soft_unique_vf()
     if ass_path:
         vf += f",subtitles={_fesc(ass_path)}"
     cmd += ["-vf", vf]
@@ -6130,8 +6218,11 @@ def render_story_part(src: str, moment: dict, segs, out: str,
                   f"aresample=44100,atempo={spd / k:.5f}")
             vol = random.uniform(0.97, 1.02)
         else:
-            af = f"atempo={spd:.5f}" if abs(spd - 1.0) > 1e-4 else ""
-            vol = 1.0
+            # «уникализация» выключена, но голос всё равно не 1:1 с исходником
+            _uk = random.uniform(1.004, 1.012)
+            af = (f"aresample=44100,asetrate=44100*{_uk:.4f},"
+                  f"aresample=44100,atempo={spd / _uk:.5f}")
+            vol = random.uniform(0.98, 1.02)
         voice = _tiktok_af(af, _STORY_LOUDNORM, f"volume={vol:.3f}")
         fc = (f"[1:a]{voice}[voice];"
               f"[2:a]volume={bgm_vol:.3f},aresample=48000,"
@@ -6146,8 +6237,11 @@ def render_story_part(src: str, moment: dict, segs, out: str,
                   f"aresample=44100,atempo={spd / k:.5f}")
             vol = random.uniform(0.97, 1.02)
         else:
-            af = f"atempo={spd:.5f}" if abs(spd - 1.0) > 1e-4 else ""
-            vol = 1.0
+            # «уникализация» выключена, но голос всё равно не 1:1 с исходником
+            _uk = random.uniform(1.004, 1.012)
+            af = (f"aresample=44100,asetrate=44100*{_uk:.4f},"
+                  f"aresample=44100,atempo={spd / _uk:.5f}")
+            vol = random.uniform(0.98, 1.02)
         cmd += ["-af", _tiktok_af(af, _STORY_LOUDNORM, f"volume={vol:.3f}")]
     elif use_bgm:
         fc = (f"[2:a]volume={bgm_vol:.3f},aresample=48000,"
@@ -6524,8 +6618,9 @@ def render_clip(src: str, moment: dict, segs, out: str, facetrack: bool = True,
         voice_af = _tiktok_af(
             af, _LOUDNORM, f"volume={_rnd.uniform(0.95, 1.05):.3f}")
     else:
-        # Базовый always-on слой: даже без чекбокса звук чуть отличается
-        # от оригинала (иначе Content ID по аудио = 0 просмотров).
+        # Базовый always-on слой: даже без чекбокса звук и кадры чуть
+        # отличаются от оригинала (дедуп платформы не цепляется).
+        qvf += "," + _soft_unique_vf()
         _ck = _rnd.uniform(1.005, 1.012)
         voice_af = _tiktok_af(
             f"aresample=44100,asetrate=44100*{_ck:.4f},"
