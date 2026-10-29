@@ -800,7 +800,7 @@
 
       <div class="card" style="margin-top:12px">
         <div class="step"><b>03</b><span>Расписание публикаций</span></div>
-        <div class="dim" style="margin-bottom:8px">Окна Camoufox откроются сразу после постановки в очередь — по одному на аккаунт. В каждом видео и текст уже стоят, а время публикации выставлено в самом TikTok Studio; ты только проверяешь и жмёшь «Запланировать».</div>
+        <div class="dim" style="margin-bottom:8px">Окна Camoufox откроются сразу после постановки в очередь — по одному на аккаунт. Видео загружаются пачкой через bulk: в каждой строке уже стоят текст и время выхода, ты только проверяешь и жмёшь одну кнопку «Post (N)».</div>
         <div class="ai-grid">
           <div><label class="lbl" for="pPreset">Пресет описания и тегов</label><select id="pPreset"><option value="auto">Из задачи (выбрал при нарезке)</option><option value="0">Без описания</option></select></div>
           <div><label class="lbl" for="pStart">Первая публикация</label><input id="pStart" type="datetime-local"></div>
@@ -2586,7 +2586,7 @@ function applyDefaults(){
 
 /* ---------- постинг ---------- */
 const POST_LABEL={queued:'в очереди',starting:'запускается',running:'заполняю',
-  waiting:'ждёт «Запланировать»',login:'нужен вход',manual:'вручную',
+  waiting:'ждёт Post',login:'нужен вход',manual:'вручную',
   done:'готово',closed:'закрыто',error:'ошибка',canceled:'отменено'};
 const POST_USED=['queued','starting','running','waiting','login','manual','done'];
 let POST_LIB=[],PRESETS=[],POSTS=[],POST_PROFILES=[],P_SEL=new Map(),P_ACCS=new Set(),
@@ -2846,7 +2846,12 @@ function paintPosts(){
       mk('Удалить',()=>delPost(p.id));
     }else if(['starting','running','waiting','login','manual'].includes(p.status)){
       if(['waiting','login','manual'].includes(p.status))mk('Готово',()=>postAction(p.id,'done'));
-      mk('Отменить',()=>postAction(p.id,'cancel'));
+      const pack=p.pid?POSTS.filter(x=>x.pid===p.pid
+        &&['starting','running','waiting','login','manual'].includes(x.status)).length:0;
+      mk(pack>1?'Отменить пачку':'Отменить',()=>{
+        if(pack>1&&!confirm('В одном окне '+pack+' видео — отменится вся пачка. Продолжить?'))return;
+        postAction(p.id,'cancel');
+      });
     }else{
       mk('Повторить',()=>postAction(p.id,'now'));
       mk('Удалить',()=>delPost(p.id));

@@ -3497,6 +3497,7 @@ AUTOPOST_DIR = os.path.join(TMP_DIR, "autopost")
 os.makedirs(AUTOPOST_DIR, exist_ok=True)
 TIKTOKUA_DIR = os.path.expanduser("~/Library/Application Support/TikTokUA")
 AUTOPOST_PROFILES = ("1", "2", "3")
+AUTOPOST_BULK_MAX = 30  # студия принимает до 30 видео за раз
 AUTOPOST_ACTIVE = ("starting", "running", "waiting", "login", "manual")
 AUTOPOST_FINAL = ("done", "closed", "error", "canceled")
 AUTOPOST_LOCK = threading.Lock()
@@ -3703,12 +3704,13 @@ def _parse_when(v, default):
         return default
 
 
-def _autopost_spawn(c, r):
-    """Запустить браузер профиля под конкретную публикацию."""
-    src = _post_target(r["file"], r["kind"])
-    if not src:
-        return None, "файл не найден в библиотеке"
-    acc = str(r["account"] or "1")
+def _autopost_spawn(c, rows):
+    """Открыть окно профиля и загрузить пачку видео через bulk-режим.
+    В одну пачку идут все queued-видео одного аккаунта (до 30)."""
+    rows = list(rows)[:AUTOPOST_BULK_MAX]
+    if not rows:
+        return None, "пустая очередь"
+    acc = str(rows[0]["account"] or "1")
     if acc not in AUTOPOST_PROFILES:
         return None, f"нет профиля {acc}"
     venv_py = os.path.join(TIKTOKUA_DIR, ".venv", "bin", "python")
@@ -3720,19 +3722,45 @@ def _autopost_spawn(c, r):
     profile = os.path.join(TIKTOKUA_DIR, "profiles", f"account-{acc}")
     if not os.path.isdir(profile):
         return None, f"нет профиля account-{acc} — открой TikTok UA {acc} раз"
-    cfg_path, status_path, log_path = _autopost_paths(r["id"])
+
+    items, broken = [], []
+    for r in rows:
+        src = _post_target(r["file"], r["kind"])
+        if not src:
+            broken.append((r["id"], "файл не найден в библиотеке"))
+            continue
+        _cfg, status_path, _log = _autopost_paths(r["id"])
+        try:
+            if os.path.exists(status_path):
+                os.remove(status_path)
+        except OSError:
+            pass
+        items.append({
+            "post_id": r["id"], "file": src,
+            "name": os.path.basename(src),
+            "caption": r["caption"] or "",
+            "publish_at": float(r["scheduled"] or 0),
+            "status_file": status_path})
+        if len(items) >= AUTOPOST_BULK_MAX:
+            break
+    for pid, err in broken:
+        with c:
+            c.execute("UPDATE posts SET status='error', stage='не запустилось',"
+                      " error=?, finished=? WHERE id=?",
+                      (err, time.time(), pid))
+    if not items:
+        return None, broken[0][1] if broken else "нет видео для загрузки"
+
+    leader = items[0]["post_id"]
+    cfg_path, _status_path, log_path = _autopost_paths(leader)
     try:
-        if os.path.exists(status_path):
-            os.remove(status_path)
         if os.path.isfile(log_path) and os.path.getsize(log_path) > 3 * 1024 * 1024:
             os.remove(log_path)
     except OSError:
         pass
     _atomic_json(cfg_path, {
-        "post_id": r["id"], "file": src, "caption": r["caption"] or "",
-        "account": acc, "profile_dir": profile,
-        "publish_at": float(r["scheduled"] or 0),
-        "status_file": status_path, "log_file": log_path})
+        "batch": len(items) > 1, "account": acc, "profile_dir": profile,
+        "log_file": log_path, "items": items})
     try:
         with open(log_path, "ab", buffering=0) as logf:
             proc = subprocess.Popen(
@@ -3740,13 +3768,23 @@ def _autopost_spawn(c, r):
                 stdout=logf, stderr=subprocess.STDOUT,
                 cwd=BASE, start_new_session=True)
     except Exception as ex:
+        with c:
+            for it in items:
+                c.execute("UPDATE posts SET status='error',"
+                          " stage='не запустилось', error=?, finished=?"
+                          " WHERE id=?",
+                          (f"не удалось запустить браузер: {ex}",
+                           time.time(), it["post_id"]))
         return None, f"не удалось запустить браузер: {ex}"
-    AUTOPOST_PROCS[r["id"]] = proc
     now = time.time()
     with c:
-        c.execute("UPDATE posts SET status='starting', stage='запускаю браузер…',"
-                  " error='', pid=?, started=? WHERE id=?",
-                  (proc.pid, now, r["id"]))
+        for it in items:
+            c.execute("UPDATE posts SET status='starting',"
+                      " stage='запускаю браузер…', error='', pid=?, started=?"
+                      " WHERE id=?", (proc.pid, now, it["post_id"]))
+    AUTOPOST_PROCS[leader] = proc
+    for it in items[1:]:
+        AUTOPOST_PROCS[it["post_id"]] = proc
     return proc.pid, ""
 
 
@@ -3761,12 +3799,21 @@ def _autopost_tick():
             new = str(st.get("status") or "")
             stage = str(st.get("stage") or r["stage"] or "")
             err = str(st.get("error") or "")
+            if new == "queued":
+                # раннер вернул видео в очередь (bulk не сложился)
+                with c:
+                    c.execute("UPDATE posts SET status='queued', stage='',"
+                              " error='', pid=NULL, started=NULL WHERE id=?",
+                              (r["id"],))
+                AUTOPOST_PROCS.pop(r["id"], None)
+                continue
             target = ""
             if new in ("published", "scheduled"):
                 target = "done"
             elif new in ("closed", "canceled", "error"):
                 target = new
-            elif new in AUTOPOST_ACTIVE and new != r["status"]:
+            elif new in AUTOPOST_ACTIVE and (
+                    new != r["status"] or (stage and stage != r["stage"])):
                 target = new
             if target in AUTOPOST_FINAL:
                 with c:
@@ -3800,20 +3847,25 @@ def _autopost_tick():
             return
         due = c.execute("SELECT * FROM posts WHERE status='queued'"
                         " ORDER BY scheduled, id").fetchall()
+        groups = {}
         for q in due:
             acc = str(q["account"] or "1")
-            if acc in busy:
+            if acc not in AUTOPOST_PROFILES or acc in busy:
                 continue
-            pid, err = _autopost_spawn(c, q)
-            if not pid:
-                with c:
-                    c.execute("UPDATE posts SET status='error', stage='не запустилось',"
-                              " error=?, finished=? WHERE id=?",
-                              (err[:300], time.time(), q["id"]))
-                continue
-            busy.add(acc)
+            groups.setdefault(acc, []).append(q)
+        for acc, batch_rows in groups.items():
             if len(busy) >= len(AUTOPOST_PROFILES):
                 break
+            pid, err = _autopost_spawn(c, batch_rows)
+            if not pid:
+                with c:
+                    for b in batch_rows:
+                        c.execute("UPDATE posts SET status='error',"
+                                  " stage='не запустилось', error=?, finished=?"
+                                  " WHERE id=?",
+                                  (err[:300], time.time(), b["id"]))
+                continue
+            busy.add(acc)
     finally:
         c.close()
 
@@ -4120,16 +4172,26 @@ def api_post_cancel(pid):
                 return jsonify({"ok": False,
                                 "error": "Уже не выполняется — просто удали"}), 400
             proc_pid = r["pid"]
+            sib = [pid]
+            if proc_pid:
+                sib = [x["id"] for x in c.execute(
+                    "SELECT id FROM posts WHERE pid=? AND status IN (?,?,?,?,?)",
+                    (proc_pid,) + AUTOPOST_ACTIVE).fetchall()]
+                if pid not in sib:
+                    sib.append(pid)
             with c:
-                c.execute("UPDATE posts SET status='canceled', stage='отменено',"
-                          " finished=?, pid=NULL WHERE id=?", (time.time(), pid))
+                for sid in sib:
+                    c.execute("UPDATE posts SET status='canceled',"
+                              " stage='отменено', finished=?, pid=NULL"
+                              " WHERE id=?", (time.time(), sid))
         finally:
             c.close()
     except Exception:
         import traceback
         traceback.print_exc()
         return jsonify({"ok": False, "error": "Не удалось отменить"}), 500
-    AUTOPOST_PROCS.pop(pid, None)
+    for sid in sib:
+        AUTOPOST_PROCS.pop(sid, None)
     if proc_pid:
         _autopost_stop(proc_pid)
         threading.Thread(target=_autopost_kill_later, args=(proc_pid,),
@@ -4197,6 +4259,25 @@ def api_posts_clear():
 @app.get("/api/posts/<int:pid>/log")
 def api_post_log(pid):
     _cfg, _status, log_path = _autopost_paths(pid)
+    if not os.path.isfile(log_path):
+        # видео из пачки пишут один общий лог лидера
+        try:
+            c = _connect()
+            try:
+                r = c.execute("SELECT pid FROM posts WHERE id=?", (pid,)).fetchone()
+                if r and r["pid"]:
+                    sib = c.execute(
+                        "SELECT id FROM posts WHERE pid=? AND id!=?",
+                        (r["pid"], pid)).fetchall()
+                    for x in sib:
+                        p = _autopost_paths(x["id"])[2]
+                        if os.path.isfile(p):
+                            log_path = p
+                            break
+            finally:
+                c.close()
+        except Exception:
+            pass
     try:
         with open(log_path, "rb") as f:
             f.seek(0, os.SEEK_END)
