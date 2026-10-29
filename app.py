@@ -1,4 +1,4 @@
-"""ClipSaw web — ссылка на YouTube -> пачка вертикальных шортсов.
+"""Lipps by huakly web — ссылка на YouTube -> пачка вертикальных шортсов.
 Только нарезка сериалов/фильмов: сцены -> транскрибация -> LLM-скоринг -> 9:16 -> субтитры."""
 import csv
 import io
@@ -90,7 +90,7 @@ DEFAULT_CFG = {"gemini_key": "", "drex_key": "", "want": 8, "gameplay": "subway.
                "asr_api_base": "https://gw.lunaroute.com/v1", "max_workers": 2}
 
 
-DB_VERSION = 10
+DB_VERSION = 11
 
 
 def _connect():
@@ -242,6 +242,35 @@ def init_db():
                           " ON video_metrics(account_id, ts)")
                 c.execute("CREATE INDEX IF NOT EXISTS ix_video_metrics_vid"
                           " ON video_metrics(account_id, video_id, ts)")
+            if ver < 11:
+                # пресеты: варианты описаний (через строку '---') и наборы
+                # тегов (по строке) — один пресет на все нарезки серии
+                c.execute("""CREATE TABLE IF NOT EXISTS presets(
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  name TEXT UNIQUE NOT NULL,
+                  descs TEXT NOT NULL DEFAULT '',
+                  tagsets TEXT NOT NULL DEFAULT '',
+                  created REAL)""")
+                # очередь публикаций: файл -> пресет -> аккаунт -> время
+                c.execute("""CREATE TABLE IF NOT EXISTS posts(
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  file TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'short',
+                  title TEXT NOT NULL DEFAULT '',
+                  preset_id INTEGER, caption TEXT NOT NULL DEFAULT '',
+                  account TEXT NOT NULL DEFAULT '1',
+                  scheduled REAL NOT NULL,
+                  status TEXT NOT NULL DEFAULT 'queued',
+                  stage TEXT NOT NULL DEFAULT '',
+                  error TEXT NOT NULL DEFAULT '',
+                  pid INTEGER,
+                  created REAL, started REAL, finished REAL)""")
+                c.execute("CREATE INDEX IF NOT EXISTS ix_posts_due"
+                          " ON posts(status, scheduled)")
+                c.execute("CREATE INDEX IF NOT EXISTS ix_posts_file"
+                          " ON posts(file, kind)")
+                jcols = [r[1] for r in c.execute("PRAGMA table_info(jobs)").fetchall()]
+                if "preset_id" not in jcols:
+                    c.execute("ALTER TABLE jobs ADD COLUMN preset_id INTEGER")
             c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES ('version',?)",
                       (str(DB_VERSION),))
     finally:
@@ -252,7 +281,8 @@ def db():
     return _connect()
 
 
-def log_job(job_id, title, url, status, clips=None, scorer="heuristic", tags=None):
+def log_job(job_id, title, url, status, clips=None, scorer="heuristic", tags=None,
+            preset_id=None):
     clips = clips or []
     try:
         c = _connect()
@@ -262,11 +292,12 @@ def log_job(job_id, title, url, status, clips=None, scorer="heuristic", tags=Non
             with c:
                 c.execute(
                     "INSERT OR REPLACE INTO jobs"
-                    "(id,title,url,status,created,finished,clips,total_size,scorer)"
-                    " VALUES (?,?,?,?,?,?,?,?,?)",
+                    "(id,title,url,status,created,finished,clips,total_size,scorer,preset_id)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?)",
                     (job_id, title or "", url or "", status, created, time.time(),
                      json.dumps(clips, ensure_ascii=False),
-                     sum(int(x.get("size", 0) or 0) for x in clips), scorer))
+                     sum(int(x.get("size", 0) or 0) for x in clips), scorer,
+                     _preset_id_value(preset_id)))
                 c.execute("DELETE FROM clips WHERE job_id=?", (job_id,))
                 # повторная запись задачи — новые клипы: старые теги и
                 # привязки к публикациям к ним уже не относятся
@@ -520,7 +551,7 @@ def _fmt_ts(t: float) -> str:
     return f"{t // 3600:02d}:{(t % 3600) // 60:02d}:{t % 60:02d}"
 
 
-def _story_manual_moments(stamps, kind, total_dur=0.0):
+def _story_manual_moments(stamps, kind, total_dur=0.0, segs=None):
     """Ручные таймкоды -> моменты в формате историй.
     kind='parts' нумерует части и вешает «продолжение» только на последнюю;
     kind='moments' оставляет самостоятельные моменты без нумерации."""
@@ -532,6 +563,8 @@ def _story_manual_moments(stamps, kind, total_dur=0.0):
             continue
         if s < 0 or e <= s:
             continue
+        # границы — к целым словам, иначе ручной таймкод режет полслова
+        s, e = ac.snap_words(s, e, segs)
         if total_dur:
             if s >= total_dur:
                 continue
@@ -572,6 +605,44 @@ def _slice_copy(src: str, s: float, dur: float, out: str) -> str:
     if not ac._readable_video(out):
         raise RuntimeError("вырез куска не удался")
     return out
+
+
+def _manual_story_cut(src, m, segs):
+    """История по своим таймкодам: точный вырез отрезка + паузы без речи
+    (по словам и silero VAD — даже поверх музыки). Возвращает локальные
+    (файл, момент, сегменты) и временные файлы на удаление."""
+    s, e = float(m["start"]), float(m["end"])
+    dur = max(e - s, 1.0)
+    cut = os.path.join(TMP_DIR, uuid.uuid4().hex + ".mp4")
+    _slice_copy(src, s, dur, cut)
+    words = []
+    for sg in (segs or []):
+        for w in (sg.get("words") or []):
+            if w["e"] > s and w["s"] < e:
+                words.append({"w": w["w"],
+                              "s": max(w["s"] - s, 0.0),
+                              "e": min(w["e"] - s, dur)})
+    words.sort(key=lambda w: w["s"])
+    gaps = ac.speech_gaps(words, 0.0, dur) if words else []
+    gaps += ac.vad_gaps(cut, 0.0, dur)
+    keeps = []
+    clean = os.path.join(TMP_DIR, uuid.uuid4().hex + ".mp4")
+    try:
+        got = ac.remove_silence(cut, clean, window=(0.0, dur),
+                                silences=gaps, keep_out=keeps)
+    except Exception as ex:
+        print("[story pauses]", ex)
+        try:
+            if os.path.exists(clean):
+                os.remove(clean)
+        except OSError:
+            pass
+        got, keeps = cut, [(0.0, dur)]
+    local = ac.remap_segs([{"start": 0.0, "end": dur, "words": words}], keeps)
+    mm = dict(m)
+    mm["start"] = 0.0
+    mm["end"] = ac.media_duration(got) or round(dur, 1)
+    return got, mm, local, [cut, clean]
 
 
 def run_manual_job(job_id: str, url: str, opts: dict, stamps: list, prog) -> list:
@@ -616,17 +687,44 @@ def run_manual_job(job_id: str, url: str, opts: dict, stamps: list, prog) -> lis
                             stage=f"момент {_i + 1}/{total}…", pct=npct)
 
         s, e = float(m["start"]), float(m["end"])
-        # паузы внутри момента — вон. Рендерим ровно [s, e]: слайс начинается
-        # с s-pad, поэтому окно = (pre, pre + длина), иначе в клип попадали
-        # лишние 8 секунд до таймкода.
+        # окно внутри слайса: слайс начинается с s-8, поэтому окно =
+        # (pre, pre + длина), иначе в клип попадали лишние 8 секунд до таймкода
         pre = s - max(s - 8.0, 0.0)
         clip_len = max(e - s, 1.0)
+        # ручной таймкод часто падает в середину слова — клип начинался
+        # или заканчивался обрубком. Тянем границы к целым словам по
+        # пословной транскрибации слайса (в его локальной шкале).
+        segs_p = []
+        try:
+            segs_p, _lp = ac.transcribe(
+                p, 0, progress=lambda q, st: _pp(q / 34.0 * 0.12),
+                model_name=opts.get("asr_model", "giga"),
+                api_key=opts.get("asr_api_key", ""),
+                api_base=opts.get("asr_api_base", ""))
+            ws, we = ac.snap_words(pre, pre + clip_len, segs_p)
+            pdur = ac.media_duration(p) or 0.0
+            if pdur > 0:
+                ws, we = max(0.0, ws), min(pdur, we)
+            if we - ws >= 0.5:
+                pre, clip_len = ws, we - ws
+        except Exception as ex:
+            print("[manual words]", ex)
+        want_pauses = bool(opts.get("remove_pauses", True))
+        # паузы без речи: по словам + silero VAD (слова ASR иногда
+        # растягиваются через паузу — VAD слушает звук и страхует)
+        gaps = []
+        if want_pauses:
+            gaps = ac.speech_gaps(
+                [w for sg in segs_p for w in (sg.get("words") or [])],
+                pre, pre + clip_len)
+            gaps += ac.vad_gaps(p, pre, pre + clip_len)
+        keeps = []
         clean = os.path.join(TMP_DIR, uuid.uuid4().hex + ".mp4")
         try:
             got = ac.remove_silence(
                 p, clean,
                 window=(pre, pre + clip_len),
-                detect=bool(opts.get("remove_pauses", True)),
+                detect=want_pauses, silences=gaps, keep_out=keeps,
                 progress=lambda q, st: _pp(q * 0.10, ))
         except Exception as ex:
             print("[manual pauses]", ex)
@@ -635,17 +733,25 @@ def run_manual_job(job_id: str, url: str, opts: dict, stamps: list, prog) -> lis
                     os.remove(clean)
             except OSError:
                 pass
-            got = p
+            # паузы не почистились — хотя бы точное окно, без 8с запаса
+            trim = os.path.join(TMP_DIR, uuid.uuid4().hex + ".mp4")
+            try:
+                _slice_copy(p, pre, clip_len, trim)
+                got = trim
+                keeps = [(pre, pre + clip_len)]
+            except Exception as ex2:
+                print("[manual trim]", ex2)
+                try:
+                    if os.path.exists(trim):
+                        os.remove(trim)
+                except OSError:
+                    pass
+                got = p
         stage_in = got
-        # субтитры: транскрибация ТОЛЬКО этих минут, а не всего видео
-        try:
-            segs_i, _lang = ac.transcribe(
-                stage_in, 0, progress=lambda q, st: _pp(0.10 + q * 0.25),
-                model_name=opts.get("asr_model", "giga"),
-                api_key=opts.get("asr_api_key", ""),
-                api_base=opts.get("asr_api_base", ""))
-        except Exception:
-            segs_i = []
+        # субтитры в шкале после вырезания пауз — переносим сегменты,
+        # а не транскрибируем второй раз
+        segs_i = (ac.remap_segs(segs_p, keeps)
+                  if mode != "fast" and opts.get("captions", True) else [])
         dur = ac.media_duration(stage_in) or round(clip_len, 1)
         title_m = f"Момент {i + 1} · {_fmt_ts(s)}–{_fmt_ts(e)}"
         mm = {"start": 0.0, "end": dur, "score": 100, "title": title_m,
@@ -725,7 +831,7 @@ def run_job(job_id: str, url: str, opts: dict):
                                     clips=clips, scorer="manual")
                 title = jobs[job_id].get("title", url)
             log_job(job_id, title, url, "done", clips, "manual",
-                    tags=opts.get("tags"))
+                    tags=opts.get("tags"), preset_id=opts.get("preset_id"))
             return
         with lock:
             jobs[job_id].update(status="work", stage="качаю видео…", pct=1)
@@ -806,7 +912,8 @@ def run_job(job_id: str, url: str, opts: dict):
                 raise RuntimeError("не расслышал русскую озвучку в видео")
             if manual:
                 moments = _story_manual_moments(
-                    stamps, kind, total_dur=ac.media_duration(src) or 0.0)
+                    stamps, kind, total_dur=ac.media_duration(src) or 0.0,
+                    segs=segs)
                 if not moments:
                     raise RuntimeError(
                         "таймкоды вне видео или короче 1.5 сек — проверь минуты")
@@ -933,40 +1040,56 @@ def run_job(job_id: str, url: str, opts: dict):
                         else None)
             extra = []
             if mode == "story":
-                nvars = max(1, min(3, int(opts.get("story_variants", 1) or 1)))
-                for _vi in range(nvars):
-                    _o = out if _vi == 0 else out[:-4] + f"v{_vi + 1}.mp4"
-                    raw = _o + ".raw.mp4" if opts.get("story_banner", True) else _o
-                    _bgm = ac.pick_story_music() if opts.get("story_music", True) else None
-                    ac.render_story_part(
-                        src, m, segs, raw,
-                        captions=opts.get("captions", True),
-                        blur_subs=opts.get("story_blur_subs", True),
-                        unique=opts.get("story_unique", True),
-                        mirror=opts.get("story_mirror", opts.get("mirror", False)),
-                        cta=opts.get("story_cta", True),
-                        bgm=_bgm,
-                        hq=bool(opts.get("story_banner", True)),
-                        progress=_pp)
-                    if raw != _o:
+                src_i, m_i, segs_i, story_tmp = src, m, segs, []
+                if manual and opts.get("story_remove_pauses", True):
+                    try:
+                        src_i, m_i, segs_i, story_tmp = _manual_story_cut(
+                            src, m, segs)
+                    except Exception as ex:
+                        print("[story cut]", ex)
+                        src_i, m_i, segs_i, story_tmp = src, m, segs, []
+                try:
+                    nvars = max(1, min(3, int(opts.get("story_variants", 1) or 1)))
+                    for _vi in range(nvars):
+                        _o = out if _vi == 0 else out[:-4] + f"v{_vi + 1}.mp4"
+                        raw = _o + ".raw.mp4" if opts.get("story_banner", True) else _o
+                        _bgm = ac.pick_story_music() if opts.get("story_music", True) else None
+                        ac.render_story_part(
+                            src_i, m_i, segs_i, raw,
+                            captions=opts.get("captions", True),
+                            blur_subs=opts.get("story_blur_subs", True),
+                            unique=opts.get("story_unique", True),
+                            mirror=opts.get("story_mirror", opts.get("mirror", False)),
+                            cta=opts.get("story_cta", True),
+                            bgm=_bgm,
+                            hq=bool(opts.get("story_banner", True)),
+                            progress=_pp)
+                        if raw != _o:
+                            try:
+                                ac.insert_banners(raw, _o,
+                                                  banner_path=opts.get("banner_path"),
+                                                  middle=True)
+                            except Exception as e:
+                                print("[banner]", e)
+                                try:
+                                    os.replace(raw, _o)
+                                except OSError:
+                                    pass
+                            finally:
+                                try:
+                                    if os.path.exists(raw):
+                                        os.remove(raw)
+                                except OSError:
+                                    pass
+                        if _vi:
+                            extra.append((_vi, _o))
+                finally:
+                    for f in story_tmp:
                         try:
-                            ac.insert_banners(raw, _o,
-                                              banner_path=opts.get("banner_path"),
-                                              middle=True)
-                        except Exception as e:
-                            print("[banner]", e)
-                            try:
-                                os.replace(raw, _o)
-                            except OSError:
-                                pass
-                        finally:
-                            try:
-                                if os.path.exists(raw):
-                                    os.remove(raw)
-                            except OSError:
-                                pass
-                    if _vi:
-                        extra.append((_vi, _o))
+                            if f and os.path.exists(f):
+                                os.remove(f)
+                        except OSError:
+                            pass
             elif mode == "parts":
                 ac.render_split_clip(src, m, segs, out,
                                      facetrack=False,
@@ -1046,7 +1169,7 @@ def run_job(job_id: str, url: str, opts: dict):
             title = jobs[job_id].get("title", url)
         log_job(job_id, title, url, "done", clips,
                 jobs.get(job_id, {}).get("scorer", "heuristic"),
-                tags=opts.get("tags"))
+                tags=opts.get("tags"), preset_id=opts.get("preset_id"))
         # исходник отъел своё — удаляем, иначе ночная пачка из 10 видео сожрёт диск
         try:
             if src and os.path.exists(src):
@@ -1057,7 +1180,8 @@ def run_job(job_id: str, url: str, opts: dict):
         with lock:
             jobs[job_id].update(status="error", error=str(e)[:300])
         log_job(job_id, url, url, "error",
-                scorer=jobs.get(job_id, {}).get("scorer", "heuristic"))
+                scorer=jobs.get(job_id, {}).get("scorer", "heuristic"),
+                preset_id=opts.get("preset_id"))
     finally:
         try:
             if src and os.path.exists(src):
@@ -1150,6 +1274,7 @@ def api_start():
             "out_name": out_name,
             "hook": str(data.get("hook") or "").strip()[:120],
             "tags": _parse_tag_ids(data.get("tags")),
+            "preset_id": _preset_id_value(data.get("preset_id")),
             "asr_model": data.get("asr_model", "giga") if data.get("asr_model") in ("base", "small", "giga", "whisper-large-v3") else "giga",
             "asr_api_key": data.get("asr_api_key", ""),
             "asr_api_base": data.get("asr_api_base", ""),
@@ -1349,7 +1474,7 @@ def run_twitch_job(job_id: str, url: str, opts: dict):
             title = jobs[job_id].get("title", url)
         log_job(job_id, title, url, "done", clips,
                 jobs.get(job_id, {}).get("scorer", "drex"),
-                tags=opts.get("tags"))
+                tags=opts.get("tags"), preset_id=opts.get("preset_id"))
         try:
             if src and os.path.exists(src):
                 os.remove(src)
@@ -1359,7 +1484,8 @@ def run_twitch_job(job_id: str, url: str, opts: dict):
         with lock:
             jobs[job_id].update(status="error", error=str(e)[:300])
         log_job(job_id, url, url, "error",
-                scorer=jobs.get(job_id, {}).get("scorer", "drex"))
+                scorer=jobs.get(job_id, {}).get("scorer", "drex"),
+                preset_id=opts.get("preset_id"))
     finally:
         try:
             if src and os.path.exists(src):
@@ -1417,6 +1543,7 @@ def api_twitch_start():
             "clip_music": bool(data.get("clip_music", cfg.get("clip_music", True))),
             "remove_pauses": bool(data.get("remove_pauses", cfg.get("remove_pauses", True))),
             "tags": _parse_tag_ids(data.get("tags")),
+            "preset_id": _preset_id_value(data.get("preset_id")),
             "asr_model": data.get("asr_model", "giga") if data.get("asr_model") in ("base", "small", "giga", "whisper-large-v3") else "giga",
             "asr_api_key": data.get("asr_api_key", ""),
             "asr_api_base": data.get("asr_api_base", "")}), daemon=True).start()
@@ -3347,7 +3474,738 @@ def api_library():
                               "url": f"/dl/{kind}/{quote(f)}",
                               "thumb": f"/api/thumb/{kind}/{quote(f)}"})
     items.sort(key=lambda x: x["mtime"], reverse=True)
+    meta_map = _clip_meta_map()
+    post_map = _post_state_map()
+    for it in items:
+        if it["kind"] == "short":
+            m = _clip_meta_for(it["name"], meta_map)
+            if m:
+                it["job_id"] = m["job_id"]
+                it["idx"] = m["idx"]
+                it["title"] = m["title"]
+                it["job_title"] = m["job_title"]
+                it["preset_id"] = m["preset_id"]
+        it["post_status"] = post_map.get((it["name"], it["kind"]), "")
     return jsonify({"ok": True, "files": items[:300]})
+
+
+# ---------- автопостинг в TikTok Studio через живые профили Camoufox ----------
+# очередь крутится на сервере: в назначенное время открывается настоящий
+# браузер нужного профиля, файл и текст уже стоят в студии — остаётся
+# нажать «Опубликовать». Пароли/капчу не трогаем, публикацию не жмём сами.
+AUTOPOST_DIR = os.path.join(TMP_DIR, "autopost")
+os.makedirs(AUTOPOST_DIR, exist_ok=True)
+TIKTOKUA_DIR = os.path.expanduser("~/Library/Application Support/TikTokUA")
+AUTOPOST_PROFILES = ("1", "2", "3")
+AUTOPOST_ACTIVE = ("starting", "running", "waiting", "login", "manual")
+AUTOPOST_FINAL = ("done", "closed", "error", "canceled")
+AUTOPOST_LOCK = threading.Lock()
+AUTOPOST_THREAD = None
+AUTOPOST_PROCS = {}
+
+
+def _preset_id_value(v):
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        return None
+    return n if n > 0 else None
+
+
+def _preset_variants(text):
+    """Варианты описания разделяются строкой из дефисов (---) или --- в тексте."""
+    parts = re.split(r"^\s*-{3,}\s*$|\s+-{3,}\s+", str(text or ""),
+                     flags=re.M)
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _tagset_variants(text):
+    """Каждая непустая строка — отдельный набор тегов."""
+    return [ln.strip() for ln in str(text or "").splitlines() if ln.strip()]
+
+
+def _preset_json(r):
+    descs = _preset_variants(r["descs"])
+    tagsets = _tagset_variants(r["tagsets"])
+    return {"id": r["id"], "name": r["name"], "descs": r["descs"] or "",
+            "tagsets": r["tagsets"] or "", "created": r["created"],
+            "desc_count": len(descs), "tag_count": len(tagsets),
+            "desc_variants": descs, "tag_variants": tagsets}
+
+
+def _compose_caption(preset, k, title=""):
+    """Описание и теги идут по кругу — у соседних видео текст разный."""
+    if not preset:
+        return ""
+    descs = _preset_variants(preset["descs"])
+    tagsets = _tagset_variants(preset["tagsets"])
+    t = (title or "").strip()
+    desc = descs[k % len(descs)] if descs else ""
+    tag_line = ""
+    if tagsets:
+        tag_line = _norm_hashtags(
+            tagsets[k % len(tagsets)].replace("{title}", t))
+    if t:
+        desc = desc.replace("{title}", t)
+    return "\n\n".join(x for x in (desc.strip(), tag_line.strip()) if x)[:2200]
+
+
+def _clip_meta_map():
+    out = {}
+    try:
+        c = _connect()
+        try:
+            for r in c.execute(
+                    "SELECT c.job_id, c.idx, c.title, c.hidden,"
+                    " j.title AS job_title, j.preset_id"
+                    " FROM clips c JOIN jobs j ON j.id=c.job_id"):
+                out[(r["job_id"], int(r["idx"]))] = {
+                    "job_id": r["job_id"], "idx": int(r["idx"]),
+                    "title": r["title"] or "", "job_title": r["job_title"] or "",
+                    "preset_id": r["preset_id"], "hidden": int(r["hidden"] or 0)}
+        finally:
+            c.close()
+    except Exception:
+        pass
+    return out
+
+
+def _clip_meta_for(name, meta_map):
+    m = re.search(r"(?:^|_)([0-9a-zA-Z]{4,32})_(\d+)(?:v\d+)?\.mp4$",
+                  str(name or ""))
+    if m:
+        hit = meta_map.get((m.group(1), int(m.group(2)) - 1))
+        if hit:
+            return hit
+    for (jid, idx), meta in meta_map.items():
+        if str(name or "").endswith(f"_{jid}_{idx + 1}.mp4"):
+            return meta
+    return None
+
+
+def _post_state_map():
+    out = {}
+    try:
+        c = _connect()
+        try:
+            for r in c.execute(
+                    "SELECT file, kind, status FROM posts ORDER BY id"):
+                out[(r["file"], r["kind"])] = r["status"]
+        finally:
+            c.close()
+    except Exception:
+        pass
+    return out
+
+
+def _post_target(name, kind):
+    name = os.path.basename(str(name or ""))
+    if not name or kind not in ("short", "legacy"):
+        return None
+    d = OUT_DIR if kind == "short" else LEGACY_DIR
+    p = os.path.join(d, name)
+    return p if os.path.isfile(p) else None
+
+
+def _autopost_paths(pid):
+    base = os.path.join(AUTOPOST_DIR, str(int(pid)))
+    return base + ".json", base + ".status.json", base + ".log"
+
+
+def _atomic_json(path, obj):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def _autopost_read_status(pid):
+    try:
+        with open(_autopost_paths(pid)[1], encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _autopost_pid_alive(pid):
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def _autopost_alive(post_id, pid):
+    p = AUTOPOST_PROCS.get(post_id)
+    if p is not None:
+        return p.poll() is None
+    return _autopost_pid_alive(pid)
+
+
+def _autopost_stop(pid):
+    """Погасить раннер вместе с окном Camoufox (он в своей сессии)."""
+    try:
+        import signal
+        p = int(pid)
+        try:
+            os.killpg(os.getpgid(p), signal.SIGTERM)
+        except Exception:
+            os.kill(p, signal.SIGTERM)
+        return p
+    except Exception:
+        return None
+
+
+def _autopost_kill_later(pid):
+    time.sleep(2.5)
+    try:
+        import signal
+        if _autopost_pid_alive(pid):
+            try:
+                os.killpg(os.getpgid(int(pid)), signal.SIGKILL)
+            except Exception:
+                os.kill(int(pid), signal.SIGKILL)
+    except Exception:
+        pass
+
+
+def _autopost_json(r):
+    from urllib.parse import quote
+    path = _post_target(r["file"], r["kind"])
+    return {"id": r["id"], "file": r["file"], "kind": r["kind"],
+            "title": r["title"] or "", "preset_id": r["preset_id"],
+            "caption": r["caption"] or "", "account": r["account"],
+            "scheduled": r["scheduled"], "status": r["status"],
+            "stage": r["stage"] or "", "error": r["error"] or "",
+            "created": r["created"], "started": r["started"],
+            "finished": r["finished"], "pid": r["pid"],
+            "exists": bool(path),
+            "url": f"/dl/{r['kind']}/{quote(r['file'])}",
+            "thumb": f"/api/thumb/{r['kind']}/{quote(r['file'])}"}
+
+
+def _parse_when(v, default):
+    if v in (None, ""):
+        return default
+    try:
+        n = float(v)
+        if n > 1e11:  # миллисекунды из JS Date
+            n /= 1000.0
+        return n
+    except (TypeError, ValueError):
+        pass
+    try:
+        import datetime as _dt
+        return _dt.datetime.fromisoformat(
+            str(v).strip().replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return default
+
+
+def _autopost_spawn(c, r):
+    """Запустить браузер профиля под конкретную публикацию."""
+    src = _post_target(r["file"], r["kind"])
+    if not src:
+        return None, "файл не найден в библиотеке"
+    acc = str(r["account"] or "1")
+    if acc not in AUTOPOST_PROFILES:
+        return None, f"нет профиля {acc}"
+    venv_py = os.path.join(TIKTOKUA_DIR, ".venv", "bin", "python")
+    runner = os.path.join(BASE, "autopost_runner.py")
+    if not os.path.isfile(venv_py):
+        return None, "не найден Python TikTokUA (Camoufox)"
+    if not os.path.isfile(runner):
+        return None, "не найден autopost_runner.py"
+    profile = os.path.join(TIKTOKUA_DIR, "profiles", f"account-{acc}")
+    if not os.path.isdir(profile):
+        return None, f"нет профиля account-{acc} — открой TikTok UA {acc} раз"
+    cfg_path, status_path, log_path = _autopost_paths(r["id"])
+    try:
+        if os.path.exists(status_path):
+            os.remove(status_path)
+        if os.path.isfile(log_path) and os.path.getsize(log_path) > 3 * 1024 * 1024:
+            os.remove(log_path)
+    except OSError:
+        pass
+    _atomic_json(cfg_path, {
+        "post_id": r["id"], "file": src, "caption": r["caption"] or "",
+        "account": acc, "profile_dir": profile,
+        "publish_at": float(r["scheduled"] or 0),
+        "status_file": status_path, "log_file": log_path})
+    try:
+        with open(log_path, "ab", buffering=0) as logf:
+            proc = subprocess.Popen(
+                [venv_py, runner, "--config", cfg_path],
+                stdout=logf, stderr=subprocess.STDOUT,
+                cwd=BASE, start_new_session=True)
+    except Exception as ex:
+        return None, f"не удалось запустить браузер: {ex}"
+    AUTOPOST_PROCS[r["id"]] = proc
+    now = time.time()
+    with c:
+        c.execute("UPDATE posts SET status='starting', stage='запускаю браузер…',"
+                  " error='', pid=?, started=? WHERE id=?",
+                  (proc.pid, now, r["id"]))
+    return proc.pid, ""
+
+
+def _autopost_tick():
+    now = time.time()
+    c = _connect()
+    try:
+        rows = c.execute("SELECT * FROM posts WHERE status IN (?,?,?,?,?)",
+                         AUTOPOST_ACTIVE).fetchall()
+        for r in rows:
+            st = _autopost_read_status(r["id"])
+            new = str(st.get("status") or "")
+            stage = str(st.get("stage") or r["stage"] or "")
+            err = str(st.get("error") or "")
+            target = ""
+            if new in ("published", "scheduled"):
+                target = "done"
+            elif new in ("closed", "canceled", "error"):
+                target = new
+            elif new in AUTOPOST_ACTIVE and new != r["status"]:
+                target = new
+            if target in AUTOPOST_FINAL:
+                with c:
+                    c.execute("UPDATE posts SET status=?, stage=?, error=?,"
+                              " finished=?, pid=NULL WHERE id=?",
+                              (target, stage, err or r["error"], now, r["id"]))
+                AUTOPOST_PROCS.pop(r["id"], None)
+                continue
+            if target:
+                with c:
+                    c.execute("UPDATE posts SET status=?, stage=?, error=?"
+                              " WHERE id=?", (target, stage, err or r["error"],
+                                              r["id"]))
+                continue
+            if not r["pid"]:
+                continue
+            if not _autopost_alive(r["id"], r["pid"]):
+                final = "closed" if new in ("waiting", "login", "manual") else "error"
+                err2 = err or ("окно закрыто" if final == "closed"
+                               else "раннер завершился без статуса")
+                with c:
+                    c.execute("UPDATE posts SET status=?, stage=?, error=?,"
+                              " finished=?, pid=NULL WHERE id=?",
+                              (final, stage or ("ждал Опубликовать" if final == "closed"
+                                                else "ошибка"), err2, now, r["id"]))
+                AUTOPOST_PROCS.pop(r["id"], None)
+        busy = {str(r["account"]) for r in c.execute(
+            "SELECT account FROM posts WHERE status IN (?,?,?,?,?)",
+            AUTOPOST_ACTIVE).fetchall()}
+        if len(busy) >= len(AUTOPOST_PROFILES):
+            return
+        due = c.execute("SELECT * FROM posts WHERE status='queued'"
+                        " ORDER BY scheduled, id").fetchall()
+        for q in due:
+            acc = str(q["account"] or "1")
+            if acc in busy:
+                continue
+            pid, err = _autopost_spawn(c, q)
+            if not pid:
+                with c:
+                    c.execute("UPDATE posts SET status='error', stage='не запустилось',"
+                              " error=?, finished=? WHERE id=?",
+                              (err[:300], time.time(), q["id"]))
+                continue
+            busy.add(acc)
+            if len(busy) >= len(AUTOPOST_PROFILES):
+                break
+    finally:
+        c.close()
+
+
+def _autopost_loop():
+    while True:
+        try:
+            _autopost_tick()
+        except Exception:
+            import traceback
+            traceback.print_exc()
+        time.sleep(5)
+
+
+def start_autopost_scheduler():
+    global AUTOPOST_THREAD
+    if os.environ.get("CLIPSAW_NO_AUTOPOST"):
+        return
+    with AUTOPOST_LOCK:
+        if AUTOPOST_THREAD and AUTOPOST_THREAD.is_alive():
+            return
+        AUTOPOST_THREAD = threading.Thread(target=_autopost_loop,
+                                           name="autopost", daemon=True)
+        AUTOPOST_THREAD.start()
+
+
+@app.get("/api/presets")
+def api_presets():
+    items = []
+    try:
+        c = _connect()
+        try:
+            for r in c.execute("SELECT * FROM presets ORDER BY name"):
+                items.append(_preset_json(r))
+        finally:
+            c.close()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+    return jsonify({"ok": True, "items": items})
+
+
+def _preset_body(d):
+    name = (d.get("name") or "").strip()[:60]
+    descs = str(d.get("descs") or "")[:20000]
+    tagsets = str(d.get("tagsets") or "")[:20000]
+    if not name:
+        return None, "Введите название пресета"
+    if not _preset_variants(descs) and not _tagset_variants(tagsets):
+        return None, "Добавь хотя бы описание или теги"
+    return (name, descs, tagsets), ""
+
+
+@app.post("/api/presets")
+def api_preset_create():
+    d = request.get_json(force=True, silent=True) or {}
+    body, err = _preset_body(d)
+    if not body:
+        return jsonify({"ok": False, "error": err}), 400
+    try:
+        c = _connect()
+        try:
+            with c:
+                cur = c.execute("INSERT INTO presets(name,descs,tagsets,created)"
+                                " VALUES(?,?,?,?)", (*body, time.time()))
+                r = c.execute("SELECT * FROM presets WHERE id=?",
+                              (cur.lastrowid,)).fetchone()
+        finally:
+            c.close()
+    except sqlite3.IntegrityError:
+        return jsonify({"ok": False, "error": "Такой пресет уже есть"}), 409
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": "Не удалось сохранить пресет"}), 500
+    return jsonify({"ok": True, "preset": _preset_json(r)})
+
+
+@app.patch("/api/presets/<int:pid>")
+def api_preset_update(pid):
+    d = request.get_json(force=True, silent=True) or {}
+    try:
+        c = _connect()
+        try:
+            r = c.execute("SELECT * FROM presets WHERE id=?", (pid,)).fetchone()
+            if not r:
+                return jsonify({"ok": False, "error": "Пресет не найден"}), 404
+            merged = {"name": d.get("name", r["name"]),
+                      "descs": d.get("descs", r["descs"]),
+                      "tagsets": d.get("tagsets", r["tagsets"])}
+            body, err = _preset_body(merged)
+            if not body:
+                return jsonify({"ok": False, "error": err}), 400
+            with c:
+                c.execute("UPDATE presets SET name=?, descs=?, tagsets=? WHERE id=?",
+                          (*body, pid))
+                r = c.execute("SELECT * FROM presets WHERE id=?", (pid,)).fetchone()
+        finally:
+            c.close()
+    except sqlite3.IntegrityError:
+        return jsonify({"ok": False, "error": "Такой пресет уже есть"}), 409
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": "Не удалось сохранить пресет"}), 500
+    return jsonify({"ok": True, "preset": _preset_json(r)})
+
+
+@app.delete("/api/presets/<int:pid>")
+def api_preset_delete(pid):
+    try:
+        c = _connect()
+        try:
+            with c:
+                c.execute("UPDATE posts SET preset_id=NULL WHERE preset_id=?", (pid,))
+                c.execute("DELETE FROM presets WHERE id=?", (pid,))
+        finally:
+            c.close()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": "Не удалось удалить пресет"}), 500
+    return jsonify({"ok": True})
+
+
+@app.get("/api/posts")
+def api_posts():
+    limit = 200
+    try:
+        limit = max(1, min(500, int(request.args.get("limit") or 200)))
+    except (TypeError, ValueError):
+        pass
+    items = []
+    try:
+        c = _connect()
+        try:
+            rows = c.execute(
+                "SELECT p.*, pr.name AS preset_name FROM posts p"
+                " LEFT JOIN presets pr ON pr.id=p.preset_id"
+                " ORDER BY p.id DESC LIMIT ?", (limit,)).fetchall()
+        finally:
+            c.close()
+        for r in rows:
+            it = _autopost_json(r)
+            it["preset_name"] = r["preset_name"] or ""
+            items.append(it)
+    except Exception:
+        import traceback
+        traceback.print_exc()
+    items.sort(key=lambda x: (
+        0 if x["status"] in AUTOPOST_ACTIVE else
+        1 if x["status"] == "queued" else 2,
+        x["scheduled"] if x["status"] in AUTOPOST_ACTIVE + ("queued",) else -x["scheduled"]))
+    profiles = []
+    for n in AUTOPOST_PROFILES:
+        profiles.append({"id": n, "label": f"Аккаунт {n}",
+                         "exists": os.path.isdir(os.path.join(
+                             TIKTOKUA_DIR, "profiles", f"account-{n}"))})
+    return jsonify({"ok": True, "items": items, "profiles": profiles,
+                    "server_time": time.time(),
+                    "runner": os.path.isfile(os.path.join(
+                        TIKTOKUA_DIR, ".venv", "bin", "python"))})
+
+
+@app.post("/api/posts/bulk")
+def api_posts_bulk():
+    import random
+    d = request.get_json(force=True, silent=True) or {}
+    raw = d.get("files") or []
+    if not isinstance(raw, list) or not raw:
+        return jsonify({"ok": False, "error": "Выбери видео в библиотеке"}), 400
+    mode = d.get("preset_id", "auto")
+    if mode in (None, "", "auto"):
+        preset_mode = "auto"
+    elif str(mode) == "0":
+        preset_mode = "none"
+    else:
+        preset_mode = _preset_id_value(mode)
+        if preset_mode is None:
+            return jsonify({"ok": False, "error": "Некорректный пресет"}), 400
+    try:
+        interval = max(5, min(1440, int(float(d.get("interval_min") or 90))))
+    except (TypeError, ValueError):
+        interval = 90
+    try:
+        jitter = max(0, min(60, int(float(
+            d.get("jitter_min") if d.get("jitter_min") is not None else 3))))
+    except (TypeError, ValueError):
+        jitter = 3
+    start = _parse_when(d.get("start"), time.time() + 90 * 60)
+    accs = []
+    for a in (d.get("accounts") or []):
+        a = str(a).strip()
+        if a in AUTOPOST_PROFILES and a not in accs:
+            accs.append(a)
+    if not accs:
+        accs = ["1"]
+    caption_body = str(d.get("caption") or "")[:2200]
+    meta_map = _clip_meta_map()
+    c = _connect()
+    try:
+        preset_row = None
+        base_rotation = 0
+        if preset_mode not in ("auto", "none"):
+            preset_row = c.execute("SELECT * FROM presets WHERE id=?",
+                                   (preset_mode,)).fetchone()
+            if not preset_row:
+                return jsonify({"ok": False, "error": "Пресет не найден"}), 404
+            base_rotation = c.execute(
+                "SELECT COUNT(*) FROM posts WHERE preset_id=?",
+                (preset_mode,)).fetchone()[0]
+        added, skipped, ids, prev_slot = 0, 0, [], 0.0
+        with c:
+            for x in raw[:200]:
+                if isinstance(x, dict):
+                    name = os.path.basename(str(x.get("name") or ""))
+                    kind = str(x.get("kind") or "short")
+                else:
+                    name = os.path.basename(str(x or ""))
+                    kind = "short"
+                if kind not in ("short", "legacy"):
+                    kind = "short"
+                if not _post_target(name, kind):
+                    skipped += 1
+                    continue
+                dup = c.execute(
+                    "SELECT 1 FROM posts WHERE file=? AND kind=? AND status"
+                    " NOT IN ('error','canceled','closed') LIMIT 1",
+                    (name, kind)).fetchone()
+                if dup:
+                    skipped += 1
+                    continue
+                meta = _clip_meta_for(name, meta_map) or {}
+                pid = None
+                if preset_mode == "auto":
+                    pid = _preset_id_value(meta.get("preset_id"))
+                elif preset_mode != "none":
+                    pid = preset_mode
+                pr = preset_row if (pid and preset_row and pid == preset_mode) else (
+                    c.execute("SELECT * FROM presets WHERE id=?", (pid,)).fetchone()
+                    if pid else None)
+                if pid and not pr:
+                    pid = None
+                title = (meta.get("title") or meta.get("job_title")
+                         or os.path.splitext(name)[0])
+                k = base_rotation + added
+                caption = _compose_caption(pr, k, title)
+                if not caption and caption_body:
+                    caption = caption_body.replace("{title}", title)[:2200]
+                account = accs[added % len(accs)]
+                slot = start + added * interval * 60
+                if jitter:
+                    slot += random.uniform(-jitter * 60, jitter * 60)
+                if prev_slot:
+                    slot = max(slot, prev_slot + 60)
+                # студия принимает расписание минимум за 15 минут
+                slot = max(slot, time.time() + 16 * 60)
+                cur = c.execute(
+                    "INSERT INTO posts(file,kind,title,preset_id,caption,account,"
+                    "scheduled,status,stage,created) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (name, kind, str(title)[:200], pid, caption, account,
+                     slot, "queued", "в очереди", time.time()))
+                ids.append(cur.lastrowid)
+                prev_slot = slot
+                added += 1
+    finally:
+        c.close()
+    return jsonify({"ok": True, "added": added, "skipped": skipped, "ids": ids})
+
+
+@app.post("/api/posts/<int:pid>/now")
+def api_post_now(pid):
+    try:
+        c = _connect()
+        try:
+            r = c.execute("SELECT * FROM posts WHERE id=?", (pid,)).fetchone()
+            if not r:
+                return jsonify({"ok": False, "error": "Публикация не найдена"}), 404
+            if r["status"] in AUTOPOST_ACTIVE:
+                return jsonify({"ok": False, "error": "Уже запущено"}), 400
+            with c:
+                c.execute("UPDATE posts SET status='queued', stage='в очереди',"
+                          " scheduled=?, error='', started=NULL, finished=NULL,"
+                          " pid=NULL WHERE id=?", (time.time() + 20 * 60, pid))
+        finally:
+            c.close()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": "Не удалось"}), 500
+    return jsonify({"ok": True})
+
+
+@app.post("/api/posts/<int:pid>/cancel")
+def api_post_cancel(pid):
+    proc_pid = None
+    try:
+        c = _connect()
+        try:
+            r = c.execute("SELECT * FROM posts WHERE id=?", (pid,)).fetchone()
+            if not r:
+                return jsonify({"ok": False, "error": "Публикация не найдена"}), 404
+            if r["status"] not in AUTOPOST_ACTIVE:
+                return jsonify({"ok": False,
+                                "error": "Уже не выполняется — просто удали"}), 400
+            proc_pid = r["pid"]
+            with c:
+                c.execute("UPDATE posts SET status='canceled', stage='отменено',"
+                          " finished=?, pid=NULL WHERE id=?", (time.time(), pid))
+        finally:
+            c.close()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": "Не удалось отменить"}), 500
+    AUTOPOST_PROCS.pop(pid, None)
+    if proc_pid:
+        _autopost_stop(proc_pid)
+        threading.Thread(target=_autopost_kill_later, args=(proc_pid,),
+                         daemon=True).start()
+    return jsonify({"ok": True})
+
+
+@app.post("/api/posts/<int:pid>/done")
+def api_post_done(pid):
+    try:
+        c = _connect()
+        try:
+            with c:
+                c.execute("UPDATE posts SET status='done', stage='отмечено вручную',"
+                          " finished=?, pid=NULL WHERE id=?", (time.time(), pid))
+        finally:
+            c.close()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": "Не удалось"}), 500
+    return jsonify({"ok": True})
+
+
+@app.delete("/api/posts/<int:pid>")
+def api_post_delete(pid):
+    try:
+        c = _connect()
+        try:
+            r = c.execute("SELECT status FROM posts WHERE id=?", (pid,)).fetchone()
+            if not r:
+                return jsonify({"ok": False, "error": "Публикация не найдена"}), 404
+            if r["status"] in AUTOPOST_ACTIVE:
+                return jsonify({"ok": False,
+                                "error": "Сначала отмени запущенную"}), 400
+            with c:
+                c.execute("DELETE FROM posts WHERE id=?", (pid,))
+        finally:
+            c.close()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": "Не удалось удалить"}), 500
+    return jsonify({"ok": True})
+
+
+@app.post("/api/posts/clear")
+def api_posts_clear():
+    try:
+        c = _connect()
+        try:
+            with c:
+                cur = c.execute("DELETE FROM posts WHERE status IN"
+                                " ('done','closed','error','canceled')")
+            removed = cur.rowcount
+        finally:
+            c.close()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": "Не удалось очистить"}), 500
+    return jsonify({"ok": True, "removed": removed})
+
+
+@app.get("/api/posts/<int:pid>/log")
+def api_post_log(pid):
+    _cfg, _status, log_path = _autopost_paths(pid)
+    try:
+        with open(log_path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - 65536))
+            txt = f.read().decode("utf-8", "replace")
+    except OSError:
+        txt = ""
+    return txt, 200, {"Content-Type": "text/plain; charset=utf-8"}
 
 
 @app.get("/api/thumb/<kind>/<name>")
@@ -4256,4 +5114,5 @@ init_db()
 
 
 if __name__ == "__main__":
+    start_autopost_scheduler()
     app.run(host="127.0.0.1", port=5003, debug=False)

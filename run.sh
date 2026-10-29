@@ -1,5 +1,5 @@
 #!/bin/bash
-# запуск ClipSaw web
+# запуск Lipps by huakly web
 cd "$(dirname "$0")"
 export PATH="$HOME/.deno/bin:$HOME/.local/bin:$PATH"
 pip3 install -r requirements.txt -q

@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ClipSaw — дашборд</title>
-<meta name="description" content="ClipSaw — нарезка сериалов в вирусные вертикальные шортсы: ИИ-скоринг, субтитры, сплит с геймплеем.">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32' fill='none'%3E%3Ccircle cx='16' cy='16' r='11' fill='%23c9f24b'/%3E%3Ccircle cx='16' cy='16' r='11' fill='none' stroke='%23c9f24b' stroke-width='5' stroke-dasharray='3.1 2.66'/%3E%3Ccircle cx='16' cy='16' r='6.5' fill='%23141604'/%3E%3Cpath d='M14.5 12.8v6.4l5.2-3.2-5.2-3.2z' fill='%23c9f24b'/%3E%3C/svg%3E">
+<title>Lipps by huakly — дашборд</title>
+<meta name="description" content="Lipps by huakly — нарезка сериалов в вирусные вертикальные шортсы: ИИ-скоринг, субтитры, сплит с геймплеем.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2314161a'/%3E%3Cpath d='M10 5h6v13h9l-4.5 6H10z' fill='%23c9f24b'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
 <style>
@@ -29,7 +29,6 @@
     overflow-y:auto}
   .logo{display:flex;align-items:center;gap:10px;padding:2px 10px 18px;
     font-family:var(--disp);font-weight:700;font-size:17px;letter-spacing:-.01em}
-  .logo svg{flex-shrink:0}
   .nav{display:flex;flex-direction:column;gap:3px;flex:1;min-height:0}
   .nav-bottom{display:flex;flex-direction:column;gap:3px;margin-top:auto;padding-top:10px;
     border-top:1px solid var(--line)}
@@ -347,7 +346,7 @@
     section.view.on{animation:none}
   }
 </style>
-<style>/* ClipSaw polish v2 — поверх базы, ничего не ломает */
+<style>/* Lipps polish v2 — поверх базы, ничего не ломает */
   :root{--acc-soft:rgba(201,242,75,.1);--card-hi:rgba(255,255,255,.035)}
   ::selection{background:rgba(201,242,75,.28)}
   ::-webkit-scrollbar{width:10px;height:10px}
@@ -355,8 +354,8 @@
   ::-webkit-scrollbar-track{background:transparent}
   body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:2;opacity:.05;
     background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='.55'/%3E%3C/svg%3E")}
-  .logo .ver{font-family:var(--mono);font-size:10px;font-weight:700;color:var(--acc);
-    border:1px solid rgba(201,242,75,.4);border-radius:6px;padding:2px 6px;margin-left:auto;letter-spacing:.08em}
+  .logo .by{font-family:var(--mono);font-size:10px;font-weight:700;color:var(--mut);
+    letter-spacing:.06em;text-transform:lowercase}
   .nav{position:relative}
   .nav button{position:relative}
   .nav button.on::before{content:"";position:absolute;left:-14px;top:9px;bottom:9px;width:3px;
@@ -413,25 +412,115 @@
     padding:7px 15px;font-size:12.5px;font-weight:700;cursor:pointer;transition:all .15s;font-family:inherit}
   .chips button:hover{color:var(--fg);border-color:rgba(255,255,255,.22)}
   .chips button.on{background:var(--acc);border-color:var(--acc);color:var(--acc-ink)}
+  .chips button:disabled{opacity:.35;cursor:not-allowed}
   header.top .sub{display:block;font-size:12.5px;color:var(--mut);font-weight:400;margin-top:3px;letter-spacing:0}
+  /* ---------- постинг ---------- */
+  .pgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(126px,1fr));gap:10px;
+    max-height:540px;overflow:auto;padding:3px}
+  .pcard{position:relative;border:1px solid var(--line);border-radius:13px;overflow:hidden;
+    background:var(--panel2);cursor:pointer}
+  .pcard:hover{border-color:rgba(201,242,75,.45)}
+  .pcard.picked{border-color:var(--acc);box-shadow:0 0 0 1px var(--acc) inset}
+  .pcard.used{opacity:.42;cursor:default}
+  .pcard img{width:100%;aspect-ratio:9/16;object-fit:cover;display:block;background:#0a0b0e}
+  .pcard .pn{padding:7px 8px 8px;font-size:11.5px;font-weight:600;white-space:nowrap;
+    overflow:hidden;text-overflow:ellipsis}
+  .pcard .pcb{position:absolute;top:7px;right:7px;width:19px;height:19px;accent-color:var(--acc);cursor:pointer;z-index:2}
+  .pcard .pst{position:absolute;top:7px;left:7px;font-family:var(--mono);font-size:9px;font-weight:700;
+    padding:2px 6px;border-radius:5px;background:rgba(0,0,0,.72);color:var(--acc);z-index:1}
+  .preset{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 0;
+    border-bottom:1px solid var(--line)}
+  .preset:last-child{border-bottom:0}
+  .preset b{font-size:13.5px}
+  .preset .pact{display:flex;gap:6px;flex-shrink:0}
+  .preset .pact button,.prow .pact button{background:var(--panel2);border:1px solid var(--line);border-radius:8px;
+    color:var(--fg);font-size:11.5px;font-weight:700;padding:6px 10px;cursor:pointer;font-family:inherit}
+  .preset .pact button:hover,.prow .pact button:hover{border-color:rgba(201,242,75,.5)}
+  .prow{display:grid;grid-template-columns:58px 1fr auto;gap:12px;align-items:center;padding:11px 0;
+    border-bottom:1px solid var(--line)}
+  .prow:last-child{border-bottom:0}
+  .prow .pth{width:58px;height:74px;border-radius:8px;overflow:hidden;background:#0a0b0e;flex:none}
+  .prow .pth img{width:100%;height:100%;object-fit:cover;display:block}
+  .prow .pt{font-weight:700;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .prow .pd{font-family:var(--mono);font-size:11px;color:var(--mut);margin-top:3px}
+  .prow .pcap{font-size:11.5px;color:var(--mut);margin-top:4px;white-space:pre-line;
+    display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+  .prow .pact{display:flex;gap:5px;flex-wrap:wrap;justify-content:flex-end;max-width:190px}
+  .pstt{display:inline-block;font-family:var(--mono);font-size:10px;font-weight:700;letter-spacing:.04em;
+    border:1px solid var(--line);border-radius:99px;padding:2px 9px;color:var(--mut);white-space:nowrap;margin-right:6px}
+  .pstt.waiting,.pstt.login,.pstt.manual{color:var(--warn);border-color:rgba(255,197,61,.5)}
+  .pstt.done{color:var(--ok);border-color:rgba(61,220,151,.45)}
+  .pstt.error,.pstt.canceled{color:var(--err);border-color:rgba(255,122,122,.4)}
+  .pstt.starting,.pstt.running{color:var(--acc);border-color:rgba(201,242,75,.45)}
+  .pstt.closed{color:#c39bff;border-color:rgba(195,155,255,.4)}
+  .prow .pact button.log{border-color:transparent;color:var(--mut)}
+  .prow .pact button.log:hover{color:var(--fg);border-color:var(--line)}
+</style>
+<style>/* Lipps hacker HUD — терминал и сканы только на дашборде */
+  .logo .mark{flex-shrink:0}
+  #v-dashboard .hud{display:flex;align-items:center;gap:7px;min-height:18px;margin:-6px 0 14px;
+    font-family:var(--mono);font-size:12px;letter-spacing:.02em;color:#b9c0a0;
+    white-space:nowrap;overflow:hidden}
+  #v-dashboard .hud .prompt{color:var(--acc);font-weight:700}
+  #v-dashboard .hud .cur{display:inline-block;width:7px;height:13px;background:var(--acc);
+    box-shadow:0 0 8px rgba(201,242,75,.7);animation:curBlink 1s steps(1) infinite}
+  @keyframes curBlink{0%,49%{opacity:1}50%,100%{opacity:0}}
+  #viewTitle.crt{text-shadow:0 0 18px rgba(201,242,75,.3);animation:crtIn .75s steps(2)}
+  @keyframes crtIn{
+    0%{opacity:.25;text-shadow:2px 0 rgba(255,0,80,.65),-2px 0 rgba(0,220,255,.55)}
+    20%{opacity:1}
+    38%{opacity:.5;transform:translateX(2px)}
+    56%{opacity:1;transform:none}
+    78%{text-shadow:-3px 0 rgba(255,0,80,.4),3px 0 rgba(0,220,255,.4)}
+    100%{text-shadow:0 0 18px rgba(201,242,75,.3)}}
+  #v-dashboard .stat{--cnr:rgba(201,242,75,.45);
+    background-image:
+      linear-gradient(var(--cnr),var(--cnr)),linear-gradient(var(--cnr),var(--cnr)),
+      linear-gradient(var(--cnr),var(--cnr)),linear-gradient(var(--cnr),var(--cnr)),
+      linear-gradient(var(--cnr),var(--cnr)),linear-gradient(var(--cnr),var(--cnr)),
+      linear-gradient(var(--cnr),var(--cnr)),linear-gradient(var(--cnr),var(--cnr));
+    background-repeat:no-repeat;
+    background-size:12px 1px,1px 12px,12px 1px,1px 12px,12px 1px,1px 12px,12px 1px,1px 12px;
+    background-position:left 10px top 10px,left 10px top 10px,right 10px top 10px,right 10px top 10px,
+      left 10px bottom 10px,left 10px bottom 10px,right 10px bottom 10px,right 10px bottom 10px}
+  #v-dashboard .stat:hover{--cnr:rgba(201,242,75,.9)}
+  #v-dashboard .stat::before{content:"";position:absolute;top:-30%;bottom:-30%;left:0;width:55%;
+    background:linear-gradient(90deg,transparent,rgba(201,242,75,.10),transparent);
+    transform:translateX(-180%) skewX(-16deg);
+    animation:statScan 5.6s cubic-bezier(.45,0,.25,1) infinite;pointer-events:none}
+  #v-dashboard .stat:nth-child(2)::before{animation-delay:.35s}
+  #v-dashboard .stat:nth-child(3)::before{animation-delay:.7s}
+  #v-dashboard .stat:nth-child(4)::before{animation-delay:1.05s}
+  @keyframes statScan{0%,52%{transform:translateX(-180%) skewX(-16deg)}
+    86%,100%{transform:translateX(320%) skewX(-16deg)}}
+  #v-dashboard .stat .n{color:#f6ffdf;text-shadow:0 0 16px rgba(201,242,75,.22)}
+  #v-dashboard .stat:hover .n{color:var(--acc)}
+  #v-dashboard .qa button.hero::after{content:"";position:absolute;inset:0;pointer-events:none;opacity:0;
+    background:repeating-linear-gradient(180deg,rgba(201,242,75,.07) 0 1px,transparent 1px 4px);
+    transition:opacity .25s}
+  #v-dashboard .qa button.hero:hover::after{opacity:1;animation:heroScan .55s linear infinite}
+  @keyframes heroScan{from{background-position:0 0}to{background-position:0 8px}}
+  @media (max-width:900px){
+    .nav button.on::before{left:8px;right:8px;top:auto;bottom:2px;width:auto;height:3px}
+  }
 </style>
 </head>
 <body>
 <div class="app">
   <aside>
     <div class="logo">
-      <svg width="26" height="26" viewBox="0 0 32 32" fill="none"><circle cx="16" cy="16" r="11" fill="#c9f24b"/><circle cx="16" cy="16" r="11" fill="none" stroke="#c9f24b" stroke-width="5" stroke-dasharray="3.1 2.66"/><circle cx="16" cy="16" r="6.5" fill="#141604"/><path d="M14.5 12.8v6.4l5.2-3.2-5.2-3.2z" fill="#c9f24b"/></svg>
-      ClipSaw
-      <span class="ver">V2</span>
+      <svg class="mark" width="28" height="28" viewBox="0 0 32 32" fill="none" aria-hidden="true"><path d="M10 5h6v13h9l-4.5 6H10z" fill="#c9f24b"/></svg>
+      Lipps <span class="by">by huakly</span>
     </div>
     <nav class="nav" id="nav">
       <button data-v="dashboard" class="on"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7.5" height="7.5" rx="2"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="2"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="2"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="2"/></svg><span class="nl">Дашборд</span></button>
       <button data-v="cut"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><path d="M8.2 7.8L20 19M8.2 16.2L20 5"/></svg><span class="nl">Нарезка</span></button>
       <button data-v="anime"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5A2.5 2.5 0 016.5 3H12v17H6.5A2.5 2.5 0 004 22V5.5z"/><path d="M20 5.5A2.5 2.5 0 0017.5 3H12v17h5.5A2.5 2.5 0 0120 22V5.5z"/></svg><span class="nl">Истории</span></button>
       <button data-v="tags"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20.6 13.4l-7.2 7.2a2 2 0 01-2.8 0L3 13V3h10l7.6 7.6a2 2 0 010 2.8z"/><circle cx="7.5" cy="7.5" r="1.2"/></svg><span class="nl">Теги</span></button>
+      <button data-v="post"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4"/><path d="M7 9l5-5 5 5"/><path d="M5 15v3a2 2 0 002 2h10a2 2 0 002-2v-3"/></svg><span class="nl">Постинг</span></button>
       <div class="nav-bottom">
         <button data-v="more"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="19" cy="12" r="1.4"/></svg><span class="nl">Остальное</span></button>
-        <button data-v="settings"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 00-.1-1.2l2-1.5-2-3.4-2.3 1a7 7 0 00-2-1.2L14.2 3H9.8l-.4 2.7a7 7 0 00-2 1.2l-2.3-1-2 3.4 2 1.5A7 7 0 005 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.4 2.3-1a7 7 0 002 1.2l.4 2.7h4.4l.4-2.7a7 7 0 002-1.2l2.3 1 2-3.4-2-1.5c.1-.4.1-.8.1-1.2z"/></svg><span class="nl">Настройки</span></button>
+        <button data-v="settings"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h9M18 7h2M4 17h2M11 17h9"/><circle cx="15.5" cy="7" r="2.2"/><circle cx="8.5" cy="17" r="2.2"/></svg><span class="nl">Настройки</span></button>
       </div>
     </nav>
     <div class="side-foot"><span class="dot"></span>движок онлайн<div class="store-mini"><i id="sideStoreBar" style="width:0%"></i></div><div id="sideStore" style="margin-top:6px">—</div></div>
@@ -444,6 +533,7 @@
 
     <!-- DASHBOARD -->
     <section class="view on" id="v-dashboard">
+      <div class="hud" aria-hidden="true"><span class="prompt">root@lipps:~$</span> <span id="hudText"></span><span class="cur"></span></div>
       <div class="grid4">
         <div class="card stat"><div class="n" id="stVideos">—</div><div class="l">видео нарезано</div></div>
         <div class="card stat"><div class="n" id="stClips">—</div><div class="l">клипов готово</div></div>
@@ -513,10 +603,15 @@
           <select id="banFile"><option value="">По умолчанию</option></select></div>
         <label class="chk"><input type="checkbox" id="manualChk"> Свои таймкоды вместо ИИ</label>
         </div>
-        <div id="stampsBox"><textarea id="stamps" placeholder="02:15-03:10&#10;05:40-06:25"></textarea></div>
+        <div id="stampsBox"><textarea id="stamps" placeholder="02:15-03:10&#10;05:40-06:25"></textarea>
+          <div class="dim" style="margin-top:6px">По одному отрезку на строку (до 20): мм:сс-мм:сс или чч:мм:сс-чч:мм:сс. Границы подтягиваются к целым словам, паузы без речи вырезаются.</div></div>
         <div style="margin-top:12px">
           <label class="lbl">Теги для всех клипов задачи</label>
           <div class="ftags" id="cutTags"><span class="dim" style="font-size:12.5px">Тегов нет — создай во вкладке «Теги»</span></div>
+        </div>
+        <div style="margin-top:12px">
+          <label class="lbl" for="cutPreset">Пресет описания для постинга</label>
+          <select id="cutPreset"><option value="">Без пресета</option></select>
         </div>
         <div style="margin-top:14px"><button class="btn" id="go">Нарезать шортсы</button></div>
         <div class="dim" style="margin-top:8px">⚠️ Заливай не чаще 1 видео в 60–120 мин (пачка каждые 10 мин = спам и 0 просмотров). Режим «Части» режет всё подряд включая скучные куски — для рекомендаций хуже всего, лучше DREX-режимы.</div>
@@ -561,6 +656,10 @@
           <label class="lbl">Теги для всех клипов задачи</label>
           <div class="ftags" id="twTags"><span class="dim" style="font-size:12.5px">Тегов нет — создай во вкладке «Теги»</span></div>
         </div>
+        <div style="margin-top:12px">
+          <label class="lbl" for="twPreset">Пресет описания для постинга</label>
+          <select id="twPreset"><option value="">Без пресета</option></select>
+        </div>
         <div style="margin-top:14px"><button class="btn" id="twGo">Нарезать со стрима</button></div>
         <div class="err-line" id="twErr"></div>
       </div>
@@ -597,7 +696,7 @@
         <label class="chk" style="margin-top:12px"><input type="checkbox" id="anManual"> Свои таймкоды / отрезки</label>
         <div id="anStampsBox">
           <textarea id="anStamps" placeholder="02:15-03:10&#10;05:40-06:25"></textarea>
-          <div class="dim" style="margin-top:6px">По одному отрезку на строку (до 20): мм:сс-мм:сс или чч:мм:сс-чч:мм:сс. Одна ссылка. Таймкоды считаются по исходному видео, глобальная чистка пауз отключается.</div>
+          <div class="dim" style="margin-top:6px">По одному отрезку на строку (до 20): мм:сс-мм:сс или чч:мм:сс-чч:мм:сс. Одна ссылка. Таймкоды считаются по исходному видео. Границы подтягиваются к целым словам, паузы без речи вырезаются даже поверх музыки.</div>
         </div>
         <div class="chkgrid">
           <label class="chk"><input type="checkbox" id="anPause" checked> Вырезать все паузы</label>
@@ -614,6 +713,10 @@
         <div style="margin-top:12px">
           <label class="lbl">Теги для всех клипов задачи</label>
           <div class="ftags" id="anTags"><span class="dim" style="font-size:12.5px">Тегов нет — создай во вкладке «Теги»</span></div>
+        </div>
+        <div style="margin-top:12px">
+          <label class="lbl" for="anPreset">Пресет описания для постинга</label>
+          <select id="anPreset"><option value="">Без пресета</option></select>
         </div>
         <div style="margin-top:14px"><button class="btn" id="anGo">Сделать части</button></div>
         <div class="dim" style="margin-top:8px">Ролик по центру (чуть выше 4:3), зум всегда на персонажах, блюр-фон сверху и снизу. «По частям» — DREX 1.5 режет на обрывах; «Интересные моменты» — как обычная нарезка: выбираешь количество и длину клипов. Свои таймкоды режут ровно указанные отрезки: в режиме частей они нумеруются, в режиме моментов остаются самостоятельными.</div>
@@ -661,6 +764,66 @@
       <div class="card" style="margin-top:12px" id="tagClipsCard" hidden>
         <div class="step"><b>04</b><span id="tagClipsTitle">Клипы тега</span></div>
         <div id="tagClips"></div>
+      </div>
+    </section>
+
+    <section class="view" id="v-post">
+      <div class="card">
+        <div class="step"><b>01</b><span>Пресеты описаний и тегов</span></div>
+        <div class="dim">Описания разделяй строкой <b>---</b> — варианты идут по кругу, у соседних видео текст разный. Теги — по строке на набор; <b>{title}</b> вставит название клипа. Пресет можно выбрать при нарезке — он запомнится за клипами.</div>
+        <div class="ai-grid" style="margin-top:10px">
+          <div><label class="lbl" for="prName">Название</label><input id="prName" type="text" maxlength="60" placeholder="например: Истории — драма"></div>
+          <div><label class="lbl">&nbsp;</label><button class="btn ghost" id="prNew">Новый пресет</button></div>
+        </div>
+        <label class="lbl" for="prDescs">Описания — варианты через ---</label>
+        <textarea id="prDescs" rows="5" placeholder="Сериал, который держит до конца…&#10;---&#10;Ты бы остался на месте героя? #кино"></textarea>
+        <label class="lbl" for="prTags">Наборы тегов — по строке</label>
+        <textarea id="prTags" rows="3" placeholder="#сериалы #кино #топ #shorts&#10;#драма #истории #viral"></textarea>
+        <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
+          <button class="btn sm" id="prSave">Сохранить пресет</button>
+          <button class="btn sm ghost" id="prCancel" style="display:none">Отмена</button>
+        </div>
+        <div class="err-line" id="prErr"></div>
+        <div class="presets" id="prList" style="margin-top:14px"><div class="empty">Пока нет пресетов</div></div>
+      </div>
+
+      <div class="card" style="margin-top:12px">
+        <div class="step"><b>02</b><span>Видео из библиотеки</span></div>
+        <input id="pSearch" type="text" placeholder="Поиск по клипам…" style="margin-bottom:10px">
+        <div class="libbar">
+          <button class="btn sm ghost" id="pSelAll">Выбрать все видимые</button>
+          <button class="btn sm ghost" id="pSelClear">Снять выбор</button>
+          <span class="dim" id="pSelCount"></span>
+        </div>
+        <div class="pgrid" id="pGrid"><div class="empty">Загрузка…</div></div>
+      </div>
+
+      <div class="card" style="margin-top:12px">
+        <div class="step"><b>03</b><span>Расписание публикаций</span></div>
+        <div class="dim" style="margin-bottom:8px">Окна Camoufox откроются сразу после постановки в очередь — по одному на аккаунт. В каждом видео и текст уже стоят, а время публикации выставлено в самом TikTok Studio; ты только проверяешь и жмёшь «Запланировать».</div>
+        <div class="ai-grid">
+          <div><label class="lbl" for="pPreset">Пресет описания и тегов</label><select id="pPreset"><option value="auto">Из задачи (выбрал при нарезке)</option><option value="0">Без описания</option></select></div>
+          <div><label class="lbl" for="pStart">Первая публикация</label><input id="pStart" type="datetime-local"></div>
+        </div>
+        <div class="ai-grid">
+          <div><label class="lbl" for="pInt">Интервал между видео, минут</label><input id="pInt" type="number" min="5" max="1440" value="90"></div>
+          <div><label class="lbl" for="pJit">Разброс, ± минут</label><input id="pJit" type="number" min="0" max="60" value="3"></div>
+        </div>
+        <label class="lbl">Аккаунты — профили Camoufox, по кругу</label>
+        <div class="chips" id="pAccs"><span class="dim" style="font-size:12.5px">Загрузка…</span></div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
+          <button class="btn" id="pQueue" style="flex:1 1 240px">Поставить в очередь</button>
+          <button class="btn ghost" id="pQueueNow" style="flex:0 0 auto">Первый — через 15 мин</button>
+        </div>
+        <div class="dim" id="pSummary" style="margin-top:9px">Выбери видео — покажу, когда что выйдет.</div>
+        <div class="err-line" id="pErr"></div>
+        <div class="dim" style="margin-top:8px">Публикацию бот не жмёт: он только открывает окна, заливает видео, вписывает текст и ставит время в студии. Пароли и капчу не трогает.</div>
+      </div>
+
+      <div class="card" style="margin-top:12px">
+        <div class="step"><b>04</b><span>Очередь публикаций</span></div>
+        <div class="libbar"><span class="dim" id="pQueueInfo">—</span><button class="btn sm ghost" id="pClear" style="margin-left:auto">Очистить завершённые</button></div>
+        <div id="pList"><div class="empty">Пока пусто</div></div>
       </div>
     </section>
 
@@ -859,8 +1022,8 @@
 
 <script>
 const $=id=>document.getElementById(id);
-const TITLES={dashboard:'Дашборд',cut:'Нарезка',twitch:'Twitch',anime:'Истории',clips:'Клипы',tags:'Теги',more:'Остальное',analytics:'Аналитика',uniq:'Уникализатор',bnov:'Баннер на видео',history:'История',settings:'Настройки'};
-const SUBS={dashboard:'пачка вертикальных шортсов из серий',cut:'ссылки → сценки → серии',twitch:'стримы: вебка сверху, катка снизу',anime:'китайские страшилки → части 3–4 мин на обрывах',clips:'готовое с постерами и скором',tags:'разделяй клипы по тематикам, лимитам и аккаунтам',more:'клипы, история и остальные разделы',analytics:'TikTok: просмотры, подписчики и все видео',uniq:'залил видео → получил уникальное',bnov:'свой баннер: ИИ уникализирует, ускоряет и ставит с середины',history:'все запуски и их движки',settings:'ключи, дефолты, воркеры'};
+const TITLES={dashboard:'Дашборд',cut:'Нарезка',twitch:'Twitch',anime:'Истории',clips:'Клипы',tags:'Теги',post:'Постинг',more:'Остальное',analytics:'Аналитика',uniq:'Уникализатор',bnov:'Баннер на видео',history:'История',settings:'Настройки'};
+const SUBS={dashboard:'пачка вертикальных шортсов из серий',cut:'ссылки → сценки → серии',twitch:'стримы: вебка сверху, катка снизу',anime:'китайские страшилки → части 3–4 мин на обрывах',clips:'готовое с постерами и скором',tags:'разделяй клипы по тематикам, лимитам и аккаунтам',post:'выбрал пачку → окна студии откроются сразу, видео выйдут по расписанию',more:'клипы, история и остальные разделы',analytics:'TikTok: просмотры, подписчики и все видео',uniq:'залил видео → получил уникальное',bnov:'свой баннер: ИИ уникализирует, ускоряет и ставит с середины',history:'все запуски и их движки',settings:'ключи, дефолты, воркеры'};
 let SETTINGS={};
 let live=new Map();
 let HIST=[];
@@ -870,15 +1033,98 @@ function fmtSize(b){if(b==null||isNaN(b))return '—';if(b>1e9)return (b/1e9).to
 function ago(t){const d=(Date.now()/1000-t);if(d<60)return 'только что';if(d<3600)return Math.floor(d/60)+' мин назад';if(d<86400)return Math.floor(d/3600)+' ч назад';return Math.floor(d/86400)+' д назад'}
 function esc(s){return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 
+const REDUCED=matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+/* терминальная строка на дашборде */
+const HUD_PHRASES=[];
+let hudP=0,hudI=0,hudDel=false,hudT=null;
+function hudSync(){
+  HUD_PHRASES.length=0;
+  HUD_PHRASES.push('engine online · workers '+(SETTINGS.max_workers||2));
+  HUD_PHRASES.push('queue '+(live.size?live.size+' active':'idle')+' · shorts '+($('stGb').dataset.v||'—'));
+  HUD_PHRASES.push('anti-detect armed · pauses on · music ready');
+  HUD_PHRASES.push('sudo make clips --viral --unique');
+}
+function hudTick(){
+  const el=$('hudText');
+  if(!el)return;
+  if(REDUCED){el.textContent=HUD_PHRASES[hudP%Math.max(1,HUD_PHRASES.length)]||'';return;}
+  if(!$('v-dashboard').classList.contains('on')||document.hidden){hudT=setTimeout(hudTick,700);return;}
+  const s=HUD_PHRASES[hudP%Math.max(1,HUD_PHRASES.length)]||'';
+  if(!hudDel){
+    hudI++;
+    el.textContent=s.slice(0,hudI);
+    if(hudI>=s.length){hudDel=true;hudT=setTimeout(hudTick,2400);return;}
+    hudT=setTimeout(hudTick,26+Math.random()*34);
+  }else{
+    hudI--;
+    el.textContent=s.slice(0,Math.max(0,hudI));
+    if(hudI<=0){hudDel=false;hudP++;hudT=setTimeout(hudTick,420);return;}
+    hudT=setTimeout(hudTick,12);
+  }
+}
+
+/* цифры статистики: короткий перебор, потом точное значение */
+function scramble(el,text){
+  if(!el)return;
+  text=String(text);
+  if(el.dataset.v===text)return;
+  el.dataset.v=text;
+  if(REDUCED){el.textContent=text;return;}
+  clearInterval(el._sc);
+  const src=text.split('');
+  let frame=0;
+  el._sc=setInterval(()=>{
+    frame++;
+    el.textContent=src.map(ch=>{
+      if(/\d/.test(ch)&&frame<14&&Math.random()<.8)return String((Math.random()*10)|0);
+      return ch;
+    }).join('');
+    if(frame>=14){clearInterval(el._sc);el.textContent=text;}
+  },45);
+}
+
+/* глитч заголовка при входе на дашборд */
+const TGL='!<>-_/[]{}—=+*^?#01';
+function glitchTitle(text){
+  const el=$('viewTitle');
+  el.classList.remove('crt');
+  void el.offsetWidth;
+  el.classList.add('crt');
+  if(REDUCED){el.textContent=text;return;}
+  clearInterval(el._gl);
+  let frame=0;
+  const render=()=>{
+    el.textContent=text.split('').map((ch,i)=>{
+      if(ch===' '||frame/14>i/Math.max(1,text.length))return ch;
+      return TGL[(Math.random()*TGL.length)|0];
+    }).join('');
+  };
+  render();
+  el._gl=setInterval(()=>{
+    frame++;
+    render();
+    if(frame>=14){clearInterval(el._gl);el.textContent=text;}
+  },42);
+}
+
 function show(v){
   const navV=['twitch','analytics','uniq','bnov','clips','history'].includes(v)?'more':v;
   document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('on',b.dataset.v===navV));
   document.querySelectorAll('section.view').forEach(s=>s.classList.toggle('on',s.id==='v-'+v));
-  $('viewTitle').textContent=TITLES[v]||v;
+  const title=TITLES[v]||v;
+  if(v==='dashboard')glitchTitle(title);
+  else{
+    clearInterval($('viewTitle')._gl);
+    $('viewTitle').classList.remove('crt');
+    $('viewTitle').textContent=title;
+  }
   $('viewSub').textContent=SUBS[v]||'';
   if(v==='dashboard')loadDash();
   if(v==='clips')loadClips();
   if(v==='tags'){loadTags();loadAccounts();loadTagStats();}
+  if(v==='post'){loadPostView();}
+  if(v==='cut'||v==='anime'||v==='twitch')loadPresets();
   if(v==='analytics'){loadAccounts();loadAnalyticsSettings();}
   if(v==='history')loadHistory();
   if(v==='settings'){loadGameplays();loadSettings();loadLearn();}
@@ -1021,7 +1267,7 @@ $('go').onclick=async ()=>{
         captions:$('caps').checked&&mode!=='fast',facetrack:mode==='face'||mode==='split',
         antidetect:$('anti').checked,mirror:$('mir').checked,banner:$('ban').checked,clip_music:$('clipMusic').checked,remove_pauses:$('pauseCut').checked,banner_file:$('banFile').value,asr_model:$('asd').value,gameplay:$('game').value,out_name:$('outName').value.trim(),fast:mode==='fast',vmode:mode==='fast'?'blur':mode,domain:$('domain').value,
         hook:$('hookText').value.trim(),
-        tags:formTagIds('cutTags'),
+        tags:formTagIds('cutTags'),preset_id:$('cutPreset').value||null,
         stamps:$('manualChk').checked?$('stamps').value:''})});
     const j=await r.json();
     if(!j.ok)throw new Error(j.error||'Не получилось');
@@ -1041,8 +1287,6 @@ function syncAnMode(){
   $('anLensWrap').style.display=(m&&!manual)?'':'none';
   $('anLimitWrap').style.display=manual?'none':'';
   $('anStampsBox').style.display=manual?'block':'none';
-  $('anPause').disabled=manual;
-  $('anPause').title=manual?'В ручном режиме паузы не вырезаются':'';
   $('anGo').textContent=manual?'Сделать по таймкодам':(m?'Сделать моменты':'Сделать части');
 }
 $('anMode').onchange=syncAnMode;
@@ -1075,10 +1319,10 @@ $('anGo').onclick=async ()=>{
         story_unique:$('anUnique').checked,
         story_mirror:$('anMirror').checked,
         story_cta:$('anCta').checked,
-        story_remove_pauses:manual?false:$('anPause').checked,
+        story_remove_pauses:$('anPause').checked,
         story_banner:$('anBan').checked,banner_file:$('anBanFile').value,
         story_music:$('anMusic').checked,story_variants:+$('anVar').value,
-        tags:formTagIds('anTags'),
+        tags:formTagIds('anTags'),preset_id:$('anPreset').value||null,
         facetrack:true,antidetect:false,mirror:false,banner:false})});
     const j=await r.json();
     if(!j.ok)throw new Error(j.error||'Не получилось');
@@ -1094,14 +1338,15 @@ async function loadDash(){
   try{
     const s=await (await fetch('/api/stats')).json();
     const lib=await (await fetch('/api/library')).json();
-    $('stVideos').textContent=s.videos;
-    $('stClips').textContent=s.clips;
-    $('stFiles').textContent=lib.files.length;
+    scramble($('stVideos'),s.videos);
+    scramble($('stClips'),s.clips);
+    scramble($('stFiles'),lib.files.length);
     const gb=(s.bytes_shorts+s.bytes_tmp)/1e9;
-    $('stGb').textContent=gb>=1?gb.toFixed(1)+' ГБ':Math.round(gb*1000)+' МБ';
+    scramble($('stGb'),gb>=1?gb.toFixed(1)+' ГБ':Math.round(gb*1000)+' МБ');
     $('sideStore').textContent='шортсы: '+fmtSize(s.bytes_shorts);
     $('sideStoreBar').style.width=Math.min(100,(s.bytes_shorts+s.bytes_tmp)/5e9*100)+'%';
     $('workerPill').textContent='workers · '+SETTINGS.max_workers;
+    hudSync();
     const h=await (await fetch('/api/history?limit=5')).json();
     HIST=h.items||[];
     const box=$('dashRecent');box.innerHTML='';
@@ -1213,7 +1458,7 @@ function makeCustom(id){
   sel._cs={sync};sync();
 }
 function refreshCustom(){document.querySelectorAll('select').forEach(s=>{if(s._cs)s._cs.sync();});}
-  ['want','game','lens','limit','mode','asd','sWant','sLens','sLimit','sVmode','sAsd','sGame','sW','twWant','twLens','twLimit','anMode','anWant','anLens','anVar','anLen','anLimit','banFile','twBanFile','uqBanFile','anBanFile','bnBanSel'].forEach(makeCustom);
+  ['want','game','lens','limit','mode','asd','sWant','sLens','sLimit','sVmode','sAsd','sGame','sW','twWant','twLens','twLimit','anMode','anWant','anLens','anVar','anLen','anLimit','banFile','twBanFile','uqBanFile','anBanFile','bnBanSel','cutPreset','anPreset','twPreset','pPreset'].forEach(makeCustom);
 
 /* ---------- клипы ---------- */
 let LIB=[];
@@ -1279,7 +1524,7 @@ $('twGo').onclick=async ()=>{
     const r=await fetch('/api/twitch/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
       urls:urls.join('\n'),api_key:$('twKey').value.trim(),
       want:+$('twWant').value,min_len:+mm[0],max_len:+mm[1],
-      limit_min:+$('twLimit').value,tags:formTagIds('twTags'),
+      limit_min:+$('twLimit').value,tags:formTagIds('twTags'),preset_id:$('twPreset').value||null,
       antidetect:$('twAnti').checked,mirror:$('twMir').checked,banner:$('twBan').checked,clip_music:$('twMusic').checked,remove_pauses:$('twPause').checked,banner_file:$('twBanFile').value})});
     const j=await r.json();
     if(!j.ok)throw new Error(j.error||'Не вышло');
@@ -2339,6 +2584,328 @@ function applyDefaults(){
   refreshCustom();
 }
 
+/* ---------- постинг ---------- */
+const POST_LABEL={queued:'в очереди',starting:'запускается',running:'заполняю',
+  waiting:'ждёт «Запланировать»',login:'нужен вход',manual:'вручную',
+  done:'готово',closed:'закрыто',error:'ошибка',canceled:'отменено'};
+const POST_USED=['queued','starting','running','waiting','login','manual','done'];
+let POST_LIB=[],PRESETS=[],POSTS=[],POST_PROFILES=[],P_SEL=new Map(),P_ACCS=new Set(),
+    PR_EDIT=null,P_STARTED=0,P_ACCS_INIT=0;
+
+function fmtWhen(ts){
+  if(!ts)return '—';
+  const d=new Date(ts*1000),now=new Date();
+  const same=d.toDateString()===now.toDateString();
+  return d.toLocaleString('ru-RU',same?{hour:'2-digit',minute:'2-digit'}
+    :{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});
+}
+function parseStartInput(){
+  const v=($('pStart')||{}).value;
+  const t=v?new Date(v).getTime():NaN;
+  return isNaN(t)?Math.floor(Date.now()/1000)+90*60:Math.floor(t/1000);
+}
+function setDefaultStart(){
+  const d=new Date(Date.now()+90*60*1000);d.setSeconds(0,0);
+  const p=n=>String(n).padStart(2,'0');
+  $('pStart').value=d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())
+    +'T'+p(d.getHours())+':'+p(d.getMinutes());
+}
+
+async function loadPresets(){
+  try{
+    const j=await (await fetch('/api/presets')).json();
+    PRESETS=j.items||[];
+    paintPresets();
+    fillPresetSelects();
+  }catch(e){}
+}
+function fillPresetSelects(){
+  const add=(sel,v,t)=>{const o=document.createElement('option');o.value=v;o.textContent=t;sel.appendChild(o);};
+  const p=$('pPreset'),keepP=p.value||'auto';
+  p.innerHTML='';add(p,'auto','Из задачи (выбрал при нарезке)');add(p,'0','Без описания');
+  PRESETS.forEach(x=>add(p,String(x.id),x.name));
+  p.value=[...p.options].some(o=>o.value===keepP)?keepP:'auto';
+  ['cutPreset','anPreset','twPreset'].forEach(id=>{
+    const s=$(id);if(!s)return;
+    const keep=s.value;
+    s.innerHTML='';add(s,'','Без пресета');
+    PRESETS.forEach(x=>add(s,String(x.id),x.name));
+    s.value=[...s.options].some(o=>o.value===keep)?keep:'';
+  });
+  refreshCustom();
+}
+function paintPresets(){
+  const box=$('prList');box.innerHTML='';
+  if(!PRESETS.length){box.innerHTML='<div class="empty">Пока нет пресетов — создай первый</div>';return;}
+  PRESETS.forEach(p=>{
+    const row=document.createElement('div');row.className='preset';
+    const info=document.createElement('div');
+    const b=document.createElement('b');b.textContent=p.name;
+    const d=document.createElement('div');d.className='dim';
+    d.textContent=p.desc_count+' вар. описания · '+p.tag_count+' набор(ов) тегов';
+    info.append(b,d);
+    const act=document.createElement('div');act.className='pact';
+    const ed=document.createElement('button');ed.textContent='Изменить';ed.onclick=()=>editPreset(p);
+    const del=document.createElement('button');del.textContent='Удалить';
+    del.onclick=async()=>{
+      if(!confirm('Удалить пресет «'+p.name+'»?'))return;
+      await fetch('/api/presets/'+p.id,{method:'DELETE'});
+      if(PR_EDIT===p.id)resetPresetForm();
+      toast('Пресет удалён','ok');loadPresets();
+    };
+    act.append(ed,del);row.append(info,act);box.appendChild(row);
+  });
+}
+function editPreset(p){
+  PR_EDIT=p.id;
+  $('prName').value=p.name;$('prDescs').value=p.descs||'';$('prTags').value=p.tagsets||'';
+  $('prSave').textContent='Сохранить изменения';$('prCancel').style.display='inline-block';
+  $('prErr').style.display='none';
+  $('prName').focus();
+}
+function resetPresetForm(){
+  PR_EDIT=null;
+  $('prName').value='';$('prDescs').value='';$('prTags').value='';
+  $('prSave').textContent='Сохранить пресет';$('prCancel').style.display='none';
+  $('prErr').style.display='none';
+}
+$('prNew').onclick=resetPresetForm;
+$('prCancel').onclick=resetPresetForm;
+$('prSave').onclick=async()=>{
+  const E=$('prErr');E.style.display='none';
+  const body={name:$('prName').value.trim(),descs:$('prDescs').value,tagsets:$('prTags').value};
+  if(!body.name){E.textContent='Введите название пресета';E.style.display='block';return;}
+  if(!body.descs.trim()&&!body.tagsets.trim()){E.textContent='Добавь хоть описание или теги';E.style.display='block';return;}
+  try{
+    const r=await fetch(PR_EDIT?('/api/presets/'+PR_EDIT):'/api/presets',{
+      method:PR_EDIT?'PATCH':'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(body)});
+    const j=await r.json();
+    if(!j.ok)throw new Error(j.error||'Не вышло');
+    toast(PR_EDIT?'Пресет обновлён':'Пресет создан','ok');
+    resetPresetForm();loadPresets();
+  }catch(e){E.textContent=e.message;E.style.display='block';}
+};
+
+async function loadPostLibrary(){
+  try{
+    const j=await (await fetch('/api/library')).json();
+    POST_LIB=(j.files||[]).filter(f=>!f.hidden);
+    const keys=new Set(POST_LIB.map(f=>f.kind+'/'+f.name));
+    [...P_SEL.keys()].forEach(k=>{if(!keys.has(k))P_SEL.delete(k);});
+    paintPostGrid();
+  }catch(e){}
+}
+function postGridItems(){
+  const flt=($('pSearch').value||'').trim().toLowerCase();
+  return POST_LIB.filter(f=>{
+    if(POST_USED.includes(f.post_status||''))return false;
+    const t=((f.title||'')+' '+f.name).toLowerCase();
+    return !flt||t.includes(flt);
+  });
+}
+function paintPostGrid(){
+  const g=$('pGrid');g.innerHTML='';
+  const items=POST_LIB.filter(f=>{
+    const flt=($('pSearch').value||'').trim().toLowerCase();
+    const t=((f.title||'')+' '+f.name).toLowerCase();
+    return !flt||t.includes(flt);
+  });
+  if(!items.length){g.innerHTML='<div class="empty">Ничего не найдено</div>';refreshPostSel();return;}
+  items.forEach(f=>{
+    const key=f.kind+'/'+f.name;
+    const used=POST_USED.includes(f.post_status||'');
+    const d=document.createElement('div');
+    d.className='pcard'+(P_SEL.has(key)?' picked':'')+(used?' used':'');
+    const im=document.createElement('img');im.loading='lazy';im.alt='';
+    if(f.thumb)im.src=f.thumb;
+    const cb=document.createElement('input');cb.type='checkbox';cb.className='pcb';
+    cb.checked=P_SEL.has(key);cb.disabled=used;
+    cb.onclick=ev=>{ev.stopPropagation();if(!used)togglePostSel(f,d);};
+    if(f.post_status){const badge=document.createElement('span');badge.className='pst';
+      badge.textContent=POST_LABEL[f.post_status]||f.post_status;d.appendChild(badge);}
+    const nm=document.createElement('div');nm.className='pn';
+    nm.textContent=f.title||prettyName(f.name);
+    nm.title=(f.job_title?f.job_title+' · ':'')+f.name;
+    d.onclick=()=>{if(!used)togglePostSel(f,d);};
+    d.append(im,cb,nm);
+    g.appendChild(d);
+  });
+  refreshPostSel();
+}
+function togglePostSel(f,card){
+  const key=f.kind+'/'+f.name;
+  P_SEL.has(key)?P_SEL.delete(key):P_SEL.set(key,f);
+  if(card){
+    card.classList.toggle('picked',P_SEL.has(key));
+    const cb=card.querySelector('.pcb');if(cb)cb.checked=P_SEL.has(key);
+  }
+  refreshPostSel();
+}
+function refreshPostSel(){
+  $('pSelCount').textContent=P_SEL.size?('выбрано: '+P_SEL.size):'';
+  updatePostSummary();
+}
+function selectedAccounts(){
+  return [...document.querySelectorAll('#pAccs button.on')].map(b=>b.dataset.acc);
+}
+function updatePostSummary(){
+  const s=$('pSummary');if(!s)return;
+  const n=P_SEL.size;
+  if(!n){s.textContent='Выбери видео — покажу, когда что выйдет.';return;}
+  const start=parseStartInput();
+  const int=+$('pInt').value||90;
+  const end=start+(n-1)*int*60;
+  const accs=selectedAccounts();
+  s.textContent=n+' видео · окна откроются сразу · выйдут '+fmtWhen(start)+' → '
+    +fmtWhen(end)+', каждые '+int+' мин · '
+    +(accs.length?('аккаунты '+accs.join(', ')+' по кругу'):'аккаунт не выбран');
+}
+$('pSearch').addEventListener('input',paintPostGrid);
+$('pSelAll').onclick=()=>{
+  postGridItems().forEach(f=>P_SEL.set(f.kind+'/'+f.name,f));
+  paintPostGrid();
+};
+$('pSelClear').onclick=()=>{P_SEL.clear();paintPostGrid();};
+$('pInt').addEventListener('input',updatePostSummary);
+$('pJit').addEventListener('input',updatePostSummary);
+$('pStart').addEventListener('input',updatePostSummary);
+
+function paintProfiles(){
+  const box=$('pAccs');box.innerHTML='';
+  if(!POST_PROFILES.length){
+    box.innerHTML='<span class="dim" style="font-size:12.5px">Профили Camoufox не найдены — открой TikTok UA 1–3 хоть раз</span>';
+    return;
+  }
+  const avail=new Set(POST_PROFILES.filter(p=>p.exists).map(p=>p.id));
+  if(!P_ACCS_INIT){avail.forEach(x=>P_ACCS.add(x));P_ACCS_INIT=1;}
+  [...P_ACCS].forEach(x=>{if(!avail.has(x))P_ACCS.delete(x);});
+  POST_PROFILES.forEach(p=>{
+    const b=document.createElement('button');b.type='button';
+    b.className=P_ACCS.has(p.id)?'on':'';b.dataset.acc=p.id;
+    b.textContent=p.label+(p.exists?'':' · нет');
+    b.disabled=!p.exists;
+    b.onclick=()=>{
+      P_ACCS.has(p.id)?P_ACCS.delete(p.id):P_ACCS.add(p.id);
+      b.classList.toggle('on');updatePostSummary();
+    };
+    box.appendChild(b);
+  });
+}
+
+async function loadPosts(){
+  try{
+    const j=await (await fetch('/api/posts')).json();
+    POSTS=j.items||[];
+    if(j.profiles){POST_PROFILES=j.profiles;paintProfiles();}
+    paintPosts();
+  }catch(e){}
+}
+function paintPosts(){
+  const box=$('pList');box.innerHTML='';
+  const counts={};POSTS.forEach(p=>{counts[p.status]=(counts[p.status]||0)+1;});
+  const active=(counts.starting||0)+(counts.running||0)+(counts.waiting||0)
+    +(counts.login||0)+(counts.manual||0);
+  $('pQueueInfo').textContent=POSTS.length
+    ?('в очереди '+(counts.queued||0)+' · в работе '+active+' · готово '+(counts.done||0))
+    :'—';
+  if(!POSTS.length){box.innerHTML='<div class="empty">Пока пусто</div>';return;}
+  POSTS.forEach(p=>{
+    const row=document.createElement('div');row.className='prow';
+    const th=document.createElement('div');th.className='pth';
+    const im=document.createElement('img');im.loading='lazy';im.alt='';
+    im.src=p.thumb;im.onerror=()=>{im.style.display='none'};th.appendChild(im);
+    const mid=document.createElement('div');
+    const title=document.createElement('div');title.className='pt';
+    title.textContent=p.title||prettyName(p.file);title.title=p.file;
+    const meta=document.createElement('div');meta.className='pd';
+    const badge=document.createElement('span');badge.className='pstt '+p.status;
+    badge.textContent=POST_LABEL[p.status]||p.status;meta.appendChild(badge);
+    let when='';
+    if(p.status==='queued'||p.status==='waiting')when='выйдет '+fmtWhen(p.scheduled);
+    else if(p.status==='done')when=fmtWhen(p.scheduled||p.finished);
+    else when=fmtWhen(p.finished||p.scheduled);
+    meta.appendChild(document.createTextNode(when+' · аккаунт '+p.account
+      +(p.preset_name?' · '+p.preset_name:'')));
+    mid.append(title,meta);
+    if(p.caption){
+      const cap=document.createElement('div');cap.className='pcap';
+      cap.textContent=p.caption;
+      mid.appendChild(cap);
+    }
+    if(p.stage&&p.status!=='queued'){
+      const st=document.createElement('div');st.className='pd';st.textContent=p.stage;
+      mid.appendChild(st);
+    }
+    if(p.error){const er=document.createElement('div');er.className='pd';
+      er.style.color='var(--err)';er.textContent=p.error;mid.appendChild(er);}
+    const act=document.createElement('div');act.className='pact';
+    const mk=(label,fn,cls)=>{const b=document.createElement('button');b.textContent=label;
+      if(cls)b.className=cls;b.onclick=fn;act.appendChild(b);};
+    if(p.status==='queued'){
+      mk('Удалить',()=>delPost(p.id));
+    }else if(['starting','running','waiting','login','manual'].includes(p.status)){
+      if(['waiting','login','manual'].includes(p.status))mk('Готово',()=>postAction(p.id,'done'));
+      mk('Отменить',()=>postAction(p.id,'cancel'));
+    }else{
+      mk('Повторить',()=>postAction(p.id,'now'));
+      mk('Удалить',()=>delPost(p.id));
+    }
+    if(['starting','running','waiting','login','manual','done','closed','error','canceled'].includes(p.status))
+      mk('Лог',()=>window.open('/api/posts/'+p.id+'/log','_blank'),'log');
+    row.append(th,mid,act);box.appendChild(row);
+  });
+}
+async function postAction(id,action){
+  try{
+    const r=await fetch('/api/posts/'+id+'/'+action,{method:'POST'});
+    const j=await r.json();
+    if(!j.ok)throw new Error(j.error||'Не вышло');
+    toast('Готово','ok');loadPosts();loadPostLibrary();
+  }catch(e){toast(e.message,'err');}
+}
+async function delPost(id){
+  try{
+    const r=await fetch('/api/posts/'+id,{method:'DELETE'});
+    const j=await r.json();
+    if(!j.ok)throw new Error(j.error||'Не вышло');
+    toast('Удалено','ok');loadPosts();loadPostLibrary();
+  }catch(e){toast(e.message,'err');}
+}
+$('pClear').onclick=async()=>{
+  if(!confirm('Удалить все завершённые публикации из очереди? Сами видео останутся.'))return;
+  const j=await (await fetch('/api/posts/clear',{method:'POST'})).json();
+  if(j.ok){toast('Убрано: '+(j.removed||0),'ok');loadPosts();loadPostLibrary();}
+};
+async function queueSelected(nowMode){
+  const E=$('pErr');E.style.display='none';
+  if(!P_SEL.size){E.textContent='Выбери хоть одно видео';E.style.display='block';return;}
+  const accs=selectedAccounts();
+  if(!accs.length){E.textContent='Выбери аккаунт';E.style.display='block';return;}
+  const body={files:[...P_SEL.values()].map(f=>({name:f.name,kind:f.kind})),
+    preset_id:$('pPreset').value||'auto',accounts:accs,
+    start:nowMode?(Math.floor(Date.now()/1000)+15*60):parseStartInput(),
+    interval_min:+$('pInt').value||90,jitter_min:+$('pJit').value||0};
+  const btns=[$('pQueue'),$('pQueueNow')];btns.forEach(b=>b.disabled=true);
+  try{
+    const r=await fetch('/api/posts/bulk',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const j=await r.json();
+    if(!j.ok)throw new Error(j.error||'Не вышло');
+    toast('В очереди: '+j.added+' · окна откроются сразу'
+      +(j.skipped?(' · пропущено: '+j.skipped):''),'ok');
+    P_SEL.clear();loadPosts();loadPostLibrary();
+  }catch(e){E.textContent=e.message;E.style.display='block';}
+  finally{btns.forEach(b=>b.disabled=false);}
+}
+$('pQueue').onclick=()=>queueSelected(false);
+$('pQueueNow').onclick=()=>queueSelected(true);
+function loadPostView(){
+  if(!P_STARTED){setDefaultStart();P_STARTED=1;}
+  loadPresets();loadPostLibrary();loadPosts();
+}
+setInterval(()=>{if($('v-post').classList.contains('on'))loadPosts();},5000);
+
 /* ---------- init ---------- */
 (async function init(){
   if(localStorage.getItem('cs_drex'))$('key').value=localStorage.getItem('cs_drex');
@@ -2353,8 +2920,11 @@ function applyDefaults(){
     $('mode').dispatchEvent(new Event('change'));
   }catch(e){}
   await loadTags();
+  loadPresets();
   loadDash();
   restoreJobs();
+  hudSync();
+  hudTick();
 })();
 </script>
 </body>

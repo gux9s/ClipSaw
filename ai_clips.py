@@ -1173,6 +1173,142 @@ def snap_to_speech(s: float, e: float, bounds, tol: float = 1.2):
     return s, e
 
 
+def snap_words(start: float, end: float, segs, pad: float = 0.15):
+    """Ручной отрезок -> границы слов: start, попавший внутрь слова,
+    откатываем к началу этого слова, end — к его концу, сверху подушка
+    pad. Подушка не заходит в соседние слова (иначе в клип попадал
+    обрубок слова до/после). Слов нет — как есть."""
+    words = [w for s in (segs or []) for w in (s.get("words") or [])
+             if w.get("w")]
+    if not words:
+        return start, end
+    words.sort(key=lambda w: w["s"])
+    s2, e2 = start, end
+    for w in words:
+        if w["s"] < s2 < w["e"]:
+            s2 = w["s"]
+            break
+    for w in reversed(words):
+        if w["s"] < e2 < w["e"]:
+            e2 = w["e"]
+            break
+    s_snap, e_snap = s2, e2
+    prev_w = next_w = None
+    for w in words:
+        if w["e"] <= start:
+            prev_w = w
+        elif w["s"] >= end:
+            next_w = w
+            break
+    s2 = max(0.0, s_snap - pad)
+    if prev_w:
+        s2 = min(s_snap, max(s2, prev_w["e"]))
+    e2 = e_snap + pad
+    if next_w:
+        e2 = max(e_snap, min(e2, next_w["s"] - 0.05))
+    if e2 - s2 < 0.3:  # вырожденный отрезок — не трогаем
+        return start, end
+    return s2, e2
+
+
+def speech_gaps(words, ws: float, we: float, min_gap: float = 0.8):
+    """Промежутки без слов внутри окна [ws, we] — включая края. Их режем
+    даже если тишина «грязная» (музыка/шум) и silencedetect её не видит.
+    Слов в окне нет совсем — возвращаем пусто (окно не вырезаем целиком)."""
+    ints = []
+    for w in words or []:
+        try:
+            a, b = float(w["s"]), float(w["e"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        a, b = max(a, ws), min(b, we)
+        if b > a:
+            ints.append([a, b])
+    if not ints:
+        return []
+    ints.sort()
+    merged = [ints[0]]
+    for a, b in ints[1:]:
+        if a <= merged[-1][1] + 0.05:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    gaps, cur = [], ws
+    for a, b in merged:
+        if a - cur >= min_gap:
+            gaps.append((cur, a))
+        cur = max(cur, b)
+    if we - cur >= min_gap:
+        gaps.append((cur, we))
+    return gaps
+
+
+def vad_gaps(path: str, ws: float = 0.0, we: float | None = None,
+             min_gap: float = 0.8):
+    """Промежутки без речи по silero VAD (идёт с faster-whisper): ASR
+    иногда «растягивает» слово через паузу и гасит словесную паузу, а
+    VAD слушает сам звук — музыку и шум принимает за фон, а не за речь.
+    Ошибка/нет VAD — пусто, остаются словесные паузы."""
+    try:
+        from faster_whisper.audio import decode_audio
+        from faster_whisper.vad import get_speech_timestamps, VadOptions
+        audio = decode_audio(path, sampling_rate=16000)
+        ts = get_speech_timestamps(
+            audio, VadOptions(min_silence_duration_ms=600, speech_pad_ms=60),
+            sampling_rate=16000)
+        total = len(audio) / 16000.0
+    except Exception:
+        return []
+    we = total if we is None else min(float(we), total)
+    ws = max(0.0, min(float(ws), we))
+    regs = []
+    for t in ts:
+        a = max(float(t["start"]) / 16000.0, ws)
+        b = min(float(t["end"]) / 16000.0, we)
+        if b > a:
+            regs.append((a, b))
+    regs.sort()
+    gaps, cur = [], ws
+    for a, b in regs:
+        if a - cur >= min_gap:
+            gaps.append((cur, a))
+        cur = max(cur, b)
+    if we - cur >= min_gap:
+        gaps.append((cur, we))
+    return gaps
+
+
+def remap_segs(segs, keeps):
+    """Сегменты исходной шкалы -> шкала после вырезания пауз (keeps):
+    субтитры остаются в синхроне без второй транскрибации."""
+    if not keeps:
+        return segs or []
+
+    def mt(t):
+        acc = 0.0
+        for a, b in keeps:
+            if t <= a:
+                return acc
+            if t < b:
+                return acc + (t - a)
+            acc += b - a
+        return acc
+
+    out = []
+    for sg in segs or []:
+        ws = []
+        for w in (sg.get("words") or []):
+            a, b = mt(float(w["s"])), mt(float(w["e"]))
+            if b - a < 0.03:
+                continue
+            ws.append({"w": w["w"], "s": round(a, 2), "e": round(b, 2)})
+        if not ws:
+            continue
+        out.append({"start": ws[0]["s"], "end": ws[-1]["e"],
+                    "text": " ".join(x["w"] for x in ws), "words": ws})
+    return out
+
+
 def parse_stamps(text: str):
     """Ручные таймкоды: строки 'мм:сс-мм:сс' / 'ч:мм:сс-...' / 'сек-сек'.
     Терпимый к мусору: '02:15-03:10 название' или лишние пробелы больше
@@ -4647,13 +4783,17 @@ def _has_audio_stream(path: str) -> bool:
 def remove_silence(src: str, out: str, min_sil: float = 0.8,
                    thresh_db: float = -40.0, pad: float = 0.25,
                    progress=None, window: tuple | None = None,
-                   detect: bool = True, hq: bool | None = None) -> str:
+                   detect: bool = True, hq: bool | None = None,
+                   silences=None, sil_pad: float = 0.15,
+                   keep_out: list | None = None) -> str:
     """Аккуратно вырезает тишину: паузы от 0.8с тише -40дБ, по краям речи
     подушка 0.25с, короткие огрызки не трогаем. window=(a,b) — работаем
     только внутри окна исходной шкалы (ручные таймкоды: без 8с запаса
-    на входе), detect=False — просто точная подрезка окна. hq — промежуточник
-    почти без потерь (авто: до 90 мин 14М, длиннее — 6-8М, чтобы не забить
-    диск). Без пауз и без окна — возвращает src как есть."""
+    на входе), detect=False — просто точная подрезка окна. silences —
+    готовые паузы без речи (по словам): режутся даже поверх музыки/шума,
+    подушка sil_pad. keep_out получает выжившие куски исходной шкалы.
+    hq — промежуточник почти без потерь (авто: до 90 мин 14М, длиннее —
+    6-8М, чтобы не забить диск). Без пауз и без окна — возвращает src."""
     W, H, N, FPS = _probe_wh_fps(src)
     if N <= 0 or FPS <= 0:
         raise RuntimeError("не читается видео")
@@ -4688,6 +4828,10 @@ def remove_silence(src: str, out: str, min_sil: float = 0.8,
     cuts = [(max(s + pad, ws), min(e - pad, we))
             for s, e in sils if e - pad > s + pad + 0.3]
     cuts = [(s, e) for s, e in cuts if e > s]
+    for s, e in (silences or []):
+        a, b = max(float(s) + sil_pad, ws), min(float(e) - sil_pad, we)
+        if b - a > 0.3:
+            cuts.append((a, b))
     if not cuts and window is None:
         if progress:
             progress(100, "тишины нет — как есть")
@@ -4704,6 +4848,8 @@ def remove_silence(src: str, out: str, min_sil: float = 0.8,
         if window is None:
             return src
         raise RuntimeError("в окне не осталось материала")
+    if keep_out is not None:
+        keep_out.extend(keep)
     if progress:
         progress(20, f"режу {len(cuts)} пауз…")
     fc = []
