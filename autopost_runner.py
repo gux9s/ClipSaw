@@ -16,6 +16,12 @@ import sys
 import time
 import traceback
 
+try:
+    from zoneinfo import ZoneInfo
+    BROWSER_TZ = ZoneInfo("Europe/Kyiv")
+except Exception:
+    BROWSER_TZ = dt.timezone(dt.timedelta(hours=3))
+
 STUDIO_URL = "https://www.tiktok.com/tiktokstudio/upload"
 LOGIN_URL = "https://www.tiktok.com/login?lang=uk-UA"
 
@@ -97,10 +103,35 @@ SCHED_BUTTON = ".scheduler-input-container .input-button"
 SCHED_VALUE = ".scheduler-input-container .input-value-text"
 CALENDAR = ".calendar-wrapper"
 TIMER = ".tiktok-timer-time-picker-container"
+# одиночный редактор: свой блок расписания с радио и readonly-полями
+EDITOR_SCHED = '[data-e2e="schedule_container"]'
+EDITOR_TIMER = (".tiktok-timepicker-time-picker-container"
+                ":not(.tiktok-timepicker-invisible)")
+EDITOR_HOURS = ".tiktok-timepicker-option-text.tiktok-timepicker-left"
+EDITOR_MINS = ".tiktok-timepicker-option-text.tiktok-timepicker-right"
 
 BULK_UI_TIMEOUT = 240        # ждём появления bulk-страницы после выбора файлов
 BULK_FILL_TIMEOUT = 3 * 3600  # загрузка + обработка всех видео
 WATCH_TIMEOUT = 6 * 3600     # ждём, пока человек нажмёт Post (N)
+
+# студия отдаёт доступ к bulk отдельным запросом /api/v1/user/profile/upload/
+# и включает multiple только если user.bulk_upload_enable === true (с 1000+
+# подписчиков). Ловим ответ сами — иначе ждали бы вслепую
+BULK = {"seen": False, "enabled": False}
+
+
+def _watch_user_api(resp):
+    try:
+        if "user/profile/upload" not in resp.url:
+            return
+        data = resp.json() or {}
+        user = data.get("user") or {}
+        if "bulk_upload_enable" in user:
+            BULK["seen"] = True
+            BULK["enabled"] = bool(user.get("bulk_upload_enable"))
+            log(f"bulk: bulk_upload_enable={BULK['enabled']}")
+    except Exception:
+        pass
 
 
 def log(msg):
@@ -244,6 +275,11 @@ def fmt_target(ts):
     return dt.datetime.fromtimestamp(ts).strftime("%d.%m %H:%M")
 
 
+def browser_dt(ts):
+    """Время в той зоне, что видит студия в Camoufox."""
+    return dt.datetime.fromtimestamp(ts, tz=BROWSER_TZ)
+
+
 def _find_schedule_option(page):
     for sel in SCHEDULE_OPTION_SELECTORS:
         try:
@@ -264,7 +300,7 @@ def _pick_calendar_date(page, d):
             return False
     except Exception:
         return False
-    today = dt.date.today()
+    today = dt.datetime.now(BROWSER_TZ).date()
     delta = (d.year - today.year) * 12 + (d.month - today.month)
     try:
         arrows = cal.locator(".month-header-wrapper .arrow")
@@ -393,11 +429,159 @@ def _fill_input(page, sel, value):
         return False
 
 
+# ---------- одиночный редактор: свой блок «Коли опублікувати» ----------
+# Здесь нет bulk-попапа с футером: сначала радио «Пізніше», затем два
+# readonly-поля — время (HH:MM) и дата (YYYY-MM-DD). Дата открывает тот же
+# .calendar-wrapper, время — .tiktok-timepicker-*.
+
+def _editor_sched_radio(page):
+    try:
+        radios = page.locator(f'{EDITOR_SCHED} input[type="radio"]')
+        for i in range(radios.count()):
+            el = radios.nth(i)
+            if (el.get_attribute("value") or "") == "schedule":
+                return el
+    except Exception:
+        pass
+    return None
+
+
+def _editor_fields(page):
+    """Readonly-поля блока расписания редактора: (дата, время)."""
+    try:
+        cont = page.locator(EDITOR_SCHED).first
+        if not cont.count():
+            return None, None
+    except Exception:
+        return None, None
+    fields = []
+    try:
+        loc = cont.locator("input[readonly]")
+        for i in range(loc.count()):
+            fields.append(loc.nth(i))
+    except Exception:
+        pass
+    date_inp = time_inp = None
+    for el in fields:
+        try:
+            val = (el.input_value(timeout=800) or "").strip()
+        except Exception:
+            val = ""
+        if re.match(r"^\d{4}-\d{2}-\d{2}$", val):
+            date_inp = el
+        elif re.match(r"^\d{1,2}:\d{2}$", val):
+            time_inp = el
+    if len(fields) >= 2:
+        # значения могли быть пустыми — порядок: время, затем дата
+        if time_inp is None:
+            time_inp = fields[0]
+        if date_inp is None:
+            date_inp = fields[1]
+    return date_inp, time_inp
+
+
+def _pick_editor_timer(page, d):
+    """Колёсико времени редактора (классы tiktok-timepicker, не bulk)."""
+    t0 = time.time()
+    box = None
+    while time.time() - t0 < 6:
+        try:
+            loc = page.locator(EDITOR_TIMER)
+            if loc.count():
+                box = loc.last
+                break
+        except Exception:
+            pass
+        page.wait_for_timeout(400)
+    if box is None:
+        return False
+    try:
+        hours = box.locator(EDITOR_HOURS)
+        mins = box.locator(EDITOR_MINS)
+        hi = _option_index(hours, d.hour)
+        if hi < 0:
+            return False
+        hours.nth(hi).click(timeout=3000)
+        page.wait_for_timeout(random.randint(200, 450))
+        mi = _option_index(mins, d.minute)
+        if mi < 0:
+            return False
+        mins.nth(mi).click(timeout=3000)
+        page.wait_for_timeout(random.randint(250, 500))
+        return True
+    except Exception:
+        return False
+
+
+def _editor_values_ok(page, d):
+    date_inp, time_inp = _editor_fields(page)
+    try:
+        date_ok = ((date_inp.input_value(timeout=1500) or "").strip()
+                   == d.strftime("%Y-%m-%d"))
+    except Exception:
+        date_ok = False
+    try:
+        time_ok = ((time_inp.input_value(timeout=1500) or "").strip()
+                   == d.strftime("%H:%M"))
+    except Exception:
+        time_ok = False
+    return (date_ok and time_ok) or _schedule_reflected(page, d)
+
+
+def _set_editor_schedule(page, d):
+    """Радио «Пізніше» → дата в календаре → время в колёсике.
+    Финальную кнопку «Запланувати» не жмёт — её нажимает человек."""
+    try:
+        radio = _editor_sched_radio(page)
+        if radio is not None:
+            radio.evaluate("e => { if (!e.checked) e.click(); }")
+            page.wait_for_timeout(random.randint(800, 1400))
+    except Exception:
+        pass
+    date_inp, time_inp = _editor_fields(page)
+    if date_inp is None or time_inp is None:
+        return False
+    try:
+        date_inp.click(timeout=4000)
+    except Exception:
+        return False
+    page.wait_for_timeout(random.randint(700, 1300))
+    if not _picker_open_now(page):
+        return False
+    if not _pick_calendar_date(page, d):
+        return False
+    page.wait_for_timeout(random.randint(300, 650))
+    try:
+        if _picker_open_now(page):
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(random.randint(300, 600))
+    except Exception:
+        pass
+    date_inp, time_inp = _editor_fields(page)
+    if time_inp is None:
+        return False
+    try:
+        time_inp.click(timeout=4000)
+    except Exception:
+        return False
+    page.wait_for_timeout(random.randint(700, 1300))
+    if not _pick_editor_timer(page, d):
+        return False
+    page.wait_for_timeout(random.randint(300, 650))
+    try:
+        if page.locator(EDITOR_TIMER).count():
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(random.randint(300, 600))
+    except Exception:
+        pass
+    return _editor_values_ok(page, d)
+
+
 def apply_schedule(page, target_ts):
-    """Ставит дату/время в редакторе студии. В новом интерфейсе это
-    календарь + колёсико времени; в старом — нативные input.
-    Финальную кнопку не жмёт. Не вышло — False (впишет человек)."""
-    d = dt.datetime.fromtimestamp(target_ts)
+    """Ставит дату/время в редакторе студии: в одиночном редакторе — свои
+    радио/поля, в bulk-строке — попап планировщика. Финальную кнопку
+    «Запланировать» не жмёт. Не вышло — False (впишет человек)."""
+    d = browser_dt(target_ts)
     iso = d.strftime("%Y-%m-%dT%H:%M")
     date_iso = d.strftime("%Y-%m-%d")
     time_iso = d.strftime("%H:%M")
@@ -425,65 +609,233 @@ def apply_schedule(page, target_ts):
             if _schedule_reflected(page, d):
                 return True
 
-    # новый студийный пикер: включаем «Schedule» и выбираем дату/время
+    # одиночный редактор: радио «Пізніше» + свои поля даты/времени
+    try:
+        has_editor = page.locator(
+            f'{EDITOR_SCHED} input[type="radio"]').count() > 0
+    except Exception:
+        has_editor = False
+    if has_editor:
+        if _set_editor_schedule(page, d):
+            return True
+        _schedule_diag(page, "одиночный редактор: не выставил дату/время")
+        return False
+
+    # включаем режим расписания (label/radio, не финальная кнопка)
     opt = _find_schedule_option(page)
-    if opt is None:
-        try:
-            # возможно, режим уже включён
-            cont = page.locator('[data-e2e="SCHEDULE_CONTAINER"]')
-            if not cont.count():
-                return False
-        except Exception:
-            return False
-    else:
+    if opt is not None:
         try:
             opt.click(timeout=4000)
         except Exception:
-            return False
-        page.wait_for_timeout(random.randint(700, 1300))
+            pass
+        page.wait_for_timeout(random.randint(600, 1100))
         try:
             _accept_schedule_ack(page)
         except Exception:
             pass
-        page.wait_for_timeout(random.randint(400, 900))
-    try:
-        cont = page.locator('[data-e2e="SCHEDULE_CONTAINER"]')
-        inputs = cont.locator("input[readonly]")
-        if inputs.count() < 2:
-            inputs = cont.locator("input")
-        if inputs.count() < 2:
-            return False
-        inputs.nth(0).click(timeout=4000)
-        page.wait_for_timeout(random.randint(500, 900))
-        if not _pick_calendar_date(page, d):
-            return False
-        page.wait_for_timeout(random.randint(300, 700))
-        try:
-            inputs.nth(1).click(timeout=4000)
-        except Exception:
-            pass
-        page.wait_for_timeout(random.randint(500, 900))
-        _pick_timer(page, d)
-        try:
-            page.evaluate("() => { if (document.activeElement) "
-                          "document.activeElement.blur(); }")
-        except Exception:
-            pass
-        page.wait_for_timeout(random.randint(500, 1000))
-        return _schedule_reflected(page, d)
-    except Exception:
+        page.wait_for_timeout(random.randint(400, 800))
+
+    if not _open_schedule_picker(page):
+        _schedule_diag(page, "попап календаря не открылся")
         return False
+    if not _pick_calendar_date(page, d):
+        _schedule_diag(page, "не выбрал дату")
+        return False
+    page.wait_for_timeout(random.randint(250, 600))
+    if not _pick_timer(page, d):
+        _schedule_diag(page, "не выбрал время")
+        return False
+    page.wait_for_timeout(random.randint(250, 600))
+    try:
+        foot = page.locator(
+            '.picker-footer:visible, .post-scheduler-footer:visible').last
+        btns = foot.locator(".operation-confirm button")
+        if not btns.count():
+            _schedule_diag(page, "нет подтверждения времени в попапе")
+            return False
+        btns.last.click(timeout=4000)
+        page.wait_for_timeout(random.randint(700, 1200))
+    except Exception:
+        _schedule_diag(page, "не нажал подтверждение времени")
+        return False
+    ok = (_sched_text_ok(_schedule_value_text(page), d)
+          or _schedule_reflected(page, d))
+    if not ok:
+        _schedule_diag(page, "время не отразилось в поле")
+    return ok
 
 
 # ---------- bulk-страница ----------
 
-def set_files(page, paths):
-    """Выбираем файлы в скрытом input. Возвращает (ok, multiple)."""
+def _picker_open_now(page):
     try:
-        inp = page.locator('input[type="file"]').first
-        multiple = bool(inp.evaluate("el => !!el.multiple"))
+        return page.locator(CALENDAR).count() > 0
     except Exception:
-        inp, multiple = None, False
+        return False
+
+
+def _open_schedule_picker(page, timeout=12):
+    """Открывает попап календаря: кнопка планировщика или поле даты.
+    В студии это один и тот же компонент и в редакторе, и в bulk-строке."""
+    t0 = time.time()
+    while True:
+        for sel in (SCHED_BUTTON, '[data-e2e="schedule_container"] input',
+                    '[data-e2e="SCHEDULE_CONTAINER"] input',
+                    'input[readonly]'):
+            try:
+                loc = page.locator(sel)
+                n = loc.count()
+            except Exception:
+                continue
+            for i in range(min(n, 3)):
+                el = loc.nth(i)
+                try:
+                    if not el.is_visible():
+                        continue
+                    el.click(timeout=3500)
+                except Exception:
+                    continue
+                page.wait_for_timeout(900)
+                if _picker_open_now(page):
+                    return True
+                try:
+                    if _accept_schedule_ack(page):
+                        page.wait_for_timeout(900)
+                        if _picker_open_now(page):
+                            return True
+                except Exception:
+                    pass
+        if time.time() - t0 >= timeout:
+            return False
+        page.wait_for_timeout(700)
+
+
+def _schedule_diag(page, why):
+    """Пишет в лог, что видно на странице, когда расписание не сложилось."""
+    try:
+        info = page.evaluate(
+            """() => ({
+              url: location.href,
+              calendars: document.querySelectorAll('.calendar-wrapper').length,
+              timers: document.querySelectorAll(
+                '.tiktok-timer-time-picker-container').length,
+              schedInputs: document.querySelectorAll(
+                '[data-e2e="schedule_container"] input').length,
+              readonly: document.querySelectorAll('input[readonly]').length,
+              values: [...document.querySelectorAll('input')]
+                .map(i => i.value).filter(v => v).slice(0, 10),
+              editor: {
+                sched: document.querySelectorAll(
+                  '[data-e2e="schedule_container"]').length,
+                radios: [...document.querySelectorAll(
+                  '[data-e2e="schedule_container"] input[type=radio]')]
+                  .map(r => ({v: r.value || '', on: !!r.checked})),
+                readonly: [...document.querySelectorAll(
+                  '[data-e2e="schedule_container"] input[readonly]')]
+                  .map(i => i.value || ''),
+                timepickers: document.querySelectorAll(
+                  '.tiktok-timepicker-time-picker-container').length
+              },
+              schedText: (document.querySelector(
+                '.scheduler-input-container .input-value-text')
+                || {}).innerText || ''
+            })""")
+        log("schedule: " + why + " · " +
+            json.dumps(info, ensure_ascii=False)[:900])
+    except Exception as ex:
+        log(f"schedule: {why} ({ex})")
+
+
+def _sched_text_ok(txt, d):
+    low = (txt or "").strip().lower()
+    if not low:
+        return False
+    bad = ("post now", "зараз", "сейчас", "опублікувати зараз",
+           "опубликовать сейчас")
+    if any(b in low for b in bad):
+        return False
+    day_ok = re.search(rf"\b0?{d.day}\b", txt) is not None
+    time_ok = any(t in txt for t in (d.strftime("%H:%M"),
+                                     d.strftime("%H.%M")))
+    if not time_ok:
+        t12 = d.strftime("%I:%M %p").lstrip("0").lower()
+        time_ok = t12 in low or t12.replace(" ", "") in low.replace(" ", "")
+    return day_ok and time_ok
+
+
+def _schedule_value_text(page):
+    try:
+        loc = page.locator(SCHED_VALUE).first
+        if loc.count():
+            return (loc.inner_text(timeout=2000) or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _pick_file_input(page, want_multi, timeout=25):
+    """Ждём готовности загрузчика. Студия включает multiple только после
+    загрузки user.bulk_upload_enable — это отдельный запрос, поэтому
+    сразу после открытия страницы атрибут ещё выключен. Как только видим
+    ответ API с выключенным bulk — не ждём зря."""
+    t0 = time.time()
+    fallback = None
+    while True:
+        try:
+            inputs = page.locator('input[type="file"]')
+            n = inputs.count()
+            for i in range(n):
+                el = inputs.nth(i)
+                try:
+                    multi = bool(el.evaluate("el => !!el.multiple"))
+                except Exception:
+                    continue
+                if multi:
+                    return el, True
+                if fallback is None:
+                    fallback = el
+            if not want_multi:
+                return fallback, False
+            if BULK["seen"] and not BULK["enabled"]:
+                return fallback, False
+        except Exception:
+            pass
+        if time.time() - t0 >= timeout:
+            return fallback, False
+        page.wait_for_timeout(1000)
+
+
+def _studio_diag(page):
+    """Что видно на странице загрузки: принимает ли input пачку и какие
+    есть кнопки. По логу сразу понятно, включён ли bulk у аккаунта."""
+    try:
+        info = page.evaluate(
+            """() => {
+              const inputs = [...document.querySelectorAll('input[type=file]')]
+                .map(i => ({multiple: !!i.multiple, accept: i.accept || ''}));
+              const btns = [...document.querySelectorAll('button, [role=button]')]
+                .map(b => (b.innerText || '').trim())
+                .filter(t => t && t.length <= 48);
+              return {url: location.href, inputs, btns: btns.slice(0, 40)};
+            }""")
+        info["bulk"] = {"seen": BULK["seen"], "enabled": BULK["enabled"]}
+        log("studio: " + json.dumps(info, ensure_ascii=False)[:1500])
+    except Exception as ex:
+        log(f"studio diag: {ex}")
+
+
+def set_files(page, paths):
+    """Выбираем файлы в скрытом input. Возвращает (ok, multiple).
+    Для пачки ждём, пока студия включит множественный выбор (bulk)."""
+    want_multi = len(paths) > 1
+    inp, multiple = _pick_file_input(page, want_multi,
+                                     timeout=25 if want_multi else 3)
+    if want_multi and not multiple:
+        log("bulk: input не принимает несколько файлов"
+            f" (bulk_upload_enable={BULK['enabled']},"
+            f" ответ видели={BULK['seen']})")
+        _studio_diag(page)
+        return False, False
     if inp is not None:
         try:
             inp.set_input_files(paths if multiple else paths[0],
@@ -553,15 +905,26 @@ def fill_row_caption(page, row, text):
     except Exception:
         return False
     editor = None
-    for sel in (CAPTION_EDITOR.replace(", ", ",").split(",") +
-                ['div[contenteditable="true"]', "textarea"]):
+    sels = (CAPTION_EDITOR.replace(", ", ",").split(",") +
+            ['div[contenteditable="true"]', "textarea"])
+    for _ in range(8):
+        for sel in sels:
+            try:
+                loc = row.locator(sel.strip()).first
+                if loc.count() and loc.is_visible():
+                    editor = loc
+                    break
+            except Exception:
+                continue
+        if editor is not None:
+            break
+        # редактор монтируется после клика по подписи
         try:
-            loc = row.locator(sel.strip()).first
-            if loc.count() and loc.is_visible():
-                editor = loc
-                break
+            if row.locator(CAPTION_CELL).count():
+                row.locator(CAPTION_CELL).first.click(timeout=2500)
         except Exception:
-            continue
+            pass
+        page.wait_for_timeout(800)
     if editor is None:
         return False
     try:
@@ -570,6 +933,8 @@ def fill_row_caption(page, row, text):
         clear_editor(page)
         if text.strip():
             type_text(page, text, fast=True)
+            # пробел закрывает выпадашку хэштегов перед сохранением
+            page.keyboard.type(" ")
         page.wait_for_timeout(random.randint(250, 550))
         # onBlur в студии сохраняет подпись
         page.evaluate("() => { if (document.activeElement) "
@@ -610,6 +975,13 @@ def _accept_schedule_ack(page):
                                       "plan", "план", "acknowledge",
                                       "got it", "зрозуміло")):
             continue
+        # сам попап календаря тоже может быть dialog — его не трогаем
+        try:
+            if dlg.locator(".picker-footer, .scheduler-picker-container"
+                           ).count():
+                continue
+        except Exception:
+            pass
         try:
             btns = dlg.locator("button")
             if btns.count():
@@ -620,7 +992,7 @@ def _accept_schedule_ack(page):
     return False
 
 
-def _ensure_picker_open(page):
+def _ensure_picker_open(page, trigger=None):
     """Открывает календарь, принимая подтверждение расписания, если оно есть."""
     for _ in range(10):
         try:
@@ -633,6 +1005,13 @@ def _ensure_picker_open(page):
             clicked = _accept_schedule_ack(page)
         except Exception:
             pass
+        if not clicked and trigger is not None:
+            try:
+                if trigger.count() and trigger.is_visible():
+                    trigger.click(timeout=2500)
+                    clicked = True
+            except Exception:
+                pass
         page.wait_for_timeout(900 if clicked else 500)
     return False
 
@@ -658,7 +1037,7 @@ def _row_schedule_ok(row, d):
 
 
 def set_row_schedule(page, row, target_ts):
-    d = dt.datetime.fromtimestamp(target_ts)
+    d = browser_dt(target_ts)
     try:
         btn = row.locator(SCHED_BUTTON).first
         if not btn.count():
@@ -667,7 +1046,7 @@ def set_row_schedule(page, row, target_ts):
         page.wait_for_timeout(random.randint(600, 1100))
     except Exception:
         return False
-    if not _ensure_picker_open(page):
+    if not _ensure_picker_open(page, btn):
         return False
     if not _pick_calendar_date(page, d):
         return False
@@ -798,7 +1177,9 @@ def wait_post_button(page, timeout):
         try:
             btn = page.locator(".bulk-publish-button button").last
             if not btn.count():
-                btn = page.locator('[data-e2e="POST_VIDEO_BUTTON"]').last
+                btn = page.locator(
+                    '[data-e2e="post_video_button"],'
+                    ' [data-e2e="POST_VIDEO_BUTTON"]').last
             if btn.count() and btn.is_enabled():
                 return True
         except Exception:
@@ -899,12 +1280,24 @@ def bulk_run(page, items):
     write_all(items, "running", f"загружаю {len(paths)} видео в студию…")
     ok, multiple = set_files(page, paths)
     if not ok or not multiple:
-        if ok and not multiple:
-            write_all(items, "running", "bulk недоступен — гружу по одному")
+        if BULK["seen"] and not BULK["enabled"]:
+            msg = ("TikTok не включает bulk этому аккаунту (доступен"
+                   " с 1000+ подписчиков) — обрабатываю по одному…")
+        else:
+            msg = "bulk не включился — обрабатываю по одному…"
+        log(msg)
+        write_all(items, "running", msg)
         return False
     rows = wait_bulk_page(page, len(paths), BULK_UI_TIMEOUT)
     if not rows:
-        return False
+        # файлы уже выбраны — второй раз в это окно не грузим
+        msg = "bulk-страница не открылась — проверь окно"
+        for it in items:
+            it["wait_msg"] = msg
+        write_all(items, "manual", msg)
+        _studio_diag(page)
+        wait_batch(page, items, status="manual", message=msg)
+        return True
     # ждём появления всех строк (каждый файл стартует свою загрузку)
     t0 = time.time()
     while time.time() - t0 < 600:
@@ -923,7 +1316,14 @@ def bulk_run(page, items):
                      "в пачке — проверь окно")
     items = [(it, row) for it, row in mapping if row is not None]
     if not items:
-        return False
+        msg = "не нашёл строки видео в пачке — проверь окно"
+        for it, _row in mapping:
+            it["failed"] = False
+            it["wait_msg"] = msg
+            write_status(it["status_file"], "manual", msg)
+        wait_batch(page, [it for it, _ in mapping], status="manual",
+                   message=msg)
+        return True
     for it, row in items:
         it["row"] = row
         write_status(it["status_file"], "running",
@@ -956,71 +1356,81 @@ def bulk_run(page, items):
     return True
 
 
-def run_single(page, item):
-    """Старый одиночный путь: одно видео, редактор, расписание."""
+def run_single(page, item, prefix=""):
+    """Один ролик: загрузка, описание, расписание; финал жмёт человек."""
     status_file = item["status_file"]
     caption = item.get("caption") or ""
     target_ts = plan_time(item.get("publish_at"))
-    write_status(status_file, "running", "загружаю видео…")
+    write_status(status_file, "running", prefix + "загружаю видео…")
     ok, _multiple = set_files(page, [item["file"]])
     if not ok:
         write_status(status_file, "manual",
-                     "не нашёл поле загрузки — загрузи видео вручную")
+                     prefix + "не нашёл поле загрузки — загрузи вручную")
         wait_until_closed(page, status_file, "manual",
-                          "окно открыто: загрузи видео вручную")
+                          prefix + "окно открыто: загрузи видео вручную")
         return 0
     editor = None
     t0 = time.time()
-    while time.time() - t0 < 120:
+    last_diag = 0
+    while time.time() - t0 < 240:
         editor = find_editor(page)
         if editor is not None:
             break
-        page.wait_for_timeout(1500)
+        if _dismiss_draft(page):
+            log("upload: закрыл окно черновика")
+            continue
+        if time.time() - last_diag > 10:
+            last_diag = time.time()
+            _upload_state(page)
+        if not _wait(page, 1500):
+            write_status(status_file, "closed", prefix + "окно закрыто")
+            return 0
     if editor is None:
         if is_login(page):
             write_status(status_file, "login",
-                         "сессия слетела — войди в аккаунт")
+                         prefix + "сессия слетела — войди в аккаунт")
             wait_until_closed(page, status_file, "login",
-                              "войди в аккаунт, я жду")
+                              prefix + "войди в аккаунт, я жду")
             return 0
         write_status(status_file, "manual",
-                     "редактор не появился — допиши описание вручную")
+                     prefix + "редактор не появился — допиши вручную")
         wait_until_closed(page, status_file, "manual",
-                          "окно открыто: допиши описание вручную")
+                          prefix + "окно открыто: допиши вручную")
         return 0
 
     page.wait_for_timeout(random.randint(800, 1800))
     if caption.strip():
-        write_status(status_file, "running", "вписываю описание и теги…")
+        write_status(status_file, "running",
+                     prefix + "вписываю описание и теги…")
         try:
             type_caption(page, editor, caption)
         except Exception as ex:
             write_status(status_file, "manual",
-                         "не смог вписать текст — впиши вручную",
+                         prefix + "не смог вписать текст — впиши вручную",
                          str(ex)[:300])
             wait_until_closed(page, status_file, "manual",
-                              "окно открыто: впиши текст вручную")
+                              prefix + "окно открыто: впиши текст вручную")
             return 0
     if target_ts:
         label = fmt_target(target_ts)
         write_status(status_file, "running",
-                     f"выставляю публикацию на {label}…")
+                     prefix + f"выставляю публикацию на {label}…")
         schedule_ok = apply_schedule(page, target_ts)
         if schedule_ok:
             write_status(status_file, "waiting",
-                         f"время {label} выставлено — нажми "
+                         prefix + f"время {label} выставлено — нажми "
                          "«Запланировать» в окне")
         else:
             write_status(status_file, "manual",
-                         f"выставь в студии время {label} и нажми "
+                         prefix + f"выставь в студии время {label} и нажми "
                          "«Запланировать» — сам не смог")
             wait_until_closed(page, status_file, "manual",
-                              f"окно открыто: поставь {label} и нажми "
+                              prefix + f"окно открыто: поставь {label} и нажми "
                               "«Запланировать»", target_ts)
             return 0
     else:
         write_status(status_file, "waiting",
-                     "всё заполнено — нажми «Опубликовать» в окне")
+                     prefix + "всё заполнено — нажми «Опубликовать» в окне")
 
     # ждём публикацию: уход из редактора + тост успеха
     upload_url = page.url
@@ -1029,7 +1439,7 @@ def run_single(page, item):
     t0 = time.time()
     while time.time() - t0 < 6 * 3600:
         if page.is_closed():
-            write_status(status_file, "closed", "окно закрыто")
+            write_status(status_file, "closed", prefix + "окно закрыто")
             return 0
         try:
             editor_alive = editor.count() > 0 and editor.is_visible()
@@ -1058,7 +1468,8 @@ def run_single(page, item):
                         break
                 except Exception:
                     pass
-                page.wait_for_timeout(2000)
+                if not _wait(page, 2000):
+                    break
             if saw_success:
                 finish_success(page, status_file, target_ts)
             elif left_upload and target_ts:
@@ -1066,12 +1477,120 @@ def run_single(page, item):
             else:
                 write_status(
                     status_file, "closed",
-                    "редактор закрылся без подтверждения — проверь, "
+                    prefix + "редактор закрылся без подтверждения — проверь, "
                     "вышло ли видео, и отметь вручную")
             return 0
-        page.wait_for_timeout(2000)
-    write_status(status_file, "closed", "окно осталось открытым")
+        if not _wait(page, 2000):
+            write_status(status_file, "closed", prefix + "окно закрыто")
+            return 0
+    write_status(status_file, "closed", prefix + "окно осталось открытым")
     return 0
+
+
+def _upload_state(page):
+    """Что сейчас на странице загрузки: модалки, файлы в input, текст.
+    По логу видно, что именно задержало редактор."""
+    try:
+        info = page.evaluate(
+            """() => {
+              const modals = [...document.querySelectorAll(
+                  '[role="dialog"], .tux-modal, [class*="modal"]')]
+                .filter(m => m.offsetParent !== null)
+                .map(m => (m.innerText || '').trim().slice(0, 220))
+                .filter(Boolean);
+              return {
+                url: location.href,
+                modals: modals.slice(0, 4),
+                toasts: [...document.querySelectorAll(
+                    '[role="alert"], [class*="toast"], [class*="Toast"]')]
+                  .filter(t => t.offsetParent !== null)
+                  .map(t => (t.innerText || '').trim().slice(0, 160))
+                  .filter(Boolean).slice(0, 4),
+                files: [...document.querySelectorAll('input[type=file]')]
+                  .map(i => (i.files ? i.files.length : 0)),
+                body: (document.body.innerText || '').slice(0, 600),
+              };
+            }""")
+        log("upload: " + json.dumps(info, ensure_ascii=False)[:900])
+    except Exception as ex:
+        log(f"upload diag: {ex}")
+
+
+def _wait_upload_ready(page, timeout=25):
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        try:
+            if page.locator('input[type="file"]').count():
+                return True
+        except Exception:
+            pass
+        page.wait_for_timeout(800)
+    return False
+
+
+def _dismiss_draft(page):
+    """Студия может предложить продолжить недосланный черновик — для новой
+    пачки начинаем с чистого листа (кнопка «Скинути»)."""
+    try:
+        dialogs = page.locator(
+            '[role="dialog"]:visible, .tux-modal:visible,'
+            ' [class*="modal"]:visible, [class*="Modal"]:visible,'
+            ' [class*="Dialog"]:visible')
+        for i in range(min(dialogs.count(), 3)):
+            dlg = dialogs.nth(i)
+            try:
+                txt = (dlg.inner_text(timeout=800) or "").lower()
+            except Exception:
+                continue
+            if not any(w in txt for w in ("продовж", "continue", "draft",
+                                          "чернет", "черновик")):
+                continue
+            for label in ("скинути", "discard", "видалити", "удалить"):
+                try:
+                    btn = dlg.locator(f'button:has-text("{label}")').first
+                    if btn.count():
+                        btn.click(timeout=2500)
+                        page.wait_for_timeout(1200)
+                        return True
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    # запасной путь: «Продовжити» есть, а модалку не поймали селектором
+    try:
+        cont = page.locator(
+            'button:has-text("Продовжити"), button:has-text("Continue")')
+        disc = page.locator(
+            'button:has-text("Скинути"), button:has-text("Discard")').first
+        if cont.count() and disc.count() and disc.is_visible():
+            disc.click(timeout=2500)
+            page.wait_for_timeout(1200)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _closed_error(ex):
+    """Окно/браузер закрыли — это штатное завершение, не ошибка запуска."""
+    low = str(ex).lower()
+    return any(w in low for w in ("has been closed", "target closed",
+                                  "browser closed", "context closed",
+                                  "page closed"))
+
+
+def _wait(page, ms):
+    """page.wait_for_timeout, но закрытое окно не роняет воркер."""
+    try:
+        page.wait_for_timeout(ms)
+        return True
+    except Exception as ex:
+        if _closed_error(ex):
+            return False
+        try:
+            return not page.is_closed()
+        except Exception:
+            return False
 
 
 def run(cfg):
@@ -1120,14 +1639,17 @@ def run(cfg):
             "geolocation:longitude": 30.5234,
         },
     )
+    leftover = []
     try:
         with Camoufox(**kwargs) as context:
             page = context.pages[0] if context.pages else context.new_page()
             page.set_default_timeout(20000)
+            page.on("response", _watch_user_api)
             page.bring_to_front()
             write_all(items, "starting", "открываю TikTok Studio…")
             page.goto(STUDIO_URL, wait_until="domcontentloaded")
             page.wait_for_timeout(random.randint(1200, 2600))
+            _dismiss_draft(page)
 
             deadline = time.time() + 45 * 60
             while is_login(page) and time.time() < deadline:
@@ -1158,31 +1680,56 @@ def run(cfg):
                 page.goto(STUDIO_URL, wait_until="domcontentloaded")
                 page.wait_for_timeout(random.randint(1500, 3000))
 
-            bulk_done = False
             if len(items) > 1:
-                try:
-                    multiple = bool(page.locator(
-                        'input[type="file"]').first.evaluate(
-                        "el => !!el.multiple"))
-                except Exception:
-                    multiple = False
-                if multiple:
-                    bulk_done = bulk_run(page, items)
-                    if bulk_done:
-                        return 0
-                    # bulk не открылся: первую строку могло уже загрузить
-                    for it in items[1:]:
-                        write_status(it["status_file"], "queued", "")
-                    items = items[:1]
-                else:
-                    for it in items[1:]:
-                        write_status(it["status_file"], "queued", "")
-                    items = items[:1]
+                # multiple у input появляется только после запроса
+                # user.bulk_upload_enable — ждём его внутри bulk_run
+                _studio_diag(page)
+                if bulk_run(page, items):
+                    return 0
+                # bulk выключен у аккаунта — ведём видео по очереди в этом
+                # же окне, чтобы не плодить браузеры и сессии
+                nxt = 0
+                while nxt < len(items):
+                    it = items[nxt]
+                    if nxt:
+                        write_all(items[nxt:], "running",
+                                  f"видео {nxt + 1} из {len(items)} —"
+                                  " открываю загрузку…")
+                        try:
+                            page.goto(STUDIO_URL,
+                                      wait_until="domcontentloaded")
+                            page.wait_for_timeout(
+                                random.randint(1500, 2600))
+                            _dismiss_draft(page)
+                            _wait_upload_ready(page)
+                        except Exception:
+                            break
+                    try:
+                        run_single(page, it,
+                                   prefix=f"видео {nxt + 1}/{len(items)}: ")
+                        nxt += 1
+                    except Exception as ex:
+                        if not _closed_error(ex):
+                            raise
+                        write_status(it["status_file"], "closed",
+                                     f"видео {nxt + 1}/{len(items)}:"
+                                     " окно закрыто")
+                        nxt += 1
+                        break
+                    if page.is_closed():
+                        break
+                # остаток вернём в очередь только после закрытия браузера —
+                # иначе следующий запуск упрётся в занятый профиль
+                leftover = items[nxt:]
+                return 0
             return run_single(page, items[0])
     except KeyboardInterrupt:
         write_all(items, "canceled", "отменено")
         return 0
     except Exception as ex:
+        if _closed_error(ex):
+            write_all(items, "closed", "окно закрыто")
+            return 0
         text = str(ex)
         low = text.lower()
         if "user data dir" in low or "singleton" in low or "profile" in low:
@@ -1191,6 +1738,10 @@ def run(cfg):
         write_all(items, "error", "ошибка браузера", text[:400])
         traceback.print_exc()
         return 5
+    finally:
+        # браузер к этому моменту уже закрыт контекстом Camoufox
+        for it in leftover:
+            write_status(it["status_file"], "queued", "")
 
 
 def wait_until_closed(page, status_file, status, message, target_ts=0):
@@ -1222,7 +1773,9 @@ def wait_until_closed(page, status_file, status, message, target_ts=0):
             except Exception:
                 pass
         write_status(status_file, status, message)
-        page.wait_for_timeout(5000)
+        if not _wait(page, 5000):
+            write_status(status_file, "closed", "окно закрыто")
+            return
     write_status(status_file, "closed", "окно осталось открытым")
 
 

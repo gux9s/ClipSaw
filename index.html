@@ -593,12 +593,24 @@
         </div>
         <div class="step"><b>03</b><span>Оформление</span></div>
         <div class="chkgrid">
-        <label class="chk"><input type="checkbox" id="caps" checked> Субтитры с подсветкой слов</label>
+        <label class="chk"><input type="checkbox" id="caps" checked> Субтитры</label>
+        <div><label class="lbl" for="subStyle">Тип субтитров</label>
+          <select id="subStyle">
+            <option value="classic" selected>Классика · караоке</option>
+            <option value="classic_caps">Караоке · классика КАПСОМ</option>
+            <option value="tiktok">TikTok · жирный</option>
+            <option value="box">Плашка · подложка</option>
+            <option value="neon">Неон · свечение</option>
+            <option value="impact">Удар · огромный</option>
+            <option value="minimal">Минимал · тонкий</option>
+            <option value="word">Слово · по одному</option>
+            <option value="none">Без субтитров</option>
+          </select></div>
         <label class="chk"><input type="checkbox" id="anti"> Анти-детект (цвет · зум · зерно · звук)</label>
         <label class="chk"><input type="checkbox" id="mir"> Зеркало (отразить видео)</label>
         <label class="chk"><input type="checkbox" id="ban" checked> Баннер в середине</label>
         <label class="chk"><input type="checkbox" id="clipMusic" checked> Музыка на фон (ломает аудио-отпечаток)</label>
-        <label class="chk"><input type="checkbox" id="pauseCut" checked> Вырезать паузы из речи</label>
+        <label class="chk"><input type="checkbox" id="pauseCut"> Вырезать паузы из речи</label>
         <div><label class="lbl" for="banFile">Какой баннер</label>
           <select id="banFile"><option value="">По умолчанию</option></select></div>
         <label class="chk"><input type="checkbox" id="manualChk"> Свои таймкоды вместо ИИ</label>
@@ -648,7 +660,7 @@
           <label class="chk"><input type="checkbox" id="twMir"> Зеркало (отразить видео)</label>
           <label class="chk"><input type="checkbox" id="twBan" checked> Баннер в середине</label>
           <label class="chk"><input type="checkbox" id="twMusic" checked> Музыка на фон (ломает аудио-отпечаток)</label>
-          <label class="chk"><input type="checkbox" id="twPause" checked> Вырезать паузы из речи</label>
+          <label class="chk"><input type="checkbox" id="twPause"> Вырезать паузы из речи</label>
           <div><label class="lbl" for="twBanFile">Какой баннер</label>
             <select id="twBanFile"><option value="">По умолчанию</option></select></div>
         </div>
@@ -699,9 +711,21 @@
           <div class="dim" style="margin-top:6px">По одному отрезку на строку (до 20): мм:сс-мм:сс или чч:мм:сс-чч:мм:сс. Одна ссылка. Таймкоды считаются по исходному видео. Границы подтягиваются к целым словам, паузы без речи вырезаются даже поверх музыки.</div>
         </div>
         <div class="chkgrid">
-          <label class="chk"><input type="checkbox" id="anPause" checked> Вырезать все паузы</label>
+          <label class="chk"><input type="checkbox" id="anPause"> Вырезать все паузы</label>
           <label class="chk"><input type="checkbox" id="anBlurSub" checked> Размывать китайские субтитры</label>
           <label class="chk"><input type="checkbox" id="anCaps" checked> Русские субтитры</label>
+          <div><label class="lbl" for="anSubStyle">Тип субтитров</label>
+            <select id="anSubStyle">
+              <option value="classic" selected>Классика · караоке</option>
+              <option value="classic_caps">Караоке · классика КАПСОМ</option>
+              <option value="tiktok">TikTok · жирный</option>
+              <option value="box">Плашка · подложка</option>
+              <option value="neon">Неон · свечение</option>
+              <option value="impact">Удар · огромный</option>
+              <option value="minimal">Минимал · тонкий</option>
+              <option value="word">Слово · по одному</option>
+              <option value="none">Без субтитров</option>
+            </select></div>
           <label class="chk"><input type="checkbox" id="anUnique" checked> Уникализация (звук · цвет · зерно)</label>
           <label class="chk"><input type="checkbox" id="anCta" checked> Затравка «продолжение» в конце</label>
           <label class="chk"><input type="checkbox" id="anMirror"> Зеркало (текст в кадре станет нечитаемым)</label>
@@ -975,11 +999,23 @@
             <select id="sGame"><option value="subway.mp4">subway.mp4</option><option value="minecraft.mp4">minecraft.mp4</option><option value="wall_kickers.mp4">wall_kickers.mp4</option></select></div>
         </div>
         <div class="subttl">Переключатели</div>
+        <div><label class="lbl" for="sSubStyle">Тип субтитров по умолчанию</label>
+          <select id="sSubStyle">
+            <option value="classic" selected>Классика · караоке</option>
+            <option value="classic_caps">Караоке · классика КАПСОМ</option>
+            <option value="tiktok">TikTok · жирный</option>
+            <option value="box">Плашка · подложка</option>
+            <option value="neon">Неон · свечение</option>
+            <option value="impact">Удар · огромный</option>
+            <option value="minimal">Минимал · тонкий</option>
+            <option value="word">Слово · по одному</option>
+            <option value="none">Без субтитров</option>
+          </select></div>
         <label class="chk"><input type="checkbox" id="sCaps" checked> Субтитры по умолчанию</label>        <label class="chk"><input type="checkbox" id="sAnti"> Анти-детект по умолчанию</label>
         <label class="chk"><input type="checkbox" id="sMir"> Зеркало по умолчанию</label>
         <label class="chk"><input type="checkbox" id="sBan" checked> Баннер по умолчанию</label>
         <label class="chk"><input type="checkbox" id="sMusic" checked> Музыка на фон по умолчанию</label>
-        <label class="chk"><input type="checkbox" id="sPause" checked> Вырезать паузы по умолчанию</label>
+        <label class="chk"><input type="checkbox" id="sPause"> Вырезать паузы по умолчанию</label>
         <button class="btn" id="sSave">Сохранить настройки</button>
         <div class="subttl">Обучение ранкера</div>
         <div class="dim" id="learnBox" style="margin-bottom:10px">Загрузка…</div>
@@ -1248,7 +1284,18 @@ $('mode').addEventListener('change',()=>{
   $('game').disabled=!sp;
   const gw=$('game').nextElementSibling;
   if(gw&&gw.classList&&gw.classList.contains('csel'))gw.classList.toggle('off',!sp);
+  syncSubStyle();
 });
+/* тип сабов имеет смысл только когда сабы включены */
+function syncSubStyle(){
+  const on=!!($('caps')&&$('caps').checked)&&$('mode').value!=='fast';
+  const sel=$('subStyle');if(!sel)return;
+  sel.disabled=!on;
+  const box=sel.nextElementSibling;
+  if(box&&box.classList&&box.classList.contains('csel'))box.classList.toggle('off',!on);
+}
+if($('caps'))$('caps').addEventListener('change',syncSubStyle);
+syncSubStyle();
 
 $('go').onclick=async ()=>{
   hideErr();
@@ -1265,6 +1312,7 @@ $('go').onclick=async ()=>{
         min_len:+$('lens').value.split('-')[0],max_len:+$('lens').value.split('-')[1],
         limit_min:+$('limit').value,
         captions:$('caps').checked&&mode!=='fast',facetrack:mode==='face'||mode==='split',
+        sub_style:$('subStyle').value,
         antidetect:$('anti').checked,mirror:$('mir').checked,banner:$('ban').checked,clip_music:$('clipMusic').checked,remove_pauses:$('pauseCut').checked,banner_file:$('banFile').value,asr_model:$('asd').value,gameplay:$('game').value,out_name:$('outName').value.trim(),fast:mode==='fast',vmode:mode==='fast'?'blur':mode,domain:$('domain').value,
         hook:$('hookText').value.trim(),
         tags:formTagIds('cutTags'),preset_id:$('cutPreset').value||null,
@@ -1315,6 +1363,7 @@ $('anGo').onclick=async ()=>{
         min_len:mn,max_len:mx,limit_min:manual?0:+$('anLimit').value,asr_model:$('anAsr').value,
         want:+$('anWant').value,
         captions:$('anCaps').checked,
+        sub_style:$('anSubStyle').value,
         story_blur_subs:$('anBlurSub').checked,
         story_unique:$('anUnique').checked,
         story_mirror:$('anMirror').checked,
@@ -1455,10 +1504,12 @@ function makeCustom(id){
     if(e.key==='Enter'||e.key===' '||e.key==='ArrowDown'){e.preventDefault();btn.click();}
     else if(e.key==='Escape')close();};
   sel.style.display='none';sel.after(box);box.appendChild(btn);box.appendChild(ul);
+  sel.addEventListener('change',sync);  // программный выбор тоже обновляет подпись
   sel._cs={sync};sync();
 }
 function refreshCustom(){document.querySelectorAll('select').forEach(s=>{if(s._cs)s._cs.sync();});}
-  ['want','game','lens','limit','mode','asd','sWant','sLens','sLimit','sVmode','sAsd','sGame','sW','twWant','twLens','twLimit','anMode','anWant','anLens','anVar','anLen','anLimit','banFile','twBanFile','uqBanFile','anBanFile','bnBanSel','cutPreset','anPreset','twPreset','pPreset'].forEach(makeCustom);
+  ['want','game','lens','limit','mode','asd','sWant','sLens','sLimit','sVmode','sAsd','sGame','sW','twWant','twLens','twLimit','anMode','anWant','anLens','anVar','anLen','anLimit','banFile','twBanFile','uqBanFile','anBanFile','bnBanSel','cutPreset','anPreset','twPreset','pPreset','subStyle','sSubStyle','anSubStyle'].forEach(makeCustom);
+try{syncSubStyle();}catch(_){}
 
 /* ---------- клипы ---------- */
 let LIB=[];
@@ -2339,7 +2390,7 @@ $('uqGo').onclick=async ()=>{
   const urls=$('uqUrls').value.split('\n').map(s=>s.trim()).filter(Boolean).slice(0,5);
   if(!urls.length){toast('Вставь ссылку на TikTok','err');return;}
   try{
-    const r=await fetch('/api/uniq-link',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({urls,banner_file:$('uqBanFile').value,mirror:$('uqMir').checked,caps:$('uqCaps').checked})});
+    const r=await fetch('/api/uniq-link',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({urls,banner_file:$('uqBanFile').value,mirror:$('uqMir').checked,caps:$('uqCaps').checked,sub_style:$('subStyle').value})});
     const j=await r.json();
     if(!j.ok)throw new Error(j.error||'Не вышло');
     for(const dlid of (j.jobs||[]))uqLive.add(dlid);
@@ -2416,6 +2467,9 @@ async function loadBanners(){
       sel._bannersSig=sig;
       sel.innerHTML='<option value="">По умолчанию</option>'+(j.banners||[]).map(b=>'<option value="'+esc(b.id)+'">'+esc(b.name)+' · '+Math.round(b.dur||0)+'с</option>').join('');
       if(Array.from(sel.options).some(o=>o.value===cur))sel.value=cur;
+      // баннер из настроек подставляем один раз, когда список уже есть
+      const want=sel.dataset.want;
+      if(want&&Array.from(sel.options).some(o=>o.value===want)){sel.value=want;delete sel.dataset.want;}
       // кастомный селект кеширует пункты при построении — сносим и строим
       // заново, иначе залипает старый список («только По умолчанию»)
       if(sel._cs){
@@ -2537,11 +2591,14 @@ async function loadSettings(){
     $('sGame').value=SETTINGS.gameplay||'subway.mp4';
     $('sW').value=String(SETTINGS.max_workers||2);
     $('sCaps').checked=!!SETTINGS.captions;
+    $('sSubStyle').value=SETTINGS.sub_style||'classic';
+    if($('anSubStyle'))$('anSubStyle').value=SETTINGS.sub_style||'classic';
+    if(window.refreshCustom)refreshCustom();
     $('sAnti').checked=!!SETTINGS.antidetect;
     $('sMir').checked=!!SETTINGS.mirror;
     $('sBan').checked=SETTINGS.banner!==false;
     $('sMusic').checked=SETTINGS.clip_music!==false;
-    $('sPause').checked=SETTINGS.remove_pauses!==false;
+    $('sPause').checked=SETTINGS.remove_pauses===true;
     refreshCustom();
     $('workerPill').textContent='workers · '+SETTINGS.max_workers;
     const s=await (await fetch('/api/stats')).json();
@@ -2553,7 +2610,7 @@ $('sSave').onclick=async ()=>{
     body:JSON.stringify({drex_key:$('sDrex').value.trim(),asr_api_key:$('sAsrKey').value.trim(),
       asr_api_base:$('sAsrBase').value.trim()||'https://gw.lunaroute.com/v1',want:+$('sWant').value,
       lens:$('sLens').value,limit_min:+$('sLimit').value,vmode:$('sVmode').value,asr_model:$('sAsd').value,gameplay:$('sGame').value,
-      max_workers:+$('sW').value,captions:$('sCaps').checked,antidetect:$('sAnti').checked,mirror:$('sMir').checked,banner:$('sBan').checked,clip_music:$('sMusic').checked,remove_pauses:$('sPause').checked})});
+      max_workers:+$('sW').value,captions:$('sCaps').checked,sub_style:$('sSubStyle').value,antidetect:$('sAnti').checked,mirror:$('sMir').checked,banner:$('sBan').checked,clip_music:$('sMusic').checked,remove_pauses:$('sPause').checked})});
   const j=await r.json();
   if(j.ok){SETTINGS={...SETTINGS,...j.settings};applyDefaults();toast('Настройки сохранены','ok');loadDashQuiet()}
 };
@@ -2573,14 +2630,21 @@ function applyDefaults(){
   $('anAsr').value=SETTINGS.asr_model||'giga';
   $('game').value=SETTINGS.gameplay||'subway.mp4';
   $('caps').checked=!!SETTINGS.captions;
+  $('subStyle').value=SETTINGS.sub_style||'classic';
+  if($('anSubStyle'))$('anSubStyle').value=SETTINGS.sub_style||'classic';
+  if(window.refreshCustom)refreshCustom();
+  if(window.syncSubStyle)syncSubStyle();
   $('anti').checked=!!SETTINGS.antidetect;
   $('mir').checked=!!SETTINGS.mirror;
   $('ban').checked=SETTINGS.banner!==false;
   $('clipMusic').checked=SETTINGS.clip_music!==false;
-  $('pauseCut').checked=SETTINGS.remove_pauses!==false;
+  $('pauseCut').checked=SETTINGS.remove_pauses===true;
   $('twMusic').checked=SETTINGS.clip_music!==false;
-  $('twPause').checked=SETTINGS.remove_pauses!==false;
+  $('twPause').checked=SETTINGS.remove_pauses===true;
   $('twAnti').checked=!!SETTINGS.antidetect;
+  // выбранный в настройках баннер: список грузится отдельно, поэтому
+  // запоминаем желаемое значение и применяем после наполнения <select>
+  if(SETTINGS.banner_file&&$('banFile'))$('banFile').dataset.want=SETTINGS.banner_file;
   refreshCustom();
 }
 

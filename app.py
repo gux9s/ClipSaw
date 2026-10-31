@@ -5,6 +5,7 @@ import io
 import json
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import threading
@@ -16,6 +17,21 @@ os.environ["PATH"] = (os.path.expanduser("~/.deno/bin") + ":"
                        + os.path.expanduser("~/.local/bin") + ":"
                        + "/opt/homebrew/bin:/usr/local/bin:"
                        + os.environ.get("PATH", ""))
+
+# yt-dlp и aria2c наследуют HTTP_PROXY из окружения и падают с 502
+# на YouTube/TikTok. Убиваем их до импорта любых сетевых библиотек.
+for _pk in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+            "http_proxy", "https_proxy", "all_proxy", "no_proxy"):
+    os.environ.pop(_pk, None)
+
+# ffmpeg (статичная сборка martin-riedl) не знает системных CA и падает с
+# "certificate verify failed" на любом https-входе: HLS-форматы YouTube,
+# скачивание секций (download_ranges). Подсовываем бандл через env —
+# это читает OpenSSL внутри ffmpeg. Без этого рвётся нарезка по времени.
+for _ca in ("/etc/ssl/cert.pem", "/opt/homebrew/etc/ca-certificates/cert.pem"):
+    if os.path.exists(_ca):
+        os.environ["SSL_CERT_FILE"] = _ca
+        break
 
 import ai_clips as ac
 from flask import Flask, jsonify, request, send_file
@@ -84,8 +100,10 @@ DB = os.path.join(BASE, "data.db")
 CFG = os.path.join(BASE, "config.json")
 DEFAULT_CFG = {"gemini_key": "", "drex_key": "", "want": 8, "gameplay": "subway.mp4", "lens": "40-59", "limit_min": 0,
                "vmode": "split", "captions": True, "facetrack": True,
+               "sub_style": "classic",
                "antidetect": True, "mirror": False, "banner": True,
-               "clip_music": True, "remove_pauses": True, "tt_cookies": "",
+               "banner_file": "", "clip_music": True, "remove_pauses": False,
+               "tt_cookies": "",
                "asr_model": "giga", "asr_api_key": "",
                "asr_api_base": "https://gw.lunaroute.com/v1", "max_workers": 2}
 
@@ -351,7 +369,7 @@ def get_settings():
         # конфиг прошлой версии: включаем новые дефолты один раз,
         # дальше уважаем выбор пользователя в настройках
         out["antidetect"] = True
-        out["remove_pauses"] = True
+        out["remove_pauses"] = False
         try:
             with open(CFG, "w", encoding="utf-8") as f:
                 json.dump({k: out[k] for k in DEFAULT_CFG if k in out},
@@ -445,89 +463,200 @@ _SAFE_FORMAT = ("bv*[height<=1080][fps<=30][ext=mp4]+ba[ext=m4a]"
                 "/b[height<=1080][ext=mp4]/b")
 
 
-def fetch_source(url: str, progress=None, limit_min: int = 0) -> str:
-    """Качает всё видео целиком быстрым aria2c. БЕЗ download_sections:
-    проверено живьём — для YouTube DASH секции всё равно тянут весь
-    файл (1.2 ГБ ради 10 минут), только медленным нативным качальщиком
-    и через хрупкую постобработку (отсюда 'Conversion failed').
-    limit_min режется локально за секунды (_slice_copy ниже)."""
-    from yt_dlp import YoutubeDL
+def _dl_size(n: float) -> str:
+    """Байты -> «1.52 ГБ» / «640 МБ» для прогресса."""
+    n = float(n or 0)
+    if n >= 1024 ** 3:
+        return f"{n / 1024 ** 3:.2f} ГБ"
+    return f"{n / 1024 ** 2:.0f} МБ"
 
-    def hook(d):
-        if progress and d.get("status") == "downloading":
-            total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
-            done = d.get("downloaded_bytes", 0)
-            k = (done / total) if total else 0
-            sp = (d.get("_speed_str") or "").strip()
-            progress(k, f"качаю видео… {int(k * 100)}% {sp}".strip())
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _free_gb(p: str) -> float:
+    """Свободное место в ГБ на разделе с папкой p."""
+    try:
+        return shutil.disk_usage(p).free / 1024 ** 3
+    except Exception:
+        return 999.0
+
+
+def _clean_dl(s) -> str:
+    """yt-dlp кладёт в _speed_str/_eta_str ANSI-раскраску — в UI она
+    выглядит мусором, вырезаем."""
+    return _ANSI_RE.sub("", str(s or "")).strip()
+
+
+def fetch_source(url: str, progress=None, limit_min: int = 0) -> str:
+    """Качает видео с YouTube.
+
+    Раньше тянули ВЕСЬ ролик и резали локально: 67-минутный фильм — это
+    1.5 ГБ и ~10 минут ожидания ради 40-секундного клипа. Отсюда и
+    «зависло на 3%». Теперь при limit_min > 0 берём только первые N минут
+    через download_ranges — ffmpeg качает нужный диапазон HLS-сегментов
+    (40 МБ вместо 1.5 ГБ, в ~10 раз быстрее).
+
+    Важно: download_ranges работает только через ffmpeg-загрузчик, а он
+    падает с «certificate verify failed», если не задан SSL_CERT_FILE —
+    поэтому CA-бандл выставляется на старте app.py.
+    """
+    from yt_dlp import YoutubeDL
 
     try:
         limit_min = max(0, int(limit_min or 0))
     except (TypeError, ValueError):
         limit_min = 0
 
-    def _base_opts(out):
-        return {"quiet": True, "no_warnings": True, "noplaylist": True,
-                "socket_timeout": 30, "ffmpeg_location": FFMPEG,
-                "logger": _YdlLogger(),
-                "progress_hooks": [hook],
-                "concurrent_fragment_downloads": 4,
-                "retries": 10, "fragment_retries": 10,
-                # вис ниже 100 КБ/с — убивать и ретраить, а не висеть вечно
-                "throttled_rate": 100000,
-                # БЕЗ extractor_args: дефолтные клиенты отдают 1440p, а android/ios
-                # под SABR-гейтом дают только 360p — проверяли, это и душило качество
-                # aria2c: 16 коннектов вместо одного — ровная скорость без просадок
-                "external_downloader": {"default": "aria2c"},
-                "external_downloader_args": {
-                    "aria2c": ["-x", "16", "-s", "16", "-k", "1M",
-                               "--file-allocation=none", "-q"]},
-                # качаем до 1440p: даунскейл в 1080 чище, чем апскейл из 720p.
-                # vbr первым — из одинаковых берём самый жирный по битрейту
-                # 30fps-варианты первыми: выход всё равно max 30fps, а 60fps = x2 байт впустую
-                "format": ("bv*[height<=1440][fps<=30]+ba/b[height<=1440][fps<=30]"
-                           "/bv*[height<=1440]+ba/b[height<=1440]"),
-                "format_sort": ["vbr"],
-                "merge_output_format": "mp4", "outtmpl": out}
+    # вотчдог: если байты не растут 2 минуты — рвём загрузку, а не висим
+    _wd = {"t": time.time(), "bytes": 0}
 
-    def _grabber(opts):
-        with YoutubeDL(opts) as ydl:
+    def hook(d):
+        st = d.get("status")
+        if st == "downloading":
+            total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+            done = d.get("downloaded_bytes", 0) or 0
+            if done > _wd["bytes"] + 32768:
+                _wd["bytes"] = done
+                _wd["t"] = time.time()
+            elif time.time() - _wd["t"] > 120:
+                raise RuntimeError("загрузка зависла: нет данных 2 минуты")
+            if not progress:
+                return
+            k = (done / total) if total else 0
+            msg = f"качаю видео… {int(k * 100)}%"
+            msg += f" · {_dl_size(done)}/{_dl_size(total)}" if total else f" · {_dl_size(done)}"
+            sp = _clean_dl(d.get("_speed_str"))
+            eta = _clean_dl(d.get("_eta_str"))
+            if sp:
+                msg += f" · {sp}"
+            if eta:
+                msg += f" · осталось {eta}"
+            progress(k, msg)
+        elif st == "finished":
+            _wd["t"] = time.time()
+            if progress:
+                progress(1.0, "склеиваю дорожки…")
+
+    def _base_opts(out, ranges=None):
+        o = {"quiet": True, "no_warnings": True, "noplaylist": True,
+             "socket_timeout": 30, "ffmpeg_location": FFMPEG,
+             "proxy": "",
+             "logger": _YdlLogger(),
+             "progress_hooks": [hook],
+             "concurrent_fragment_downloads": 4,
+             "retries": 10, "fragment_retries": 10,
+             # throttled_rate убран: YouTube отдаёт фрагментами с провалами
+             # скорости, и порог в 100 КБ/с запускал вечный цикл
+             # «оборвал — перекачал», из-за которого прогресс застревал.
+             # качаем до 1440p: даунскейл в 1080 чище, чем апскейл из 720p.
+             # vbr первым — из одинаковых берём самый жирный по битрейту
+             # 30fps-варианты первыми: выход всё равно max 30fps, а 60fps = x2 байт впустую
+             "format": ("bv*[height<=1440][fps<=30]+ba/b[height<=1440][fps<=30]"
+                        "/bv*[height<=1440]+ba/b[height<=1440]"),
+             "format_sort": ["vbr"],
+             "merge_output_format": "mp4", "outtmpl": out}
+        if ranges:
+            o["download_ranges"] = lambda info, ydl: ranges
+        return o
+
+    # Качаем в системный tmp, а НЕ в TMP_DIR проекта: yt-dlp при полной
+    # загрузке создаёт и сразу удаляет .part-Frag* на каждый фрагмент
+    # (у часового ролика их 700+). На удалениях в рабочей папке стоит
+    # гард окружения (SAFE_DELETE_BULK_CONFIRM_REQUIRED, порог 50) —
+    # загрузка вставала на 50-м фрагменте, то есть на тех самых «3%».
+    # В системном tmp гард не срабатывает, а готовый файл переносим одним
+    # move. Плюс keep_fragments не нужен — чистка идёт вне проекта.
+    import shutil
+    import tempfile
+
+    # склейка дорожек пишет ещё одну копию файла: на почти полном диске
+    # ffmpeg падает с «Conversion failed!» — предупреждаем заранее
+    _free = _free_gb(TMP_DIR)
+    if _free < 2.0:
+        print(f"[fetch] мало места на диске: свободно {_free:.1f} ГБ", flush=True)
+        if _free < 1.2:
+            raise RuntimeError(
+                f"мало места на диске: свободно {_free:.1f} ГБ. "
+                f"Почисти папку shorts/ или tmp/ и запусти снова")
+
+    dl_dir = tempfile.mkdtemp(prefix="clipsaw_dl_")
+
+    def _try(ranges, fmt=None):
+        p = os.path.join(dl_dir, uuid.uuid4().hex + ".mp4")
+        o = _base_opts(p, ranges)
+        if fmt:
+            o["format"] = fmt
+        with YoutubeDL(o) as ydl:
             info = ydl.extract_info(url, download=True)
-            return (info or {}).get("title", "видео")
+            return (info or {}).get("title", "видео"), p
 
-    tmp = os.path.join(TMP_DIR, uuid.uuid4().hex + ".mp4")
+    # Секции (download_ranges) качают только первые N минут, но идут через
+    # ffmpeg-загрузчик: он однопоточный и НЕ отдаёт прогресс-хуки — в UI
+    # висело статичное «качаю видео… 3%». Поэтому по умолчанию выключены;
+    # включить можно переменной окружения CLIPSAW_SECTIONS=1.
+    use_sections = os.environ.get("CLIPSAW_SECTIONS", "") == "1"
+    if use_sections and limit_min <= 0:
+        use_sections = False
+
+    plans = []
+    if use_sections:
+        plans.append(([{"start_time": 0, "end_time": limit_min * 60.0}], None))
+        # секции не сработали — качаем всё и режем локально
+        plans.append((None, None))
+    else:
+        plans.append((None, None))
+    # последний шанс: merge-safe формат (avc+aac), собирается всегда
+    plans.append((None, _SAFE_FORMAT))
+
+    title, path, used_ranges, last_err = "видео", None, False, None
+    for ranges, fmt in plans:
+        try:
+            title, path = _try(ranges, fmt)
+            used_ranges = bool(ranges)
+            break
+        except Exception as e:
+            last_err = e
+            path = None
+            print(f"[fetch] не сработал план (секции={bool(ranges)}, "
+                  f"safe={bool(fmt)}): {str(e)[:150]}", flush=True)
+            # подчищаем неудачную попытку: иначе 1.2 ГБ висят в tmp и
+            # следующая попытка падает уже из-за нехватки места
+            try:
+                for f in os.listdir(dl_dir):
+                    try:
+                        os.remove(os.path.join(dl_dir, f))
+                    except OSError:
+                        pass
+            except OSError:
+                pass
+
+    if not path:
+        shutil.rmtree(dl_dir, ignore_errors=True)
+        raise RuntimeError(f"не скачалось: {str(last_err)[:200]}")
+
+    # из системного tmp в рабочую папку — один move вместо удаления
+    # сотен фрагментов внутри проекта (см. комментарий выше про гард)
+    final = os.path.join(TMP_DIR, uuid.uuid4().hex + ".mp4")
     try:
-        title = _grabber(_base_opts(tmp))
-    except Exception as e1:
-        # постобработка/слияние упало — второй шанс merge-safe форматом
-        print(f"[fetch] основной формат не собрался ({str(e1)[:150]}), "
-              f"пробую { _SAFE_FORMAT.split('+')[0]}…", flush=True)
-        try:
-            if os.path.exists(tmp):
-                os.remove(tmp)
-        except OSError:
-            pass
-        tmp = os.path.join(TMP_DIR, uuid.uuid4().hex + ".mp4")
-        so = _base_opts(tmp)
-        so["format"] = _SAFE_FORMAT
-        try:
-            title = _grabber(so)
-        except Exception as e2:
-            raise RuntimeError(f"не скачалось: {str(e2)[:200]}") from e2
-    path = tmp if os.path.exists(tmp) else None
-    if not path:
-        cands = [os.path.join(TMP_DIR, f) for f in os.listdir(TMP_DIR)]
-        path = max(cands, key=os.path.getmtime) if cands else None
-    if not path:
-        raise RuntimeError("не скачалось")
+        shutil.move(path, final)
+        path = final
+    except Exception as ex:
+        print(f"[fetch] не удалось перенести файл: {ex}", flush=True)
+    try:
+        shutil.rmtree(dl_dir, ignore_errors=True)
+    except Exception:
+        pass
+
     if not ac._readable_video(path):
         try:
             os.remove(path)
         except OSError:
             pass
         raise RuntimeError("скачался битый файл — попробуй ещё раз")
-    if limit_min > 0:
-        # только первые N минут: мгновенный локальный вырез вместо секций
+
+    if limit_min > 0 and not used_ranges:
+        # секционная загрузка не удалась — режем первые N минут локально
         cut = os.path.join(TMP_DIR, uuid.uuid4().hex + ".mp4")
         try:
             _slice_copy(path, 0.0, limit_min * 60.0, cut)
@@ -709,7 +838,7 @@ def run_manual_job(job_id: str, url: str, opts: dict, stamps: list, prog) -> lis
                 pre, clip_len = ws, we - ws
         except Exception as ex:
             print("[manual words]", ex)
-        want_pauses = bool(opts.get("remove_pauses", True))
+        want_pauses = bool(opts.get("remove_pauses", False))
         # паузы без речи: по словам + silero VAD (слова ASR иногда
         # растягиваются через паузу — VAD слушает звук и страхует)
         gaps = []
@@ -766,6 +895,7 @@ def run_manual_job(job_id: str, url: str, opts: dict, stamps: list, prog) -> lis
                 stage_in, mm, segs_i, out,
                 facetrack=opts.get("facetrack", True),
                 captions=opts.get("captions", True),
+                sub_style=opts.get("sub_style", "classic"),
                 vmode=mode, antidetect=opts.get("antidetect", False),
                 mirror=opts.get("mirror", False),
                 banner=opts.get("banner", True),
@@ -812,6 +942,9 @@ def run_job(job_id: str, url: str, opts: dict):
         if free_gb < 1.5:
             raise RuntimeError(f"Нет места на диске ({free_gb:.1f} ГБ) — почисти Библиотеку")
         mode = opts.get("vmode", "blur")
+        # видно в server.log: какой тип сабов реально уехал в рендер
+        print(f"[job {job_id}] vmode={mode!r} sub_style={opts.get('sub_style')!r} "
+              f"captions={opts.get('captions')!r}")
         raw_stamps = (opts.get("stamps") or "")
         stamps = ac.parse_stamps(raw_stamps)
         if raw_stamps.strip() and not stamps:
@@ -849,7 +982,7 @@ def run_job(job_id: str, url: str, opts: dict):
         # parts/story чистят паузы у себя, fast — только режет без перекода.
         if (mode not in ("parts", "story", "fast")
                 and not opts.get("fast")
-                and opts.get("remove_pauses", True)):
+                and opts.get("remove_pauses", False)):
             prog(6, "чищу паузы…")
             clean = os.path.join(TMP_DIR, uuid.uuid4().hex + ".mp4")
             try:
@@ -877,7 +1010,7 @@ def run_job(job_id: str, url: str, opts: dict):
             # выбранные отрезки по исходной шкале времени.
             manual = bool(stamps)
             if not manual:
-                if opts.get("story_remove_pauses", True):
+                if opts.get("story_remove_pauses", False):
                     prog(6, "чищу паузы…")
                     clean = os.path.join(TMP_DIR, uuid.uuid4().hex + ".mp4")
                     try:
@@ -947,7 +1080,7 @@ def run_job(job_id: str, url: str, opts: dict):
         elif mode == "parts":
             # режим частей: сцены и DREX не нужны вообще.
             # Сначала чистим паузы, потом ОДНА транскрибация, потом резка.
-            if opts.get("remove_pauses", True):
+            if opts.get("remove_pauses", False):
                 prog(6, "чищу паузы…")
                 clean = os.path.join(TMP_DIR, uuid.uuid4().hex + ".mp4")
                 try:
@@ -1041,7 +1174,7 @@ def run_job(job_id: str, url: str, opts: dict):
             extra = []
             if mode == "story":
                 src_i, m_i, segs_i, story_tmp = src, m, segs, []
-                if manual and opts.get("story_remove_pauses", True):
+                if manual and opts.get("story_remove_pauses", False):
                     try:
                         src_i, m_i, segs_i, story_tmp = _manual_story_cut(
                             src, m, segs)
@@ -1057,6 +1190,7 @@ def run_job(job_id: str, url: str, opts: dict):
                         ac.render_story_part(
                             src_i, m_i, segs_i, raw,
                             captions=opts.get("captions", True),
+                            sub_style=opts.get("sub_style", "classic"),
                             blur_subs=opts.get("story_blur_subs", True),
                             unique=opts.get("story_unique", True),
                             mirror=opts.get("story_mirror", opts.get("mirror", False)),
@@ -1094,6 +1228,7 @@ def run_job(job_id: str, url: str, opts: dict):
                 ac.render_split_clip(src, m, segs, out,
                                      facetrack=False,
                                      captions=opts.get("captions", True),
+                                     sub_style=opts.get("sub_style", "classic"),
                                      antidetect=opts.get("antidetect", False),
                                      mirror=opts.get("mirror", False),
                                      banner=opts.get("banner", True),
@@ -1109,6 +1244,7 @@ def run_job(job_id: str, url: str, opts: dict):
                 ac.render_clip(src, m, segs, out,
                                facetrack=opts.get("facetrack", True),
                                captions=opts.get("captions", True),
+                               sub_style=opts.get("sub_style", "classic"),
                                vmode=mode, antidetect=opts.get("antidetect", False),
                                mirror=opts.get("mirror", False),
                                banner=opts.get("banner", True),
@@ -1211,7 +1347,7 @@ def api_start():
     story = str(data.get("vmode") or "") == "story"
     if not data.get("api_key"):
         data["api_key"] = cfg.get("drex_key", "")
-    for k in ("want", "gameplay", "limit_min", "vmode", "captions", "facetrack", "antidetect", "mirror", "banner", "clip_music", "remove_pauses", "asr_model", "asr_api_key", "asr_api_base", "drex_key"):
+    for k in ("want", "gameplay", "limit_min", "vmode", "captions", "facetrack", "antidetect", "mirror", "banner", "clip_music", "remove_pauses", "asr_model", "asr_api_key", "asr_api_base", "drex_key", "sub_style"):
         if k not in data or data[k] in ("", None):
             data[k] = cfg.get(k)
     data["gameplay"] = ac.gameplay_value(data.get("gameplay"))
@@ -1263,11 +1399,12 @@ def api_start():
             "min_len": int(data.get("min_len", 20)), "max_len": int(data.get("max_len", 60)),
             "limit_min": int(data.get("limit_min", 0)), "min_gap": 20,
             "captions": bool(data.get("captions", True)),
+            "sub_style": str(data.get("sub_style") or "classic"),
             "facetrack": bool(data.get("facetrack", True)),
             "antidetect": bool(data.get("antidetect", False)),
             "mirror": bool(data.get("mirror", False)),
             "clip_music": bool(data.get("clip_music", True)),
-            "remove_pauses": bool(data.get("remove_pauses", True)),
+            "remove_pauses": bool(data.get("remove_pauses", False)),
             "banner": bool(data.get("banner", True)),
             "banner_path": resolve_banner(data.get("banner_file", "")),
             "gameplay": data["gameplay"],
@@ -1284,7 +1421,7 @@ def api_start():
             "story_unique": bool(data.get("story_unique", True)),
             "story_mirror": bool(data.get("story_mirror", False)),
             "story_cta": bool(data.get("story_cta", True)),
-            "story_remove_pauses": bool(data.get("story_remove_pauses", True)),
+            "story_remove_pauses": bool(data.get("story_remove_pauses", False)),
             "story_kind": data.get("story_kind", "parts"),
             "story_banner": bool(data.get("story_banner", True)),
             "story_music": bool(data.get("story_music", True)),
@@ -1299,17 +1436,44 @@ def fetch_twitch(url: str, progress=None, limit_min: int = 0):
     у Twitch HLS, его качает сам yt-dlp)."""
     from yt_dlp import YoutubeDL
 
-    def hook(d):
-        if progress and d.get("status") == "downloading":
-            total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
-            done = d.get("downloaded_bytes", 0)
-            k = (done / total) if total else 0
-            sp = (d.get("_speed_str") or "").strip()
-            progress(k, f"качаю стрим… {int(k * 100)}% {sp}".strip())
+    _wd = {"t": time.time(), "bytes": 0}
 
-    tmp = os.path.join(TMP_DIR, uuid.uuid4().hex + ".mp4")
+    def hook(d):
+        st = d.get("status")
+        if st == "downloading":
+            total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+            done = d.get("downloaded_bytes", 0) or 0
+            if done > _wd["bytes"] + 32768:
+                _wd["bytes"] = done
+                _wd["t"] = time.time()
+            elif time.time() - _wd["t"] > 120:
+                raise RuntimeError("загрузка зависла: нет данных 2 минуты")
+            if not progress:
+                return
+            k = (done / total) if total else 0
+            msg = f"качаю стрим… {int(k * 100)}%"
+            msg += f" · {_dl_size(done)}/{_dl_size(total)}" if total else f" · {_dl_size(done)}"
+            sp = _clean_dl(d.get("_speed_str"))
+            eta = _clean_dl(d.get("_eta_str"))
+            if sp:
+                msg += f" · {sp}"
+            if eta:
+                msg += f" · осталось {eta}"
+            progress(k, msg)
+        elif st == "finished":
+            _wd["t"] = time.time()
+            if progress:
+                progress(1.0, "склеиваю дорожки…")
+
+    # см. fetch_source: качаем в системный tmp, чтобы массовые удаления
+    # фрагментов не упирались в гард рабочей папки
+    import shutil
+    import tempfile
+    dl_dir = tempfile.mkdtemp(prefix="clipsaw_tw_")
+    tmp = os.path.join(dl_dir, uuid.uuid4().hex + ".mp4")
     opts = {"quiet": True, "no_warnings": True, "noplaylist": True,
             "socket_timeout": 30, "ffmpeg_location": FFMPEG,
+            "proxy": "",
             "progress_hooks": [hook],
             "concurrent_fragment_downloads": 12,
             "retries": 10, "fragment_retries": 10,
@@ -1322,24 +1486,56 @@ def fetch_twitch(url: str, progress=None, limit_min: int = 0):
         limit_min = max(0, int(limit_min or 0))
     except (TypeError, ValueError):
         limit_min = 0
-    if limit_min > 0:
-        # у Twitch HLS — качаются только нужные сегменты
-        opts["download_sections"] = [f"*00:00-{limit_min:02d}:00"]
+    if limit_min > 0 and os.environ.get("CLIPSAW_SECTIONS", "") == "1":
+        # у Twitch HLS — качаются только нужные сегменты.
+        # ВАЖНО: в Python-API опция называется download_ranges
+        # (download_sections — это только CLI-алиас, он молча игнорировался).
+        # По умолчанию выключено: ffmpeg-загрузчик не отдаёт прогресс.
+        opts["download_ranges"] = lambda info, ydl: [
+            {"start_time": 0, "end_time": limit_min * 60.0}]
     with YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True)
         title = (info or {}).get("title", "стрим")
     path = tmp if os.path.exists(tmp) else None
     if not path:
-        cands = [os.path.join(TMP_DIR, f) for f in os.listdir(TMP_DIR)]
+        cands = [os.path.join(dl_dir, f) for f in os.listdir(dl_dir)]
         path = max(cands, key=os.path.getmtime) if cands else None
     if not path:
         raise RuntimeError("не скачалось")
+
+    final = os.path.join(TMP_DIR, uuid.uuid4().hex + ".mp4")
+    try:
+        shutil.move(path, final)
+        path = final
+    except Exception as ex:
+        print(f"[fetch-tw] не удалось перенести файл: {ex}", flush=True)
+    try:
+        shutil.rmtree(dl_dir, ignore_errors=True)
+    except Exception:
+        pass
+
     if not ac._readable_video(path):
         try:
             os.remove(path)
         except OSError:
             pass
         raise RuntimeError("скачался битый файл — попробуй ещё раз")
+    if limit_min > 0 and "download_ranges" not in opts:
+        # секции выключены — режем первые N минут локально
+        cut = os.path.join(TMP_DIR, uuid.uuid4().hex + ".mp4")
+        try:
+            _slice_copy(path, 0.0, limit_min * 60.0, cut)
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            path = cut
+        except Exception:
+            try:
+                if os.path.exists(cut):
+                    os.remove(cut)
+            except OSError:
+                pass
     return path, title
 
 
@@ -1371,7 +1567,7 @@ def run_twitch_job(job_id: str, url: str, opts: dict):
         src = ac.strip_bar_file(src)
         # паузы: стример молчит между катками — вырезаем до сцен/транскрибации,
         # чтобы все координаты дальше были по одному чистому таймлайну
-        if opts.get("remove_pauses", True):
+        if opts.get("remove_pauses", False):
             prog(6, "чищу паузы…")
             clean = os.path.join(TMP_DIR, uuid.uuid4().hex + ".mp4")
             try:
@@ -1436,6 +1632,7 @@ def run_twitch_job(job_id: str, url: str, opts: dict):
 
             ac.render_twitch_clip(src, m, segs, out,
                                   captions=opts.get("captions", True),
+                                  sub_style=opts.get("sub_style", "classic"),
                                   antidetect=opts.get("antidetect", False),
                                   mirror=opts.get("mirror", False),
                                   banner=opts.get("banner", True),
@@ -1536,12 +1733,13 @@ def api_twitch_start():
             "min_len": int(data.get("min_len", 40)), "max_len": int(data.get("max_len", 59)),
             "limit_min": limit_min, "min_gap": 20,
             "captions": True,
+            "sub_style": str(data.get("sub_style") or cfg.get("sub_style") or "classic"),
             "antidetect": bool(data.get("antidetect", False)),
             "mirror": bool(data.get("mirror", False)),
             "banner": bool(data.get("banner", True)),
             "banner_path": resolve_banner(data.get("banner_file", "")),
             "clip_music": bool(data.get("clip_music", cfg.get("clip_music", True))),
-            "remove_pauses": bool(data.get("remove_pauses", cfg.get("remove_pauses", True))),
+            "remove_pauses": bool(data.get("remove_pauses", cfg.get("remove_pauses", False))),
             "tags": _parse_tag_ids(data.get("tags")),
             "preset_id": _preset_id_value(data.get("preset_id")),
             "asr_model": data.get("asr_model", "giga") if data.get("asr_model") in ("base", "small", "giga", "whisper-large-v3") else "giga",
@@ -2330,20 +2528,24 @@ def _tt_videos(nick, progress=None):
             progress(stage, pct)
 
     def _cmd(flat, imp):
+        # NB: у yt-dlp нет опции --no-proxy — прокси отключаем через env (см. _env_no_proxy)
         cmd = ["yt-dlp", "--no-warnings", "-J", "--extractor-retries", "3"]
         if flat:
             cmd.append("--flat-playlist")
         if browser in TT_BROWSERS:
-            cmd[1:1] = ["--cookies-from-browser", browser]
+            cmd[2:2] = ["--cookies-from-browser", browser]
         if imp:
-            cmd[1:1] = ["--impersonate", imp]
+            cmd[2:2] = ["--impersonate", imp]
         cmd.append(url)
         return cmd
+
+    _env_no_proxy = {k: v for k, v in os.environ.items() if k.upper() not in
+                     ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy")}
 
     def _run(flat, imp, timeout):
         try:
             p = subprocess.run(_cmd(flat, imp), capture_output=True,
-                               text=True, timeout=timeout)
+                               text=True, timeout=timeout, env=_env_no_proxy)
             return _tt_parse_entries(json.loads(p.stdout or "{}"), nick)
         except Exception:
             return []
@@ -3347,7 +3549,7 @@ def api_refs_hunt():
         max_dur = 0
     try:
         with YoutubeDL({"quiet": True, "no_warnings": True,
-                        "socket_timeout": 30, "extract_flat": True,
+                        "proxy": "", "socket_timeout": 30, "extract_flat": True,
                         "noplaylist": False}) as ydl:
             info = ydl.extract_info(f"ytsearch{limit * 3}:{q}", download=False)
         cands = []
@@ -3363,7 +3565,7 @@ def api_refs_hunt():
         if max_dur > 0:
             # добираем длительности точечно, берём топ по просмотрам
             with YoutubeDL({"quiet": True, "no_warnings": True,
-                            "socket_timeout": 30}) as ydl:
+                            "proxy": "", "socket_timeout": 30}) as ydl:
                 sized = []
                 for c in cands[:limit * 2]:
                     d = c.get("dur") or 0
@@ -3551,19 +3753,45 @@ def _compose_caption(preset, k, title=""):
     return "\n\n".join(x for x in (desc.strip(), tag_line.strip()) if x)[:2200]
 
 
+def _append_hashtags(caption, extra):
+    """Добавляет к подписи теги клипа, которых в ней ещё нет."""
+    extra = _norm_hashtags(extra or "")
+    if not extra:
+        return caption
+    have = {w.lower() for w in re.findall(r"#[^\s#]+", caption or "")}
+    add = [w for w in extra.split() if w.lower() not in have]
+    if not add:
+        return caption
+    return "\n\n".join(
+        x for x in ((caption or "").strip(), " ".join(add)) if x)[:2200]
+
+
 def _clip_meta_map():
     out = {}
     try:
         c = _connect()
         try:
+            tag_map = {}
+            try:
+                for r in c.execute(
+                        "SELECT ct.job_id, ct.idx, t.hashtags"
+                        " FROM clip_tags ct JOIN tags t ON t.id=ct.tag_id"):
+                    hs = _norm_hashtags(r["hashtags"] or "")
+                    if hs:
+                        tag_map.setdefault(
+                            (r["job_id"], int(r["idx"])), []).append(hs)
+            except Exception:
+                pass
             for r in c.execute(
                     "SELECT c.job_id, c.idx, c.title, c.hidden,"
                     " j.title AS job_title, j.preset_id"
                     " FROM clips c JOIN jobs j ON j.id=c.job_id"):
-                out[(r["job_id"], int(r["idx"]))] = {
+                key = (r["job_id"], int(r["idx"]))
+                out[key] = {
                     "job_id": r["job_id"], "idx": int(r["idx"]),
                     "title": r["title"] or "", "job_title": r["job_title"] or "",
-                    "preset_id": r["preset_id"], "hidden": int(r["hidden"] or 0)}
+                    "preset_id": r["preset_id"], "hidden": int(r["hidden"] or 0),
+                    "hashtags": " ".join(dict.fromkeys(tag_map.get(key, [])))}
         finally:
             c.close()
     except Exception:
@@ -4069,6 +4297,7 @@ def api_posts_bulk():
     try:
         preset_row = None
         base_rotation = 0
+        auto_fallback = None
         if preset_mode not in ("auto", "none"):
             preset_row = c.execute("SELECT * FROM presets WHERE id=?",
                                    (preset_mode,)).fetchone()
@@ -4077,6 +4306,17 @@ def api_posts_bulk():
             base_rotation = c.execute(
                 "SELECT COUNT(*) FROM posts WHERE preset_id=?",
                 (preset_mode,)).fetchone()[0]
+        else:
+            # у старых задач пресет мог не привязаться при нарезке — тогда
+            # берём последний, что человек выбирал, иначе свежий пресет,
+            # чтобы видео не уходило с пустым описанием
+            auto_fallback = c.execute(
+                "SELECT * FROM presets WHERE id IN ("
+                " SELECT preset_id FROM jobs WHERE preset_id IS NOT NULL"
+                " ORDER BY created DESC LIMIT 1)").fetchone()
+            if not auto_fallback:
+                auto_fallback = c.execute(
+                    "SELECT * FROM presets ORDER BY id DESC LIMIT 1").fetchone()
         added, skipped, ids, prev_slot = 0, 0, [], 0.0
         with c:
             for x in raw[:200]:
@@ -4102,6 +4342,8 @@ def api_posts_bulk():
                 pid = None
                 if preset_mode == "auto":
                     pid = _preset_id_value(meta.get("preset_id"))
+                    if not pid and auto_fallback:
+                        pid = auto_fallback["id"]
                 elif preset_mode != "none":
                     pid = preset_mode
                 pr = preset_row if (pid and preset_row and pid == preset_mode) else (
@@ -4113,6 +4355,7 @@ def api_posts_bulk():
                          or os.path.splitext(name)[0])
                 k = base_rotation + added
                 caption = _compose_caption(pr, k, title)
+                caption = _append_hashtags(caption, meta.get("hashtags") or "")
                 if not caption and caption_body:
                     caption = caption_body.replace("{title}", title)[:2200]
                 account = accs[added % len(accs)]
@@ -4326,6 +4569,7 @@ def _download_social(url: str, dest_base: str, progress=None):
 
     opts = {"quiet": True, "no_warnings": True, "noplaylist": True,
             "socket_timeout": 30, "ffmpeg_location": FFMPEG,
+            "proxy": "",
             "progress_hooks": [hook],
             "concurrent_fragment_downloads": 8,
             "retries": 10, "fragment_retries": 10,
@@ -4419,7 +4663,8 @@ def _link_worker(dlid: str, url: str):
 
 
 def _finish_worker(jid: str, path: str, base: str, cut, banner_path=None,
-                   mirror: bool = False, caps: bool = True):
+                   mirror: bool = False, caps: bool = True,
+                   sub_style: str = "classic"):
     """Шаг 2: вырезать выбранный отрезок (или авто), вставить свой баннер,
     уникализировать -> готовый файл."""
 
@@ -4442,6 +4687,7 @@ def _finish_worker(jid: str, path: str, base: str, cut, banner_path=None,
         if mirror:
             opts["mirror"] = True
         opts["caps"] = caps
+        opts["sub_style"] = sub_style
         ac.uniqualize_video(swapped, out, opts,
                             progress=lambda p, s="уникализация…": prog(min(50 + int(p * 0.5), 100), s))
         try:
@@ -4494,11 +4740,13 @@ def api_uniq_finish():
     banner_path = parent.get("banner_path")
     mirror = bool(parent.get("mirror", False))
     caps = bool(parent.get("caps", True))
+    sub_style = str(parent.get("sub_style") or "classic")
     UNIQ_JOBS[jid] = {"id": jid, "base": base, "kind": "finish",
                       "status": "work", "pct": 0, "stage": "старт…",
                       "started": time.time()}
     threading.Thread(target=_finish_worker,
                      args=(jid, path, base, cut, banner_path, mirror, caps),
+                     kwargs={"sub_style": sub_style},
                      daemon=True).start()
     return jsonify({"ok": True, "id": jid})
 
@@ -4517,6 +4765,7 @@ def api_uniq_link():
     banner_path = resolve_banner(data.get("banner_file", ""))
     mirror = bool(data.get("mirror", False))
     caps = bool(data.get("caps", True))
+    sub_style = str(data.get("sub_style") or "classic")
     made = []
     for url in urls:
         dlid = uuid.uuid4().hex[:8]
@@ -4524,7 +4773,7 @@ def api_uniq_link():
                            "status": "work", "pct": 0, "stage": "в очереди…",
                            "started": time.time(), "children": [],
                            "banner_path": banner_path, "mirror": mirror,
-                           "caps": caps}
+                           "caps": caps, "sub_style": sub_style}
         threading.Thread(target=_link_worker, args=(dlid, url),
                          daemon=True).start()
         made.append(dlid)
@@ -4970,12 +5219,14 @@ def _banner_dir():
 
 
 def list_banners():
-    """Доступные баннеры из assets/*.{mp4,webm}: [{id, name, dur, size, green}]."""
+    """Доступные баннеры из assets/*.{mp4,webm,png,jpg}: [{id, name, dur, size, green}]."""
     import glob
     items = []
     try:
         files = sorted(glob.glob(os.path.join(BASE, "assets", "*.mp4"))
-                       + glob.glob(os.path.join(BASE, "assets", "*.webm")))
+                       + glob.glob(os.path.join(BASE, "assets", "*.webm"))
+                       + glob.glob(os.path.join(BASE, "assets", "*.png"))
+                       + glob.glob(os.path.join(BASE, "assets", "*.jpg")))
     except Exception:
         files = []
     for p in files:
@@ -4992,7 +5243,9 @@ def list_banners():
             green = bool(ac._banner_green(p))
         except Exception:
             green = False
-        if ac._banner_shard(p):
+        if ac._banner_static(p):
+            name += " · статика · плашка внизу"
+        elif ac._banner_shard(p):
             name += " · хромакей · 90% · 1.2x"
         elif green:
             name += " · хромакей · 95%"
@@ -5014,7 +5267,7 @@ def resolve_banner(name):
     base = os.path.basename(str(name or "").strip())
     if not base or ".." in base or "/" in base:
         return None
-    if not base.endswith((".mp4", ".webm")):
+    if not base.endswith((".mp4", ".webm", ".png", ".jpg", ".jpeg", ".webp")):
         return None
     p = os.path.join(BASE, "assets", base)
     return p if os.path.isfile(p) else None

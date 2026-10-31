@@ -1,8 +1,11 @@
 """AI-нарезка как Opus Clip: транскрибация -> скоринг моментов -> вертикаль 9:16 -> субтитры."""
 import json
+import math
 import os
+import random as _random
 import re
 import subprocess
+import sys
 import threading
 import urllib.request
 
@@ -285,13 +288,25 @@ GAMEPLAYS = {
     "subway": {"file": "subway.mp4",
                "query": "https://www.youtube.com/watch?v=bdmG3oh-ZD8",
                "format": "137+ba/299+ba/bv*[height<=1080]+ba/b[height<=1080]/b"},
+    # Телефонная вертикалка 1080×1918: чистый ран без меню и магазинов,
+    # персонаж всегда в кадре. Для сплит-раскладки лучше 16:9-записи с ПК:
+    # там низ кадра — трава, а тут рабочий низ и HUD сверху.
+    "subway_mobile": {"file": "subway_mobile.mp4",
+                      "query": "https://www.youtube.com/watch?v=QPW3XwBoQlw",
+                      "format": "137+ba/299+ba/bv*[height<=1080]+ba/b[height<=1080]/b"},
     "minecraft": {"file": "minecraft.mp4",
                    "query": "ytsearch1:minecraft parkour gameplay no commentary",
                    "format": "bv*[height<=1080]+ba/b[height<=1080]/b"},
     "wall_kickers": {"file": "wall_kickers.mp4",
                      "query": "https://www.youtube.com/watch?v=gpOqOFqYgMo",
                      "format": "bv*[height<=1080][width>=1600]+ba/b[width>=1600]/b"},
+    # Процедурный геймплей: не качается, а рисуется balls_sim.py (шарики в
+    # круге с вращающимся разрывом). Каждый рендер — новый ролик, поэтому в
+    # настройках можно держать "balls_random": на каждый клип берётся свой.
+    "balls": {"file": "balls_01.mp4", "query": "", "format": "", "gen": True},
+    "balls_random": {"file": "balls_01.mp4", "query": "", "format": "", "gen": True},
 }
+BALLS_SIM = os.path.join(BASE, "balls_sim.py")
 GAMEPLAY_FILE = os.path.join(GAMEPLAY_DIR, "subway.mp4")
 
 # Сплит-раскладка 1080x1920: верх сериал 40% / низ геймплей 60%
@@ -318,6 +333,32 @@ def _banner_shard(path: str | None = None) -> bool:
     return n == _SHARD_BANNER or "shard" in n or "vpn" in n
 
 
+_STATIC_CACHE = {}
+
+
+def _banner_static(path: str | None = None) -> bool:
+    """Статичный баннер (плашка внизу весь ролик), а не видеоврезка.
+    Признак — длинный креатив (≥15с): ролики на 1-5 мин рекламодатель
+    делает ровно для того, чтобы картинка висела постоянно. Плюс явные
+    имена (static/баннер/5min), чтобы не зависеть от длины файла."""
+    key = path or BANNER_FILE
+    if key in _STATIC_CACHE:
+        return _STATIC_CACHE[key]
+    res = False
+    try:
+        n = os.path.basename(key).lower()
+        dur = _real_dur(key)
+        if dur <= 0:
+            _w, _h, _n, _f = _probe_wh_fps(key)
+            dur = (_n / _f) if (_n and _f) else 0.0
+        res = (dur >= BANNER_STATIC_MIN_DUR
+               or "static" in n or "5min" in n or "стат" in n)
+    except Exception:
+        res = False
+    _STATIC_CACHE[key] = res
+    return res
+
+
 def _banner_speed(path: str | None = None) -> float:
     return 1.2 if _banner_shard(path) else BANNER_SPEED
 
@@ -331,6 +372,32 @@ def _banner_alpha(path: str | None = None) -> float:
 BANNER_W = 1022  # бокс 1022×537 = 26.5% экрана (норма рекламодателя 25%+)
 BANNER_ZOOM = 1.0  # без наезда: весь баннер виден целиком, ничего не режем
 BANNER_GAP = 8  # зазор под фильмом: баннер висит прямо под верхом, не задевая
+
+# --- Статичный баннер: плашка внизу, а не врезка на весь экран ------------
+# Широкие тонкие креативы (ShardVPN 780×200) — это статика: рекламодатель
+# держит картинку минутами, чтобы её можно было ставить в слот. Врезкой
+# с заморозкой такой файл не поставить (5 мин не влезают в 45-секундный
+# клип), поэтому он висит плашкой ВЕСЬ ролик.
+# Ставим ВНИЗУ, в НАТИВНОМ размере (никакого апскейла — текст остаётся
+# резким, как задумал дизайнер) на отдельную «полку» из размытого
+# продолжения геймплея. Геймплей при этом ужимается на высоту полки:
+# персонаж сабвея бежит внизу кадра, и раньше баннер ложился ему на ноги.
+BANNER_STATIC_MIN_DUR = 15.0   # креатив длиннее 15с = статика, не врезка
+BANNER_SHELF_H = 355           # высота полки под плашку 1.238x (18.5% кадра)
+BANNER_STATIC_BOTTOM = 95      # отступ от низа кадра до кромки плашки
+# --- «Шары в круге» (balls_sim.py): плашка висит ПОД кольцом --------------
+# У этого геймплея низ кадра пустой (bottom_pad=0.246), поэтому плашку
+# ставим не к низу кадра, а сразу под кольцом. Кольцо в ролике 1080x1200
+# кончается на 823px, т.е. на 0.6858 высоты — значение фиксированное в
+# _geometry() balls_sim.py (radius = min(w*0.46, area*0.5*0.82), area =
+# h*(1-bottom_pad)), так что его можно посчитать, не заглядывая в кадр.
+BALLS_RING_BOTTOM = 823.0 / 1200.0
+BANNER_BALLS_GAP = 38          # отступ от кольца до ВИДИМОЙ кромки плашки
+# 1.3 / 1.05 = 1.238 — просили ужать плашку ещё на 5% от прежних +30%
+# (780x200 -> 966x248). Дальше по рендерам ещё домножается на ±0.25%,
+# чтобы плашка не была пиксель-в-пиксель одинаковой в клипах пачки.
+BANNER_STATIC_ZOOM = 1.238
+BANNER_STATIC_ALPHA = 0.98     # статика почти непрозрачная: текст читается
 FFMPEG = os.path.expanduser("~/.local/bin/ffmpeg")
 os.environ["PATH"] = (os.path.expanduser("~/.deno/bin") + ":"
                       + os.path.expanduser("~/.local/bin") + ":"
@@ -2193,7 +2260,7 @@ def render_twitch_clip(src: str, moment: dict, segs, out: str,
                        antidetect: bool = False, mirror: bool = False,
                        banner: bool = True, banner_path: str | None = None,
                        max_total: float | None = None,
-                       bgm: str | None = None):
+                       bgm: str | None = None, sub_style: str = "classic"):
     """Вертикаль 1080x1920 для стримов: верх 30% — вебка стримера
     (авто-поиск рамкой), низ 70% — его катка (вебка там затемнена).
     Режимы как в клипах: антидетект, зеркало, баннер Мусордроп по середине
@@ -2219,7 +2286,10 @@ def render_twitch_clip(src: str, moment: dict, segs, out: str,
     cx0, cy0, cw0, ch0 = (cam[0] * W, cam[1] * H, cam[2] * W, cam[3] * H)
     if mirror:
         cx0 = W - cx0 - cw0
-    font = _font(62)
+    _sv = _sub_pil(sub_style, 62)
+    if _sv.get("off"):
+        captions = False
+    font = _font(_sv.get("size", 62))
     seam = TOP_H2
     # хук-надпись на первые 3 секунды: крупный текст сверху
     font_hook = _font(84)
@@ -2497,32 +2567,16 @@ def render_twitch_clip(src: str, moment: dict, segs, out: str,
             if captions and not banner_on:
                 words = _active_words(segs, t)
                 if words:
-                    ch, act = _caption_states(words, t)
+                    ch, act = _caption_states(words, t, _sv.get("per_line") or 4)
                     if ch:
                         img = Image.fromarray(frame)
                         dr = ImageDraw.Draw(img)
-                        lines = _split_lines(dr, font, ch, OUT_W2 - 140)
-                        hs = []
-                        for ln in lines:
-                            txt = " ".join(w["w"] for w in ln)
-                            bbox = dr.textbbox((0, 0), txt, font=font, stroke_width=3)
-                            hs.append(bbox[3] - bbox[1])
-                        block = sum(hs) + 8 * (len(lines) - 1)
+                        lines = _split_lines(dr, font, ch, OUT_W2 - 140,
+                                             _sv.get("stroke", 3))
+                        block = _cap_draw(dr, font, lines, act, OUT_W2 / 2.0,
+                                          0, _sv, measure_only=True)
                         y = min(seam - 36 - block, 1560)
-                        for li, ln in enumerate(lines):
-                            txt = " ".join(w["w"] for w in ln)
-                            bbox = dr.textbbox((0, 0), txt, font=font, stroke_width=3)
-                            tw = bbox[2] - bbox[0]
-                            x = (OUT_W2 - tw) / 2
-                            for wi, w in enumerate(ln):
-                                pre = " ".join(v["w"] for v in ln[:wi])
-                                pre = (pre + " ") if pre else ""
-                                bx = dr.textbbox((0, 0), pre, font=font, stroke_width=3)
-                                wx = x + (bx[2] - bx[0])
-                                col = "#FFD60A" if wi == act else "white"
-                                dr.text((wx, y), w["w"], font=font, fill=col,
-                                        stroke_width=3, stroke_fill="black")
-                            y += hs[li] + 8
+                        _cap_draw(dr, font, lines, act, OUT_W2 / 2.0, y, _sv)
                         frame = __import__("numpy").asarray(img)
             if hook_words and t_rel < 3.0:
                 imgh = Image.fromarray(frame)
@@ -2655,9 +2709,14 @@ def tiktok_safety_check(path: str) -> dict:
 
 def _gameplay_ok(path: str) -> bool:
     """Геймплей годен для низа сплита: читается, >10МБ и не мельче 720p
-    по короткой стороне (иначе апскейл в низ 1080x1152 даст мыло)."""
+    по короткой стороне (иначе апскейл в низ 1080x1152 даст мыло).
+    Процедурные ролики (balls_*) весят меньше: чёрный фон жмётся в ноль,
+    поэтому для них порог по размеру другой."""
     try:
-        if not os.path.exists(path) or os.path.getsize(path) <= 10 << 20:
+        if not os.path.exists(path):
+            return False
+        min_mb = 1.0 if os.path.basename(path).startswith("balls_") else 10.0
+        if os.path.getsize(path) <= min_mb * (1 << 20):
             return False
         if not _readable_video(path):
             return False
@@ -2730,17 +2789,24 @@ def gameplay_items() -> list[dict]:
             size = 0
         items.append({"id": base, "name": base, "dur": dur,
                       "size": size, "w": w, "h": h, "fps": fps})
+    # «шары в круге»: на каждый клип свой ролик — так низ не повторяется
+    if any(it["id"].startswith("balls_") for it in items):
+        items.insert(0, {"id": "balls_random", "name": "balls (новый каждый клип)",
+                         "dur": 60.0, "size": 0, "w": 1080, "h": 1200, "fps": 30})
     return items
 
 
 def gameplay_value(value: str | None) -> str:
     """Имя из UI/конфига -> существующий файл gameplay/ (для настроек)."""
     raw = os.path.basename(str(value or "").strip())
+    # «случайный каждый клип» — не файл, а режим: оставляем как есть
+    if raw in ("balls_random", "balls"):
+        return "balls_random"
     if raw in GAMEPLAYS:
         return GAMEPLAYS[raw]["file"]
     if raw and os.path.isfile(os.path.join(GAMEPLAY_DIR, raw)):
         return raw
-    return GAMEPLAYS["subway"]["file"]
+    return GAMEPLAYS["subway_mobile"]["file"]
 
 
 def resolve_gameplay(value: str | None) -> str | None:
@@ -2748,6 +2814,8 @@ def resolve_gameplay(value: str | None) -> str | None:
     raw = str(value or "").strip()
     if not raw:
         return None
+    if raw in ("balls", "balls_random"):
+        return ensure_gameplay("balls_random")
     if os.path.isfile(raw):
         p = raw
     else:
@@ -2763,9 +2831,51 @@ def resolve_gameplay(value: str | None) -> str | None:
     return _gameplay_30fps(p)
 
 
-def ensure_gameplay(name: str = "subway") -> str | None:
+def balls_generate(seed: int | None = None, duration: float = 60.0,
+                   size: str = "1080x1200", timeout: int = 900) -> str | None:
+    """Рендерит новый процедурный геймплей «шары в круге» в gameplay/.
+
+    balls_sim.py рисует всё сам (чёрный фон, оранжевое кольцо с вращающимся
+    разрывом, пастельные шарики под гравитацией) — 60с рендерятся за ~10с.
+    """
+    if not os.path.isfile(BALLS_SIM):
+        return None
+    os.makedirs(GAMEPLAY_DIR, exist_ok=True)
+    k = 1
+    while os.path.exists(os.path.join(GAMEPLAY_DIR, f"balls_{k:02d}.mp4")):
+        k += 1
+    out = os.path.join(GAMEPLAY_DIR, f"balls_{k:02d}.mp4")
+    try:
+        subprocess.run([sys.executable, BALLS_SIM, "-o", out,
+                        "--duration", str(duration), "--size", size,
+                        "--seed", str(seed if seed is not None
+                                      else _random.randrange(1, 10 ** 9))],
+                       timeout=timeout, check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        return None
+    return out if _gameplay_ok(out) else None
+
+
+def _balls_pick() -> str | None:
+    """Случайный готовый ролик «шары в круге»; если пусто — генерируем новый."""
+    try:
+        names = sorted(n for n in os.listdir(GAMEPLAY_DIR)
+                       if n.startswith("balls_") and n.endswith(".mp4"))
+    except OSError:
+        names = []
+    good = [p for p in (os.path.join(GAMEPLAY_DIR, n) for n in names)
+            if _gameplay_ok(p)]
+    if good:
+        return _random.choice(good)
+    return balls_generate()
+
+
+def ensure_gameplay(name: str = "subway_mobile") -> str | None:
     """Возвращает путь к закэшированному геймплею; если нет — качает с YouTube."""
-    meta = GAMEPLAYS.get(name) or GAMEPLAYS["subway"]
+    if name in ("balls", "balls_random"):
+        return _balls_pick()
+    meta = GAMEPLAYS.get(name) or GAMEPLAYS["subway_mobile"]
     dest = os.path.join(GAMEPLAY_DIR, meta["file"])
 
     def _to_bad(p):
@@ -3146,7 +3256,14 @@ def _banner_fmt(bpath: str | None = None, aa: float | None = None) -> str:
     """Форматная цепочка баннера: Trading — 0.7, все остальные — 0.95
     (хромакей-файлы — после вычитания зелени). Сквозь баннер чуть
     видно видео. aa можно дрожать по рендерам (уникализация).
-    Вставлять ПЕРЕД setpts."""
+    Вставлять ПЕРЕД setpts.
+    Статика — почти непрозрачная (0.98): плашка маленькая, сквозь неё
+    геймплей только мешает читать текст."""
+    if _banner_static(bpath):
+        a = (BANNER_STATIC_ALPHA if aa is None
+             else max(0.90, min(1.0, float(aa))))
+        return (f"{_banner_key_vf(bpath)}format=yuva420p,"
+                f"colorchannelmixer=aa={a:.3f}")
     if _banner_shard(bpath):
         a = 0.90
     else:
@@ -3157,6 +3274,29 @@ def _banner_fmt(bpath: str | None = None, aa: float | None = None) -> str:
     if _banner_trading(bpath):
         return "format=yuva420p,colorchannelmixer=aa=0.700"
     return f"format=yuva420p,colorchannelmixer=aa={a:.3f}"
+
+
+def _bn_unique_vf() -> str:
+    """Лёгкая уникализация САМОГО баннера: каждый рендер плашка чуть-чуть
+    другая — яркость/контраст/насыщенность/тон/зерно. Глазом не видно,
+    но баннерная область не совпадает пиксель-в-пиксель между клипами
+    пачки (иначе куски пачки матчатся по ней при сравнении).
+
+    Зерно ПАТТЕРНОЕ (allf=p), не временное: плашка статична, временное
+    зерно на ней мерцает и сразу читается как «шумный» баннер.
+
+    Вставлять ДО _banner_fmt() — то есть до format=yuva420p и кейинга:
+    eq/hue на сыром yuv420p источника поддержаны везде, на yuva420p
+    часть сборок ffmpeg ругается. Плюс порог кейинга от рендера к
+    рендеру гуляет на доли процента — тоже в плюс уникализации."""
+    import random
+    br = random.uniform(-0.010, 0.010)
+    ct = random.uniform(0.990, 1.010)
+    sa = random.uniform(0.986, 1.014)
+    hu = random.uniform(-0.35, 0.35)
+    gr = random.randint(1, 3)
+    return (f"eq=brightness={br:.4f}:contrast={ct:.4f}:saturation={sa:.4f},"
+            f"hue=h={hu:.3f},noise=alls={gr}:allf=p")
 
 
 # Минимум площади под крупные баннеры: 26.6% экрана 1080x1920.
@@ -3196,6 +3336,116 @@ def _banner_full(bpath: str | None = None) -> bool:
     return "music" in n
 
 
+_BANNER_CONTENT = {}
+
+
+def _banner_content_frac(path: str | None = None):
+    """(y0, y1) — доли ВИДИМОГО содержимого креатива по вертикали (0..1).
+
+    У хромакей-креативов сверху и снизу широкие зелёные поля: после
+    вычитания зелени они прозрачные, и плашка в кадре оказывается НИЖЕ
+    своего бокса (у ShardVPN 780x200 — на 16% высоты, т.е. ~40px при
+    боксе 248). Из-за этого между кольцом геймплея и плашкой зияла
+    чёрная дыра. Считаем реальную кромку по кадрам креатива, кеш на
+    процесс. Для обычных (не хромакей) креативов — (0.0, 1.0)."""
+    key = path or BANNER_FILE
+    if key in _BANNER_CONTENT:
+        return _BANNER_CONTENT[key]
+    res = (0.0, 1.0)
+    try:
+        if _banner_green(key) or _banner_shard(key):
+            import cv2
+            import numpy as _np
+            import tempfile
+            _w, _h, _n, _f = _probe_wh_fps(key)
+            dur = (_n / _f) if (_n and _f) else 0.0
+            y0, y1 = 1.0, 0.0
+            for frac in (0.08, 0.35, 0.62):
+                tmp = os.path.join(tempfile.gettempdir(),
+                                   f"bcont_{os.getpid()}.png")
+                try:
+                    subprocess.run(
+                        [FFMPEG, "-y", "-v", "error",
+                         "-ss", f"{max(dur * frac, 0.0):.2f}", "-i", key,
+                         "-frames:v", "1", tmp],
+                        timeout=60, check=False)
+                    fr = cv2.imread(tmp)
+                    if fr is None:
+                        continue
+                    _b = fr[:, :, 0].astype(float)
+                    _g = fr[:, :, 1].astype(float)
+                    _r = fr[:, :, 2].astype(float)
+                    green = (_g > 90) & (_g > _r * 1.35) & (_g > _b * 1.35)
+                    rows = _np.nonzero((~green).sum(axis=1)
+                                       > fr.shape[1] * 0.02)[0]
+                    if not len(rows):
+                        continue
+                    y0 = min(y0, float(rows[0]) / max(fr.shape[0], 1))
+                    y1 = max(y1, float(rows[-1]) / max(fr.shape[0], 1))
+                finally:
+                    try:
+                        os.remove(tmp)
+                    except OSError:
+                        pass
+            if y1 > y0:
+                res = (y0, y1)
+    except Exception:
+        res = (0.0, 1.0)
+    _BANNER_CONTENT[key] = res
+    return res
+
+
+def _banner_static_box(bpath: str, out_w: int = OUT_W, out_h: int = OUT_H,
+                       jitter: bool = True, visible_top: int | None = None):
+    """(w, h, x, y) статичной плашки: НАТИВНЫЙ размер креатива (апскейла
+    нет — только даунскейл, если креатив шире кадра), по центру, прижата
+    к низу с отступом под интерфейс TikTok.
+    visible_top — поставить по ВИДИМОЙ кромке креатива (не по боксу):
+    у хромакей-плашек сверху прозрачное поле, и бокс висит выше картинки.
+    jitter ±4px — плашка не должна быть пиксель-в-пиксель одинаковой
+    во всех клипах пачки (иначе куски пачки матчатся между собой)."""
+    import random
+    try:
+        bw0, bh0, _, _ = _probe_wh_fps(bpath)
+    except Exception:
+        bw0, bh0 = 0, 0
+    if (not bw0 or not bh0) and str(bpath).lower().endswith(
+            (".png", ".jpg", ".jpeg", ".webp")):
+        try:                      # cv2 не всегда читает картинку — спросим PIL
+            from PIL import Image
+            with Image.open(bpath) as _im:
+                bw0, bh0 = _im.size
+        except Exception:
+            pass
+    if not bw0 or not bh0:
+        bw0, bh0 = 780, 200
+    # плашка намеренно крупнее нативного креатива: на телефоне 780px
+    # в 1080-кадре читаются мелко. 1.238 = прежние +30%, ужатые на 5%.
+    # Плюс ±0.25% зума на рендер — размер тоже не совпадает байт-в-байт.
+    maxw = max(int(out_w) - 40, 320)
+    _z = BANNER_STATIC_ZOOM * (random.uniform(0.9975, 1.0025) if jitter else 1.0)
+    w = min(int(round(bw0 * _z)), maxw)
+    h = int(round(bh0 * w / max(bw0, 1)))
+    if h > int(out_h * 0.4):
+        h = int(out_h * 0.4)
+        w = int(round(bw0 * h / max(bh0, 1)))
+    w, h = max(w // 2 * 2, 2), max(h // 2 * 2, 2)
+    x = (int(out_w) - w) // 2
+    y = int(out_h) - BANNER_STATIC_BOTTOM - h
+    if visible_top is not None:
+        # ставим по видимой кромке: сверху креатива прозрачное поле y0
+        _y0, _y1 = _banner_content_frac(bpath)
+        y = int(round(float(visible_top) - _y0 * h))
+        # снизу тоже прозрачное поле — не даём плашке уехать за кадр
+        y = min(y, int(out_h) - int(round(_y1 * h)) - 8)
+    if jitter:
+        x += random.randint(-5, 5)
+        y += random.randint(-3, 3)
+    x = max(0, min(x, max(int(out_w) - w, 0)))
+    y = max(0, min(y, max(int(out_h) - h, 0)))
+    return w, h, x, y
+
+
 def _banner_box(bpath: str, out_h: int = 1920, top: int = 0):
     """(ширина, высота, верх) бокса баннера: обычные горизонтальные —
     широко внизу по центру (как раньше), вертикальные (кроме Trading) —
@@ -3211,6 +3461,10 @@ def _banner_box(bpath: str, out_h: int = 1920, top: int = 0):
         bw0, bh0, _, _ = _probe_wh_fps(bpath)
     except Exception:
         bw0, bh0 = 0, 0
+    if _banner_static(bpath):
+        # статика: нативный размер, прижата к низу кадра
+        _w, _h, _x, _y = _banner_static_box(bpath, out_h=out_h)
+        return (_w, _h, _y)
     if _banner_big(bpath) and bw0 > bh0:
         return (_BANNER_BIG_W, _BANNER_BIG_H,
                 (out_h - _BANNER_BIG_H) // 2 + random.randint(-15, 15))
@@ -3477,10 +3731,145 @@ def _banner_eff(path: str | None = None) -> float:
             n = int(c.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
             f = c.get(cv2.CAP_PROP_FPS) or 60
             c.release()
-            _BANNER_EFF[key] = (n / max(f, 1)) / _banner_speed(key) if n else 4.22
+            dur = (n / max(f, 1)) if n else 4.22
+            # статика (5 мин) — не врезка: слот фиксированный, иначе
+            # хронометраж ролика раздувается до длины креатива
+            if _banner_static(key):
+                dur = min(dur, 8.0)
+            _BANNER_EFF[key] = dur / _banner_speed(key) if n else dur
         except Exception:
             _BANNER_EFF[key] = 4.22
     return _BANNER_EFF[key]
+
+
+# ---------- типы субтитров ----------
+# Один словарь на «тип сабов»: из него собирается и ASS-стиль (сплит,
+# история, уникализатор), и PIL-отрисовка (блюр / трек лица), поэтому
+# выбранный тип выглядит одинаково во всех режимах.
+# Цвета текста — RRGGBB, обводки/тени — готовые ASS-значения AABBGGRR
+# (так «классика» остаётся пиксель-в-пиксель прежней).
+SUB_PRESETS = {
+    "classic": dict(
+        label="Классика · караоке",
+        size=1.00, font="Arial", bold=-1, spacing=0,
+        primary="FFFFFF", kara="FFD60A",
+        outline_c="&H80000000", back_c="&H80000000",
+        border=1, bw=3, sh=1, blur=0, pop=False, upper=False,
+        per_line=None, pil_stroke=3, plate=False),
+    "classic_caps": dict(
+        # то же караоке, но КАПСОМ: белый -> янтарный, размер и обводка
+        # как у «классики», меняется только регистр
+        label="Караоке · классика КАПСОМ",
+        size=1.00, font="Arial", bold=-1, spacing=0,
+        primary="FFFFFF", kara="FFD60A",
+        outline_c="&H80000000", back_c="&H80000000",
+        border=1, bw=3, sh=1, blur=0, pop=False, upper=True,
+        per_line=None, pil_stroke=3, plate=False),
+    "tiktok": dict(
+        label="TikTok · жирный",
+        size=1.16, font="Arial", bold=-1, spacing=1,
+        primary="FFFFFF", kara="",
+        outline_c="&H00000000", back_c="&H80000000",
+        border=1, bw=6, sh=2, blur=0, pop=True, upper=True,
+        per_line=3, pil_stroke=6, plate=False),
+    "box": dict(
+        label="Плашка · подложка",
+        size=1.02, font="Arial", bold=-1, spacing=0,
+        primary="FFFFFF", kara="",
+        outline_c="&H00000000", back_c="&H00000000",
+        border=3, bw=14, sh=0, blur=0, pop=False, upper=True,
+        per_line=3, pil_stroke=0, plate=True),
+    "neon": dict(
+        label="Неон · свечение",
+        size=1.10, font="Arial", bold=-1, spacing=2,
+        primary="00E5FF", kara="FFFFFF",
+        outline_c="&H00A800FF", back_c="&H80000000",
+        border=1, bw=4, sh=0, blur=3, pop=False, upper=True,
+        per_line=3, pil_stroke=4, plate=False),
+    "impact": dict(
+        label="Удар · огромный",
+        size=1.42, font="Arial", bold=-1, spacing=0,
+        primary="FFFFFF", kara="FFD60A",
+        outline_c="&H000000FF", back_c="&H80000000",
+        border=1, bw=7, sh=2, blur=0, pop=True, upper=True,
+        per_line=2, pil_stroke=7, plate=False),
+    "minimal": dict(
+        label="Минимал · тонкий",
+        size=0.80, font="Arial", bold=0, spacing=0,
+        primary="FFFFFF", kara="",
+        outline_c="&H90000000", back_c="&H90000000",
+        border=1, bw=2, sh=0, blur=0, pop=False, upper=False,
+        per_line=5, pil_stroke=2, plate=False),
+    "word": dict(
+        label="Слово · по одному",
+        size=1.62, font="Arial", bold=-1, spacing=0,
+        primary="FFFFFF", kara="FFD60A",
+        outline_c="&H00000000", back_c="&H80000000",
+        border=1, bw=6, sh=2, blur=0, pop=True, upper=True,
+        per_line=1, pil_stroke=6, plate=False),
+    "none": dict(label="Без субтитров", off=True),
+}
+
+
+def _sub_preset(name) -> dict:
+    """Имя типа сабов -> пресет. Неизвестное имя = «классика»."""
+    n = str(name or "").strip().lower()
+    if n in ("", "default", "classic"):
+        return SUB_PRESETS["classic"]
+    return SUB_PRESETS.get(n) or SUB_PRESETS["classic"]
+
+
+def _sub_off(name) -> bool:
+    return bool(_sub_preset(name).get("off"))
+
+
+def _ass_col(rgb: str) -> str:
+    """'RRGGBB' -> 'BBGGRR': ASS хранит цвет в обратном порядке каналов."""
+    r = str(rgb or "").strip().lstrip("#")
+    if len(r) != 6:
+        return "FFFFFF"
+    return (r[4:6] + r[2:4] + r[0:2]).upper()
+
+
+def _sub_style_line(p: dict, font_size: int, name: str = "Cap") -> str:
+    """Строка Style для ASS из пресета (кроме названия — всё из p)."""
+    fs = max(14, int(round(font_size * float(p["size"]))))
+    kara = _ass_col(p["kara"] or p["primary"])
+    return (f"Style: {name},{p['font']},{fs},&H00{_ass_col(p['primary'])},"
+            f"&H00{kara},"
+            f"{p['outline_c']},{p['back_c']},{p['bold']},0,0,0,100,100,"
+            f"{p['spacing']},0,{p['border']},{p['bw']},{p['sh']},5,40,40,40,1")
+
+
+def _sub_tags(p: dict, pos_y: int) -> str:
+    """Теги появления реплики: позиция + свечение/«вдох» по пресету."""
+    t = "{\\an5\\pos(540,%d)" % int(pos_y)
+    if p["blur"]:
+        t += "\\blur%d" % int(p["blur"])
+    if p["pop"]:
+        t += "\\fscx114\\fscy114\\t(0,120,\\fscx100\\fscy100)"
+    return t + "}"
+
+
+def _sub_word(p: dict, w) -> str:
+    s = str(w).replace("{", "(").replace("}", ")")
+    return s.upper() if p["upper"] else s
+
+
+def _sub_pil(name, base: int) -> dict:
+    """Параметры отрисовки для покадровых PIL-режимов."""
+    p = _sub_preset(name)
+    if p.get("off"):
+        return {"off": True}
+    return {"off": False,
+            "size": max(14, int(round(base * float(p["size"])))),
+            "fill": "#" + p["primary"],
+            "hl": "#" + (p["kara"] or p["primary"]),
+            "stroke": int(p["pil_stroke"]),
+            "stroke_fill": "#000000",
+            "upper": p["upper"],
+            "plate": p["plate"],
+            "per_line": p["per_line"]}
 
 
 def _ass_captions(segs, start: float, spd: float, wins, b_eff: float,
@@ -3489,7 +3878,7 @@ def _ass_captions(segs, start: float, spd: float, wins, b_eff: float,
                   max_chars: int = 40, title_color: str = "",
                   title_pos: int = 100, hook_text: str = "",
                   hook_pos: int = 0, hook_size: int = 40,
-                  hook_color: str = "") -> bool:
+                  hook_color: str = "", style: str = "classic") -> bool:
     """ASS-субтитры с пословным караоке (белый -> жёлтый, как было в PIL).
     Время — уже в координатах итога (фризы баннеров учтены).
     pos_y/font_size/max_words — для 4:3-формата историй, где сабы стоят
@@ -3506,6 +3895,13 @@ def _ass_captions(segs, start: float, spd: float, wins, b_eff: float,
                 acc += b_eff
         return t + acc
 
+    _p = _sub_preset(style)
+    if _p.get("off"):
+        # «без субтитров»: реплики не собираем, но хук/заголовок рисуем
+        _p = dict(SUB_PRESETS["classic"])
+        segs = []
+    _mw = int(_p["per_line"] or max_words)
+
     head = ["[Script Info]",
             "ScriptType: v4.00+",
             "PlayResX: 1080",
@@ -3518,6 +3914,7 @@ def _ass_captions(segs, start: float, spd: float, wins, b_eff: float,
             "Alignment, MarginL, MarginR, MarginV, Encoding",
             f"Style: Hook,Arial,{int(font_size)},&H00FFFFFF,&H000AD6FF,"
             "&H80000000,&H80000000,-1,0,0,0,100,100,0,0,1,3,1,5,40,40,40,1",
+            _sub_style_line(_p, font_size, "Cap"),
             f"Style: HookTop,Arial,{int(hook_size)},&H00{hook_color or 'FFFFFF'},"
             f"&H00{hook_color or 'FFFFFF'},&H00000000,&H80000000,"
             "-1,0,0,0,100,100,0,0,1,4,0,8,80,80,40,1",
@@ -3566,7 +3963,7 @@ def _ass_captions(segs, start: float, spd: float, wins, b_eff: float,
             wtxt = str(w.get("w", ""))
             cur.append(w)
             cur_chars += len(wtxt) + (1 if len(cur) > 1 else 0)
-            if (len(cur) >= max(1, int(max_words)) or
+            if (len(cur) >= max(1, _mw) or
                     cur_chars >= max(8, int(max_chars)) or
                     re.search(r"[.!?…]$", wtxt)):
                 chunks.append(cur)
@@ -3580,11 +3977,14 @@ def _ass_captions(segs, start: float, spd: float, wins, b_eff: float,
                 continue
             if any(oA - 0.05 <= (cs0 + ce0) / 2 <= oB + 0.05 for oA, oB, _c in wins):
                 continue  # под баннером сабы не показываем
-            txt = "".join("{\\k%d}%s " % (
-                max(1, int(round((float(w["e"]) - float(w["s"])) * 100))),
-                str(w["w"]).replace("{", "(").replace("}", ")")) for w in ch)
-            dlgs.append([cs0, ce0,
-                         f"{{\\an5\\pos(540,{int(pos_y)})}}{txt.strip()}"])
+            if _p["kara"]:
+                # караоке: активное слово красится в SecondaryColour
+                txt = "".join("{\\k%d}%s " % (
+                    max(1, int(round((float(w["e"]) - float(w["s"])) * 100))),
+                    _sub_word(_p, w["w"])) for w in ch).strip()
+            else:
+                txt = " ".join(_sub_word(_p, w["w"]) for w in ch)
+            dlgs.append([cs0, ce0, _sub_tags(_p, pos_y) + txt])
     # концы — ровно до начала следующей: иначе реплики налезают друг на друга
     dlgs.sort(key=lambda d: d[0])
     for i, (s0, e0, tx) in enumerate(dlgs):
@@ -3592,7 +3992,7 @@ def _ass_captions(segs, start: float, spd: float, wins, b_eff: float,
             e0 = min(e0, dlgs[i + 1][0] - 0.01)
         if e0 - s0 < 0.2:
             continue
-        body.append(f"Dialogue: 0,{_ts(s0)},{_ts(e0)},Hook,,0,0,0,,{tx}")
+        body.append(f"Dialogue: 0,{_ts(s0)},{_ts(e0)},Cap,,0,0,0,,{tx}")
         n_dlgs += 1
     if part_title:
         n_dlgs += 1
@@ -3603,13 +4003,17 @@ def _ass_captions(segs, start: float, spd: float, wins, b_eff: float,
     return True
 
 
-def _uniq_ass(segs, path: str) -> bool:
+def _uniq_ass(segs, path: str, style: str = "classic") -> bool:
     """Караоке-субтитры для цепочки уникализатора: низ по центру,
     белый -> жёлтый активный. segs уже на выходной шкале времени.
     Возвращает True если есть хоть реплика (иначе жечь нечего)."""
     def _ts(t: float) -> str:
         t = max(t, 0.0)
         return f"{int(t // 3600)}:{int((t % 3600) // 60):02d}:{t % 60:05.2f}"
+    _p = _sub_preset(style)
+    if _p.get("off"):
+        return False
+    _mw = int(_p["per_line"] or 5)
     head = ["[Script Info]",
             "ScriptType: v4.00+",
             "PlayResX: 1080",
@@ -3620,8 +4024,7 @@ def _uniq_ass(segs, path: str) -> bool:
             "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
             "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
             "Alignment, MarginL, MarginR, MarginV, Encoding",
-            "Style: Hook,Arial,64,&H00FFFFFF,&H000AD6FF,&H80000000,&H80000000,"
-            "-1,0,0,0,100,100,0,0,1,3,1,5,40,40,40,1",
+            _sub_style_line(_p, 64, "Cap"),
             "[Events]",
             "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, "
             "Effect, Text"]
@@ -3633,7 +4036,7 @@ def _uniq_ass(segs, path: str) -> bool:
         chunks, cur = [], []
         for w in ws:
             cur.append(w)
-            if len(cur) >= 5 or re.search(r"[.!?…]$", str(w.get("w", ""))):
+            if len(cur) >= _mw or re.search(r"[.!?…]$", str(w.get("w", ""))):
                 chunks.append(cur)
                 cur = []
         if cur:
@@ -3643,11 +4046,13 @@ def _uniq_ass(segs, path: str) -> bool:
             ce0 = float(ch[-1]["e"]) + 0.3
             if ce0 - cs0 < 0.3:
                 continue
-            txt = "".join("{\\k%d}%s " % (
-                max(1, int(round((float(w["e"]) - float(w["s"])) * 100))),
-                str(w["w"]).replace("{", "(").replace("}", ")")) for w in ch)
-            dlgs.append([cs0, ce0,
-                         f"{{\\an5\\pos(540,1450)}}{txt.strip()}"])
+            if _p["kara"]:
+                txt = "".join("{\\k%d}%s " % (
+                    max(1, int(round((float(w["e"]) - float(w["s"])) * 100))),
+                    _sub_word(_p, w["w"])) for w in ch).strip()
+            else:
+                txt = " ".join(_sub_word(_p, w["w"]) for w in ch)
+            dlgs.append([cs0, ce0, _sub_tags(_p, 1450) + txt])
     dlgs.sort(key=lambda d: d[0])
     n_dlgs = 0
     for i, (s0, e0, tx) in enumerate(dlgs):
@@ -3655,7 +4060,7 @@ def _uniq_ass(segs, path: str) -> bool:
             e0 = min(e0, dlgs[i + 1][0] - 0.01)
         if e0 - s0 < 0.2:
             continue
-        body.append(f"Dialogue: 0,{_ts(s0)},{_ts(e0)},Hook,,0,0,0,,{tx}")
+        body.append(f"Dialogue: 0,{_ts(s0)},{_ts(e0)},Cap,,0,0,0,,{tx}")
         n_dlgs += 1
     if n_dlgs == 0:
         return False
@@ -3852,15 +4257,15 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
                       mirror: bool = False, gameplay: str | None = None,
                       banner: bool = True, banner_path: str | None = None,
                       max_total: float | None = None, bgm: str | None = None,
-                      hook: str = ""):
+                      hook: str = "", sub_style: str = "classic"):
     """Вертикаль 1080x1920: верх 40% — сериал (кроп за лицом по 2с / центр),
     низ 60% — геймплей (закольцован, немой). Сабы ASS с караоке у шва.
     Звук — только из сериала. Сборка одним графом ffmpeg (без покадрового цикла)."""
     import cv2
     import random
-    gp = resolve_gameplay(gameplay) or ensure_gameplay("subway")
+    gp = resolve_gameplay(gameplay) or ensure_gameplay("subway_mobile")
     if not gp or not os.path.exists(gp):
-        raise RuntimeError("нет геймплея — положи gameplay/subway.mp4")
+        raise RuntimeError("нет геймплея — положи gameplay/subway_mobile.mp4")
     start, end = float(moment["start"]), float(moment["end"])
     cap = cv2.VideoCapture(src)
     src_fps = float(cap.get(cv2.CAP_PROP_FPS) or 30) or 30
@@ -3881,7 +4286,15 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
     else:
         spd = random.uniform(0.985, 1.015)
     od = dur / spd  # длина контента на выходе
-    if banner and max_total:
+    _bpath0 = banner_path or BANNER_FILE
+    # статика не режет хронометраж (она висит плашкой, а не врезкой)
+    _static_bn = bool(banner) and _banner_static(_bpath0) \
+        and os.path.exists(_bpath0)
+    # «Шары в круге»: под кругом уже есть чёрная полоса, поэтому статичную
+    # плашку кладём ПОВЕРХ низа кадра, а не на отдельную полку — полка
+    # ужимала геймплей и обрезала круг сверху.
+    _bn_float = _static_bn and os.path.basename(gp).startswith("balls_")
+    if banner and max_total and not _static_bn:
         # итог вместе с баннерами влезает в линзу: ужимаем контент
         be = _banner_eff(banner_path)
         for _ in range(3):
@@ -3921,7 +4334,7 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
     use_banner = bool(banner) and os.path.exists(bpath)
     b_eff = 0.0
     wins = []
-    if use_banner:
+    if use_banner and not _static_bn:
         b_eff = _banner_eff(bpath)
         n = max(1, min(6, int(round(od / 50.0))))
         if od < b_eff + 3:
@@ -3935,7 +4348,6 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
                 oA = cA + k * b_eff
                 wins.append((oA, oA + b_eff, cA))
     out_dur = od + b_eff * len(wins)
-    # --- верх: куски по 2с со статичным кропом за лицом (или центр) ---
     if antidetect:
         Z = random.uniform(1.03, 1.06)
         jx, jy = random.uniform(-0.04, 0.04), random.uniform(-0.04, 0.04)
@@ -3944,14 +4356,74 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
         jx, jy = random.uniform(-0.015, 0.015), random.uniform(-0.015, 0.015)
     sc0 = max(1080.0 / max(W, 1), 768.0 / max(H, 1)) * Z
     sw0, sh0 = int(round(W * sc0)), int(round(H * sc0))
-    SEG = 2.0
-    segs2 = []
-    t = 0.0
-    while t < od - 1e-6:
-        segs2.append((t, min(t + SEG, od)))
-        t += SEG
-    if not segs2:
-        segs2 = [(0.0, od)]
+    # --- верх: статичный кроп + редкие быстрые перескоки ---
+    # Медленное следование за лицом зритель читает как «плавание» картинки,
+    # поэтому рамка стоит на месте. Но если лицо реально уехало из кадра
+    # (человек отошёл, камера панорамировала), ждать нельзя — тогда рамка
+    # ОДИН раз быстро перескакивает (за JUMP секунд) и снова стоит.
+    # Стартовая позиция — медиана по клипу: устойчива к выбросам детектора.
+    maxx = max(sw0 - 1080, 0)
+    maxy = max(sh0 - 768, 0)
+    y_top = int(round(min(max((0.5 + jy) * sh0 - 384.0, 0.0), maxy)))
+
+    def _face_px(tt):
+        cx = face_x_at(track, start + tt * spd) if track else 0.5
+        return (cx + jx) * sw0
+
+    # безопасная зона: лицо должно быть в центральных 60% кропа
+    SAFE_LO, SAFE_HI = 216.0, 864.0
+    HOLD = 2.0   # столько секунд терпим, прежде чем перескочить
+    JUMP = 0.18  # длительность самого перескока
+    # ffmpeg не переваривает больше ~100 вложенных if() — держим запас
+    MAX_PTS = 60
+
+    x_top = int(round(min(max((0.5 + jx) * sw0 - 540.0, 0.0), maxx)))
+    jump_t, jump_x = [0.0], [float(x_top)]
+    if track and maxx > 0:
+        _step = 0.25
+        _n = max(2, int(math.ceil(od / _step)) + 1)
+        _ts = [min(i * _step, od) for i in range(_n)]
+        _fx = [_face_px(t) for t in _ts]
+        # старт — медиана желаемой позиции
+        _med = sorted(min(max(f - 540.0, 0.0), maxx) for f in _fx)
+        cur = float(_med[len(_med) // 2])
+        jump_x = [cur]
+        out_since = None
+        for t, f in zip(_ts, _fx):
+            pos = f - cur
+            if SAFE_LO <= pos <= SAFE_HI:
+                out_since = None
+                continue
+            if out_since is None:
+                out_since = t
+                continue
+            if t - out_since < HOLD:
+                continue
+            # лицо ушло из зоны надолго — один быстрый перескок в центр
+            new_x = min(max(f - 540.0, 0.0), maxx)
+            if abs(new_x - cur) >= 8.0 and len(jump_x) < MAX_PTS:
+                t0 = max(jump_t[-1], t - JUMP)
+                if t0 > jump_t[-1]:
+                    jump_t.append(t0)
+                    jump_x.append(cur)
+                jump_t.append(t)
+                jump_x.append(new_x)
+                cur = new_x
+            out_since = None
+
+    if len(jump_t) == 1:
+        x_expr = f"{jump_x[0]:.1f}"
+    else:
+        x_expr = f"{jump_x[-1]:.1f}"
+        for _i in range(len(jump_x) - 2, -1, -1):
+            t0, v0 = jump_t[_i], jump_x[_i]
+            t1, v1 = jump_t[_i + 1], jump_x[_i + 1]
+            dt = max(t1 - t0, 1e-3)
+            if abs(v1 - v0) < 0.5:
+                seg = f"{v0:.1f}"
+            else:
+                seg = f"{v0:.1f}+{v1 - v0:.1f}*clip((t-{t0:.2f})/{dt:.2f},0,1)"
+            x_expr = f"if(lt(t,{t1:.2f}),{seg},{x_expr})"
     vf_ad = ""
     af_ad = ""
     if antidetect:
@@ -3964,26 +4436,10 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
         af_ad = (f",aresample=44100,asetrate=44100*{_k:.4f},"
                  f"aresample=44100,atempo={1 / _k:.4f}")
         vf_ad = "," + _soft_unique_vf()
-    fc = [f"[0:v]trim=start={off:.3f}:end={off + dur:.3f},setpts=(PTS-STARTPTS)/{spd:.4f}[cbase]",
-          f"[cbase]split={len(segs2)}" + "".join(f"[cs{i}]" for i in range(len(segs2)))]
-    # подменяем split-источник на именованные чанки
-    vparts = []
-    for pi, (a, b) in enumerate(segs2):
-        if track:
-            cx = face_x_at(track, start + (a + b) / 2 * spd)
-        else:
-            cx = 0.5
-        fx = (cx + jx) * sw0
-        fy = (0.5 + jy) * sh0
-        x = int(round(min(max(fx - 540.0, 0.0), max(sw0 - 1080, 0.0))))
-        y = int(round(min(max(fy - 384.0, 0.0), max(sh0 - 768, 0.0))))
-        vparts.append(
-            f"[cs{pi}]trim=start={a:.3f}:end={b:.3f},setpts=PTS-STARTPTS,"
-            f"fps=30,scale={sw0}:{sh0}:flags=lanczos,"
-            f"crop=1080:768:x={x}:y={y},setsar=1[fp{pi}]")
-    fc.extend(vparts)
-    fc.append("".join(f"[fp{pi}]" for pi in range(len(segs2)))
-              + f"concat=n={len(segs2)}:v=1:a=0[vtop0]")
+    fc = [f"[0:v]trim=start={off:.3f}:end={off + dur:.3f},"
+          f"setpts=(PTS-STARTPTS)/{spd:.4f},fps=30,"
+          f"scale={sw0}:{sh0}:flags=lanczos,"
+          f"crop=1080:768:x='{x_expr}':y={y_top},setsar=1[vtop0]"]
     if mirror:
         fc.append("[vtop0]hflip[vtop]")
     else:
@@ -3999,14 +4455,82 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
         _gflip = ",hflip" if random.random() < 0.5 else ""
     _gbar = _gameplay_bar(gp)
     _gpre = f"crop=iw:ih-{_gbar}:0:0," if _gbar else ""
-    fc.append(f"[1:v]fps=30{_gflip},{_gpre}scale=1080:1152:flags=lanczos:"
-              f"force_original_aspect_ratio=increase,"
-              f"crop=1080:1152:x='(in_w-out_w)/2+({jx:.4f}*in_w)':"
-              f"y='(in_h-out_h)/2+({jy:.4f}*in_h)',setsar=1[vbot]")
+    # Телефонный (вертикальный) геймплей кадрируем ОТ НИЗА: персонаж бежит
+    # в нижней трети такого кадра, а сверху висит HUD (счёт/монеты). Центр-
+    # кроп вырезал бы как раз его и оставлял небо. У горизонтальных 16:9
+    # всё наоборот — там рабочий центр, низ это трава.
+    _gcrop_y = ("'in_h-out_h'" if gH > gW
+                else f"'((in_h-out_h)/2+({jy:.4f}*in_h))'")
+    if _static_bn and not _bn_float:
+        # Под плашку уходит отдельная «полка»: геймплей ужимаем ровно на
+        # её высоту. В сабвее персонаж бежит по самому низу кадра — с
+        # прежними 1152px плашка ложилась ему на ноги. Теперь он целиком
+        # в игровом окне, а баннер висит ПОД ним, на своей полке.
+        _gh = max(BOT_H - BANNER_SHELF_H, 480)
+        fc.append(f"[1:v]fps=30{_gflip},{_gpre}scale=1080:{_gh}:flags=lanczos:"
+                  f"force_original_aspect_ratio=increase,"
+                  f"crop=1080:{_gh}:x='(in_w-out_w)/2+({jx:.4f}*in_w)':"
+                  f"y={_gcrop_y},setsar=1[gpv]")
+        fc.append("[gpv]split=2[gpa][gpb]")
+        # Полка — размытое продолжение НИЗА геймплея (там земля/рельсы):
+        # стык совпадает по картинке и читается как расфокус, а не как
+        # обрубленная полоса. Сжимаем в 60px и растягиваем обратно —
+        # дешевле gblur и без полос/ореолов.
+        _sh_h = BOT_H - _gh
+        # берём не самую кромку (там тёмная земля → полка в чёрную плашку),
+        # а полосу чуть выше: в размытии остаётся цвет сцены
+        _sh_y = max(_gh - _sh_h - 120, 0)
+        fc.append(f"[gpb]crop=1080:{_sh_h}:0:{_sh_y},"
+                  f"scale=60:{max(_sh_h // 16, 2)},"
+                  f"scale=1080:{_sh_h}:flags=bicubic,"
+                  f"eq=brightness=-0.22:saturation=0.70,setsar=1[shelf]")
+        # Мягкий заход в полку: 96px ступенчатого затемнения 0→33% — ровно
+        # столько же даёт eq полки. Персонаж сабвея бежит у самого низа
+        # кадра, без этого захода его доска/ноги режутся о кромку полки.
+        _fh, _fsteps = 150, 10
+        _fb = []
+        for _i in range(_fsteps):
+            _a = 0.33 * ((_i + 1) / _fsteps) ** 1.6
+            _fb.append(f"drawbox=x=0:y={_gh - _fh + _i * (_fh // _fsteps)}:"
+                       f"w=1080:h={_fh // _fsteps + 1}:color=black@{_a:.3f}:t=fill")
+        # тонкий разделитель по кромке: полка читается как панель, а не
+        # как «сломанный кадр»
+        _fb.append("drawbox=x=0:y=%d:w=1080:h=2:color=white@0.13:t=fill"
+                   % max(_gh - 2, 0))
+        fc.append("[gpa]" + ",".join(_fb) + "[gpad]")
+        fc.append("[gpad][shelf]vstack=inputs=2[vbot]")
+    else:
+        fc.append(f"[1:v]fps=30{_gflip},{_gpre}scale=1080:1152:flags=lanczos:"
+                  f"force_original_aspect_ratio=increase,"
+                  f"crop=1080:1152:x='(in_w-out_w)/2+({jx:.4f}*in_w)':"
+                  f"y={_gcrop_y},setsar=1[vbot]")
     fc.append("[vtop][vbot]vstack=inputs=2[vbase]")
     # --- баннеры: фриз + оверлей (как было покадрово, только графом) ---
     vlink = "[vbase]"
-    if use_banner:
+    _ins_bn = use_banner and not _static_bn   # врезка с заморозкой
+    if _static_bn:
+        # статика: плашка висит весь ролик, без заморозки и без врезки
+        _vtop = None
+        if _bn_float:
+            # «шары в круге»: плашку ставим СРАЗУ ПОД кольцом, а не к низу
+            # кадра. Низ ролика кадрируется снизу (crop от in_h-out_h), так
+            # что кромка кольца в итоговом кадре считается без чтения пикселей.
+            _gb = max(gH - _gbar, 1)
+            _gsc = max(1080.0 / max(gW, 1), BOT_H / float(_gb))
+            _gsh = _gb * _gsc
+            _ring = TOP_H + int(round(BALLS_RING_BOTTOM * _gsh
+                                      - max(_gsh - BOT_H, 0)))
+            _vtop = _ring + BANNER_BALLS_GAP
+        _sbw, _sbh, _sbx, _sby = _banner_static_box(bpath, visible_top=_vtop)
+        _sba = random.uniform(0.955, 1.0)
+        fc.append(f"[2:v]trim=start=0:end={out_dur:.3f},setpts=PTS-STARTPTS,"
+                  f"scale={_sbw}:{_sbh}:flags=lanczos,"
+                  f"{_bn_unique_vf()},"
+                  f"{_banner_fmt(bpath, _sba)},fps=30[bn0]")
+        fc.append(f"[vbase][bn0]overlay={_sbx}:{_sby}:"
+                  f"eof_action=repeat[vcat]")
+        vlink = "[vcat]"
+    elif _ins_bn:
         n_br = 1 + 2 * len(wins)
         fc.append(f"[vbase]split={n_br}" + "".join(f"[vb{i}]" for i in range(n_br)))
         order = []
@@ -4053,6 +4577,7 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
         else:
             _bn_scale = f"scale={_bn_w}:-2"
         fc.append(f"[2:v]{_bn_scale},fps=30,"
+                  f"{_bn_unique_vf()},"
                   f"{_banner_fmt(bpath, random.uniform(0.94, 0.96))},"
                   f"setpts=PTS/{_banner_speed(bpath):.3f}[bn0]")
         fc.append(f"[bn0]split={len(wins)}" + "".join(f"[bb{i}]" for i in range(len(wins))))
@@ -4075,7 +4600,7 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
                 segs if captions else [], start, spd, wins, b_eff, asspath,
                 str(moment.get("part_title") or ""),
                 hook_text=_hook, hook_pos=TOP_H + 40, hook_size=84,
-                hook_color="00FFFF")
+                hook_color="00FFFF", style=sub_style)
         except Exception:
             ass_ok = False
     if ass_ok:
@@ -4104,7 +4629,7 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
         fc.append(f"[0:a]atrim=start={off:.3f}:end={off + dur:.3f},asetpts=(PTS-STARTPTS)/{spd:.4f},"
                   f"aresample=44100,atempo={spd:.4f}{af_ad},"
                   f"aformat=sample_fmts=fltp:channel_layouts=stereo[aa]")
-    if use_banner and has_src_a:
+    if _ins_bn and has_src_a:
         n_br = 1 + len(wins)
         fc.append(f"[aa]asplit={n_br}" + "".join(f"[aa{i}]" for i in range(n_br)))
         aorder = []
@@ -4143,7 +4668,7 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
     bargs = []
     if use_bgm:
         # под баннером фон молчит (звук баннера играет сам по себе)
-        _bwin = [(oA, oB) for (oA, oB, _cA) in wins] if use_banner else None
+        _bwin = [(oA, oB) for (oA, oB, _cA) in wins] if _ins_bn else None
         bargs, baf = _bgm_args(bgm, out_dur, mute=_bwin)
         bgi = 3 if use_banner else 2
         fc.append(f"[{bgi}:a]{baf}[bg0]")
@@ -4163,7 +4688,12 @@ def render_split_clip(src: str, moment: dict, segs, out: str,
            "-stream_loop", "-1", "-ss", str(round(goff, 3)), "-t", str(round(od, 3)),
            "-i", gp]
     if use_banner:
-        cmd += ["-i", bpath]
+        # статичная плашка — это PNG: без -loop 1 ffmpeg отдаёт один кадр,
+        # и на длинном клипе оверлей успевает мигнуть в чёрное
+        if bpath.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+            cmd += ["-loop", "1", "-i", bpath]
+        else:
+            cmd += ["-i", bpath]
     if bargs:
         cmd += bargs
     cmd += ["-filter_complex", ";".join(fc),
@@ -4223,10 +4753,10 @@ def _active_words(segs, t: float):
     return None
 
 
-def _split_lines(dr, font, words, max_w: int):
+def _split_lines(dr, font, words, max_w: int, stroke: int = 3):
     """Строки по реальной ширине: жадно добиваем до max_w, максимум 2 строки."""
     def _w(t):
-        bb = dr.textbbox((0, 0), t, font=font, stroke_width=3)
+        bb = dr.textbbox((0, 0), t, font=font, stroke_width=max(0, stroke))
         return bb[2] - bb[0]
     lines, line, wdt = [], [], 0
     for w in words:
@@ -4243,6 +4773,50 @@ def _split_lines(dr, font, words, max_w: int):
     if line and len(lines) < 2:
         lines.append(line)
     return lines[:2]
+
+
+def _cap_draw(dr, font, lines, act, cx: float, y: float, sv: dict,
+              gap: int = 8, measure_only: bool = False) -> float:
+    """Отрисовка сабов в покадровых режимах (блюр / трек / стрим) с учётом
+    выбранного типа: цвет, активное слово, толщина обводки, КАПС, плашка.
+    Возвращает высоту блока — по ней считается позиция над швом."""
+    stroke = int(sv.get("stroke", 3) or 0)
+    fill = sv.get("fill") or "#FFFFFF"
+    hl = sv.get("hl") or fill
+    up = bool(sv.get("upper"))
+    plate = bool(sv.get("plate"))
+
+    def _t(w):
+        s = str(w.get("w", "") if isinstance(w, dict) else w).replace("\n", " ")
+        return s.upper() if up else s
+
+    hs, ws = [], []
+    for ln in lines:
+        bb = dr.textbbox((0, 0), " ".join(_t(w) for w in ln),
+                         font=font, stroke_width=stroke)
+        hs.append(max(bb[3] - bb[1], 1))
+        ws.append(bb[2] - bb[0])
+    block = sum(hs) + gap * max(0, len(lines) - 1)
+    if measure_only:
+        return block
+    for li, ln in enumerate(lines):
+        x = cx - ws[li] / 2.0
+        if plate:
+            pad = max(10, stroke + 8)
+            dr.rectangle([x - pad, y - pad * 0.45,
+                          x + ws[li] + pad, y + hs[li] + pad * 0.45],
+                         fill="black")
+        for wi, w in enumerate(ln):
+            pre = " ".join(_t(v) for v in ln[:wi])
+            pre = (pre + " ") if pre else ""
+            bx = dr.textbbox((0, 0), pre, font=font, stroke_width=stroke)
+            wx = x + (bx[2] - bx[0])
+            dr.text((wx, y), _t(w), font=font,
+                    fill=(hl if wi == act else fill),
+                    stroke_width=stroke,
+                    stroke_fill=sv.get("stroke_fill", "black"))
+        y += hs[li] + gap
+    return block
 
 
 def _caption_states(words, t: float, per_line: int = 4):
@@ -5031,7 +5605,7 @@ def swap_banner(src: str, out: str, banner_path: str | None = None,
     vparts.append(f"[1:v]trim=start=0:end={b_eff:.3f},setpts=PTS-STARTPTS[vf]")
     vparts.append(f"[2:v]split={1 + len(covf)}"
                   + "".join(f"[cbs{i}]" for i in range(1 + len(covf))))
-    _sw_fmt = _banner_fmt(bpath, random.uniform(0.94, 0.96))
+    _sw_fmt = _bn_unique_vf() + "," + _banner_fmt(bpath, random.uniform(0.94, 0.96))
     _sw_pre = ""
     if _banner_trading(bpath):
         _tcx, _tcy, _tcw, _tch = _BANNER_TR_CROP
@@ -5473,7 +6047,8 @@ def uniqualize_video(src: str, out: str, opts: dict | None = None,
                     _adj2.append(_s)
                 _prev = _tx or _prev
             if sum(len(_s["words"]) for _s in _adj2) >= 8:
-                ass_ok = _uniq_ass(_adj2, asspath)
+                ass_ok = _uniq_ass(_adj2, asspath,
+                                   opts.get("sub_style", "classic"))
         except Exception:
             ass_ok = False
     if ass_ok:
@@ -6070,7 +6645,7 @@ def compute_parts(segs, min_len: float = 45.0, max_len: float = 59.0):
 def render_blur9(src: str, moment: dict, segs, out: str,
                  captions: bool = True, progress=None,
                  antidetect: bool = False, mirror: bool = False,
-                 bgm: str | None = None):
+                 bgm: str | None = None, sub_style: str = "classic"):
     """Блюр 9:16 под кражу у конкурентов: фон — блюр копия кадра,
     центр — резкий fit (края с вотермарками режутся), зеркало + зум +
     сдвиг цвета против Content ID. Сабы наши, звук оригинала."""
@@ -6090,7 +6665,10 @@ def render_blur9(src: str, moment: dict, segs, out: str,
         cap.release()
         raise RuntimeError("момент за пределами видео")
     dur = end - start
-    font = _font(64)
+    _sv = _sub_pil(sub_style, 64)
+    if _sv.get("off"):
+        captions = False
+    font = _font(_sv.get("size", 64))
     cmd = [FFMPEG, "-y", "-v", "error",
            "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "1080x1920",
            "-r", str(fps),
@@ -6168,32 +6746,16 @@ def render_blur9(src: str, moment: dict, segs, out: str,
             if captions:
                 words = _active_words(segs, t)
                 if words:
-                    ch, act = _caption_states(words, t)
+                    ch, act = _caption_states(words, t, _sv.get("per_line") or 4)
                     if ch:
                         img = Image.fromarray(frame)
                         dr = ImageDraw.Draw(img)
-                        lines = _split_lines(dr, font, ch, OUT_W - 140)
-                        hs = []
-                        for ln in lines:
-                            txt = " ".join(w["w"] for w in ln)
-                            bbox = dr.textbbox((0, 0), txt, font=font, stroke_width=3)
-                            hs.append(bbox[3] - bbox[1])
-                        block = sum(hs) + 8 * (len(lines) - 1)
+                        lines = _split_lines(dr, font, ch, OUT_W - 140,
+                                             _sv.get("stroke", 3))
+                        block = _cap_draw(dr, font, lines, act, OUT_W / 2.0,
+                                          0, _sv, measure_only=True)
                         y = min(1330 - block, 1560)
-                        for li, ln in enumerate(lines):
-                            txt = " ".join(w["w"] for w in ln)
-                            bbox = dr.textbbox((0, 0), txt, font=font, stroke_width=3)
-                            tw = bbox[2] - bbox[0]
-                            x = (OUT_W - tw) / 2
-                            for wi, w in enumerate(ln):
-                                pre = " ".join(v["w"] for v in ln[:wi])
-                                pre = (pre + " ") if pre else ""
-                                bx = dr.textbbox((0, 0), pre, font=font, stroke_width=3)
-                                wx = x + (bx[2] - bx[0])
-                                col = "#FFD60A" if wi == act else "white"
-                                dr.text((wx, y), w["w"], font=font, fill=col,
-                                        stroke_width=3, stroke_fill="black")
-                            y += hs[li] + 8
+                        _cap_draw(dr, font, lines, act, OUT_W / 2.0, y, _sv)
                         frame = __import__("numpy").asarray(img)
             if moment.get("cta") and t > end - 2.5:
                 frame = _with_part2_cta(frame, font)
@@ -6251,7 +6813,8 @@ def render_story_part(src: str, moment: dict, segs, out: str,
                       captions: bool = True, blur_subs: bool = True,
                       unique: bool = True, mirror: bool = False,
                       cta: bool = True, bgm: str | None = None,
-                      bgm_vol: float = 0.14, hq: bool = False, progress=None):
+                      bgm_vol: float = 0.14, hq: bool = False, progress=None,
+                      sub_style: str = "classic"):
     """Китайская история в TikTok-формате: ролик 4:3 по центру на блюр-фоне,
     кроп всегда с зумом за героем, китайские сабы снизу размыты, русские —
     под роликом. Звук — оригинальная русская озвучка, без перевода."""
@@ -6311,7 +6874,7 @@ def render_story_part(src: str, moment: dict, segs, out: str,
                 segs, start, spd, [], 0.0, ass_path,
                 part_title=title,
                 pos_y=cap_y, font_size=cap_fs, max_words=3, max_chars=28,
-                title_color=tcol, title_pos=tpos)
+                title_color=tcol, title_pos=tpos, style=sub_style)
         except Exception:
             has = False
         if not has:
@@ -6568,6 +7131,45 @@ def find_story_music() -> str | None:
     return cands[0]
 
 
+def pin_static_banner(src: str, out: str, banner_path: str | None = None) -> str:
+    """Статичный баннер в готовый ролик: плашка внизу на весь хронометраж,
+    без заморозки кадра и без врезки. Хронометраж не меняется, звук тоже —
+    меняется только картинка внизу."""
+    import shutil as _sh
+    import random
+    bpath = banner_path if banner_path and os.path.exists(banner_path) else BANNER_FILE
+    W, H, nfr, fps = _probe_wh_fps(src)
+    if (not os.path.exists(bpath) or W <= 0 or H <= 0 or nfr <= 0 or fps <= 0):
+        if os.path.abspath(src) != os.path.abspath(out):
+            _sh.copyfile(src, out)
+        return out
+    dur = float(nfr) / float(fps)
+    fps_i = max(int(round(min(fps, 30.0))), 15)
+    bw, bh, by = _banner_box(bpath, out_h=H)
+    bw, bh = max(bw // 2 * 2, 2), max(bh // 2 * 2, 2)
+    bx = max((W - bw) // 2, 0)
+    by = max(0, min(H - bh, by))
+    _a = random.uniform(0.96, 1.0)
+    fc = (f"[0:v]null[v0];"
+          f"[1:v]trim=start=0:end={dur:.3f},setpts=PTS-STARTPTS,"
+          f"scale={bw}:{bh}:flags=lanczos,{_bn_unique_vf()},"
+          f"{_banner_fmt(bpath, _a)},"
+          f"fps={fps_i}[bn];"
+          f"[v0][bn]overlay={bx}:{by}:eof_action=repeat[vout]")
+    cmd = [FFMPEG, "-y", "-v", "error", "-i", src,
+           "-stream_loop", "-1", "-t", f"{dur:.3f}", "-i", bpath,
+           "-filter_complex", fc, "-map", "[vout]", "-map", "0:a?",
+           "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+           "-pix_fmt", "yuv420p", "-r", str(fps_i),
+           "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
+           "-t", f"{dur:.3f}", out]
+    r = subprocess.run(cmd, capture_output=True, text=True,
+                       timeout=max(300, int(dur * 4) + 240))
+    if r.returncode != 0 or not _has_video(out):
+        raise RuntimeError(f"статика не встала: {(r.stderr or '')[-300:]}")
+    return out
+
+
 def insert_banners(src: str, out: str, banner_path: str | None = None,
                    every: float = 60.0, middle: bool = False,
                    progress=None) -> str:
@@ -6575,10 +7177,14 @@ def insert_banners(src: str, out: str, banner_path: str | None = None,
     хронометража (49с -> 1, 130с -> 2, 194с -> 3, 240с -> 4). На точке
     вставки видео замирает последним кадром, поверх играет баннер
     (хромакей/прозрачность как в остальных режимах), звук источника
-    сменяет звук баннера или тишина."""
+    сменяет звук баннера или тишина.
+    Статичный баннер (длинный креатив) не врезается, а висит плашкой
+    внизу весь ролик — см. pin_static_banner."""
     import shutil as _sh
     import random
     bpath = banner_path if banner_path and os.path.exists(banner_path) else BANNER_FILE
+    if _banner_static(bpath):
+        return pin_static_banner(src, out, bpath)
     W, H, nfr, fps = _probe_wh_fps(src)
     if (not os.path.exists(bpath) or W <= 0 or H <= 0 or nfr <= 0 or fps <= 0):
         if os.path.abspath(src) != os.path.abspath(out):
@@ -6658,7 +7264,8 @@ def insert_banners(src: str, out: str, banner_path: str | None = None,
                   "".join(f"[bs{i}]" for i in range(len(pts))))
         for i in range(len(pts)):
             ve.append(f"[bs{i}]trim=start=0:end={max(bdur or b_eff * bspd, 0.1):.3f},"
-                      f"setpts=PTS-STARTPTS,{pre}{_banner_fmt(bpath, _baa)},"
+                      f"setpts=PTS-STARTPTS,{pre}{_bn_unique_vf()},"
+                      f"{_banner_fmt(bpath, _baa)},"
                       f"scale={bw}:{bh},fps={fps_i},{_beq},"
                       f"noise=alls=1:allf=t,"
                       f"setpts=PTS/{bspd:.3f}[vb{i}]")
@@ -6719,20 +7326,23 @@ def insert_banners(src: str, out: str, banner_path: str | None = None,
 def render_clip(src: str, moment: dict, segs, out: str, facetrack: bool = True,
                 captions: bool = True, progress=None, vmode: str = "face",
                 antidetect: bool = False, mirror: bool = False,
-                banner: bool = True, gameplay: str = "subway",
+                banner: bool = True, gameplay: str = "subway_mobile",
                 max_total: float | None = None, banner_path: str | None = None,
-                bgm: str | None = None, hook: str = ""):
+                bgm: str | None = None, hook: str = "",
+                sub_style: str = "classic"):
     if vmode == "split":
         return render_split_clip(src, moment, segs, out, facetrack=facetrack,
                                  captions=captions, progress=progress,
                                  antidetect=antidetect, mirror=mirror,
                                  banner=banner, gameplay=gameplay,
                                  banner_path=banner_path,
-                                 max_total=max_total, bgm=bgm, hook=hook)
+                                 max_total=max_total, bgm=bgm, hook=hook,
+                                 sub_style=sub_style)
     if vmode == "blur9":
         return render_blur9(src, moment, segs, out,
                             captions=captions, progress=progress,
-                            antidetect=antidetect, mirror=mirror, bgm=bgm)
+                            antidetect=antidetect, mirror=mirror, bgm=bgm,
+                            sub_style=sub_style)
     import cv2
     import random as _rnd
     from PIL import Image, ImageDraw
@@ -6751,7 +7361,10 @@ def render_clip(src: str, moment: dict, segs, out: str, facetrack: bool = True,
     dur = end - start
     crop_w = int(H * 9 / 16)
     track = track_faces(src, start, end) if facetrack and vmode == "face" and W > crop_w else []
-    font = _font(62)
+    _sv = _sub_pil(sub_style, 62)
+    if _sv.get("off"):
+        captions = False
+    font = _font(_sv.get("size", 62))
 
     cmd = [FFMPEG, "-y", "-v", "error",
            "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "1080x1920", "-r", str(fps),
@@ -6840,27 +7453,14 @@ def render_clip(src: str, moment: dict, segs, out: str, facetrack: bool = True,
             if captions:
                 words = _active_words(segs, t)
                 if words:
-                    ch, act = _caption_states(words, t)
+                    ch, act = _caption_states(words, t, _sv.get("per_line") or 4)
                     if ch:
                         img = Image.fromarray(frame)
                         dr = ImageDraw.Draw(img)
-                        lines = _split_lines(dr, font, ch, OUT_W - 140)
-                        y = min(cap_y, 1560)
-                        for ln in lines:
-                            txt = " ".join(w["w"] for w in ln)
-                            bbox = dr.textbbox((0, 0), txt, font=font, stroke_width=3)
-                            tw = bbox[2] - bbox[0]
-                            x = (1080 - tw) / 2
-                            # сначала обычные, потом активное поверх
-                            for wi, w in enumerate(ln):
-                                pre = " ".join(v["w"] for v in ln[:wi])
-                                pre = (pre + " ") if pre else ""
-                                bx = dr.textbbox((0, 0), pre, font=font, stroke_width=3)
-                                wx = x + (bx[2] - bx[0])
-                                col = "#FFD60A" if wi == act else "white"
-                                dr.text((wx, y), w["w"], font=font, fill=col,
-                                        stroke_width=3, stroke_fill="black")
-                            y += (bbox[3] - bbox[1]) + 8
+                        lines = _split_lines(dr, font, ch, OUT_W - 140,
+                                             _sv.get("stroke", 3))
+                        _cap_draw(dr, font, lines, act, 1080 / 2.0,
+                                  min(cap_y, 1560), _sv)
                         frame = __import__("numpy").asarray(img)
             if moment.get("cta") and t > end - 2.5:
                 frame = _with_part2_cta(frame, font)

@@ -18,3 +18,21 @@ wall_kickers.mp4
   Wall Kickers - Gameplay Walkthrough Part 1 (iOS, Android)
   https://youtu.be/gpOqOFqYgMo
   Скачан 1080p60, сконвертирован в 30fps с блендом.
+
+balls_01..NN.mp4
+  Процедурные «bouncing balls»: чёрный фон, оранжевое кольцо с вращающимся
+  разрывом, пастельные шарики под гравитацией (порт pygame-проекта
+  laiprogramming/bouncing_balls, step7.py). Ничего не качается — рендерит
+  balls_sim.py, каждый файл со своим сидом, поэтому низ не повторяется.
+
+    python3 balls_sim.py                  # один новый ролик в gameplay/
+    python3 balls_sim.py --count 6        # пачка вариантов
+    python3 balls_sim.py --duration 45 --gap 32 --spin 0.45 --counter
+    python3 balls_sim.py --preview /tmp/p.png   # один кадр для проверки
+
+  В настройках выбирается "balls (новый каждый клип)" — это режим
+  balls_random: на каждый клип берётся случайный готовый файл, а если их
+  нет — генерируется новый (ai_clips.balls_generate).
+  Файлы весят ~4 МБ (чёрный фон жмётся в ноль), поэтому в _gameplay_ok
+  для balls_* отдельный порог по размеру.
+
