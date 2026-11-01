@@ -615,8 +615,8 @@
           <select id="banFile"><option value="">По умолчанию</option></select></div>
         <label class="chk"><input type="checkbox" id="manualChk"> Свои таймкоды вместо ИИ</label>
         </div>
-        <div id="stampsBox"><textarea id="stamps" placeholder="02:15-03:10&#10;05:40-06:25"></textarea>
-          <div class="dim" style="margin-top:6px">По одному отрезку на строку (до 20): мм:сс-мм:сс или чч:мм:сс-чч:мм:сс. Границы подтягиваются к целым словам, паузы без речи вырезаются.</div></div>
+        <div id="stampsBox"><textarea id="stamps" placeholder="02:15-03:10&#10;0:30-1:29 1:44-3:52"></textarea>
+          <div class="dim" style="margin-top:6px">Одна строка — один клип (до 20). Можно писать несколько отрезков через пробел: <b>0:30-1:29 1:44-3:52</b> — соберёт 0:30–3:52 и вырежет 1:30–1:43. Границы подтягиваются к целым словам.</div></div>
         <div style="margin-top:12px">
           <label class="lbl">Теги для всех клипов задачи</label>
           <div class="ftags" id="cutTags"><span class="dim" style="font-size:12.5px">Тегов нет — создай во вкладке «Теги»</span></div>
@@ -707,8 +707,8 @@
         </div>
         <label class="chk" style="margin-top:12px"><input type="checkbox" id="anManual"> Свои таймкоды / отрезки</label>
         <div id="anStampsBox">
-          <textarea id="anStamps" placeholder="02:15-03:10&#10;05:40-06:25"></textarea>
-          <div class="dim" style="margin-top:6px">По одному отрезку на строку (до 20): мм:сс-мм:сс или чч:мм:сс-чч:мм:сс. Одна ссылка. Таймкоды считаются по исходному видео. Границы подтягиваются к целым словам, паузы без речи вырезаются даже поверх музыки.</div>
+          <textarea id="anStamps" placeholder="02:15-03:10&#10;0:30-1:29 1:44-3:52"></textarea>
+          <div class="dim" style="margin-top:6px">Одна строка — один клип (до 20). Несколько отрезков через пробел: <b>0:30-1:29 1:44-3:52</b> — соберёт 0:30–3:52 без 1:30–1:43. Одна ссылка, таймкоды по исходному видео. Границы подтягиваются к целым словам.</div>
         </div>
         <div class="chkgrid">
           <label class="chk"><input type="checkbox" id="anPause"> Вырезать все паузы</label>

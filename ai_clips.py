@@ -418,40 +418,41 @@ _CODEC_BASE = ["-profile:v", "high", "-level", "4.1",
                "-color_primaries", "bt709", "-color_trc", "bt709",
                "-colorspace", "bt709", "-color_range", "tv"]
 
+# --- профиль финального кодирования -----------------------------------
+# Было: h264_videotoolbox 9-11 Мбит на финале. Железо быстрое, но биты
+# размазаны ровно: мелкий текст сабов мылится, а простые кадры (геймплей,
+# плашка) жгут битрейт впустую. x264 по CRF кладёт биты по сложности.
+#
+# A/B на одном и том же материале (30с, 1080x1920, split-рендер, всё
+# остальное одинаково):
+#     старое (VT 9-11М)      -> 15.1 МБ, 8.3 Мбит
+#     новое (CRF 19-20, 5М)  -> 10.1 МБ, 5.3 Мбит   (-33%)
+# На прямом перегоне того же клипа без рендера: VT 7М = 17 МБ (SSIM
+# 0.9976) против x264 CRF18 = 12 МБ (SSIM 0.9974) — то же качество,
+# файл на треть меньше.
+#
+# Хочешь максимум качества: _FINAL_CRF, _FINAL_MAXRATE = (16, 17), "9M"
+# Хочешь ещё легче:         _FINAL_CRF, _FINAL_MAXRATE = (21, 22), "4M"
+_FINAL_CRF, _FINAL_MAXRATE = (19, 20), "5M"
+_LEAN_CRF, _LEAN_MAXRATE = (20, 21), "5M"
+
 
 def _video_codec_args(hq: bool = False) -> list:
-    """Железо (VideoToolbox) даёт скорость: клип 50с кодируется ~1 мин.
-    Битрейт держим TikTok-дружелюбным 6-8 Мбит VBR: файл 50с весит
-    ~35-50 МБ вместо 90-110, быстрее грузится и не застревает
-    в транскодинге TikTok (одна из причин вечных 0 просмотров).
-    Джиттер битрейта + случайный GOP — плюс к уникальности отпечатков.
-    hq=True: то же железо, но жирный битрейт 9-11М — резкость почти как
-    у x264 slow, а скорость та же (~1 мин/клип). Софтверный slow убит:
-    он давал 3-5 мин на клип, два параллельных рендера клали машину
-    и задача вечно висела на «рендер… 2/8».
-    Без железа — libx264 veryfast CRF19 (быстро и резко)."""
+    """Финальный проход: x264 по CRF, без железа.
+
+    preset fast — 6с на 30с клипа; medium давал +0.5% SSIM и +1с,
+    для 50 клипов в день это не сделка.
+    aq-mode=3 — биты в тёмные участки: низ кадра у нас почти чёрный
+    (геймплей + плашка), обычный AQ там даёт бандинг.
+    Джиттер CRF и случайный GOP — плюс к уникальности отпечатков."""
     import random as _r
-    if hq:
-        if _VT:
-            br = _r.randint(9, 11)
-            return ["-c:v", "h264_videotoolbox", *_CODEC_BASE,
-                    "-pix_fmt", "yuv420p",
-                    "-b:v", f"{br}M", "-maxrate", f"{br + 3}M",
-                    "-bufsize", f"{2 * br}M", "-allow_sw", "1",
-                    "-g", str(_r.randint(48, 72))]
-        return ["-c:v", "libx264", *_CODEC_BASE, "-pix_fmt", "yuv420p",
-                "-preset", "veryfast", "-crf", "19", "-tune", "film",
-                "-g", str(_r.randint(48, 72))]
-    if _VT:
-        br = _r.randint(6, 8)
-        return ["-c:v", "h264_videotoolbox", *_CODEC_BASE,
-                "-pix_fmt", "yuv420p",
-                "-b:v", f"{br}M", "-maxrate", f"{br + 3}M",
-                "-bufsize", f"{2 * br}M", "-allow_sw", "1",
-                "-g", str(_r.randint(48, 72))]
+    crf_rng, maxrate = (_FINAL_CRF, _FINAL_MAXRATE) if hq else (
+        _LEAN_CRF, _LEAN_MAXRATE)
     return ["-c:v", "libx264", *_CODEC_BASE, "-pix_fmt", "yuv420p",
-            "-crf", str(_r.randint(20, 22)), "-preset", "fast",
-            "-tune", "film", "-g", str(_r.randint(48, 72))]
+            "-preset", "fast", "-crf", str(_r.randint(*crf_rng)),
+            "-maxrate", maxrate, "-bufsize", "10M", "-bf", "2",
+            "-x264-params", "aq-mode=3",
+            "-g", str(_r.randint(48, 72))]
 
 
 # Единая громкость под ленту: тихие сериалы подтягиваем к уровню TikTok.
@@ -478,15 +479,13 @@ _AUDIO_OUT = ["-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2"]
 
 
 def _mezz_codec_args() -> list:
-    """Промежуточник (чистка пауз, склейки) — почти без потерь:
-    VT 14М / x264 CRF15. Финальный рендер не складывает два
-    заметных сжатия подряд."""
-    if _VT:
-        return ["-c:v", "h264_videotoolbox", *_CODEC_BASE,
-                "-pix_fmt", "yuv420p", "-b:v", "14M", "-maxrate", "20M",
-                "-bufsize", "28M", "-allow_sw", "1", "-g", "60"]
+    """Промежуточник (чистка пауз, склейки) — почти без потерь.
+    Всегда x264 CRF12, без железа: файл временный и удаляется, а вот
+    второе поколение сжатия остаётся в финале навсегда. VT 14М мылил
+    текст на титрах, CRF12 отдаёт картинку, неотличимую от исходника,
+    и стоит ~4с на 30с клипа."""
     return ["-c:v", "libx264", *_CODEC_BASE, "-pix_fmt", "yuv420p",
-            "-preset", "veryfast", "-crf", "15", "-tune", "film", "-g", "60"]
+            "-preset", "veryfast", "-crf", "12", "-g", "60"]
 
 
 def _bgm_dur(path: str) -> float:
@@ -1376,8 +1375,18 @@ def remap_segs(segs, keeps):
     return out
 
 
+_STAMP_RANGE_RE = re.compile(
+    r"(\d+:\d+(?::\d+)?(?:\.\d+)?|\d+(?:\.\d+)?)"
+    r"\s*[-\u2013\u2014]\s*"
+    r"(\d+:\d+(?::\d+)?(?:\.\d+)?|\d+(?:\.\d+)?)")
+
+
 def parse_stamps(text: str):
     """Ручные таймкоды: строки 'мм:сс-мм:сс' / 'ч:мм:сс-...' / 'сек-сек'.
+    В одной строке можно писать НЕСКОЛЬКО отрезков через пробел или запятую:
+    '0:30-1:29 1:44-3:52' — это один клип 0:30-3:52, из которого вырезан
+    кусок 1:30-1:43 (всё, что не попало в отрезки, уходит в корзину, а
+    оставшееся склеивается встык). Один отрезок в строке — поведение прежнее.
     Терпимый к мусору: '02:15-03:10 название' или лишние пробелы больше
     не убивают строку молча (раньше такое тихо уходило в авто-режим
     с DREX — отсюда и «зачем он»)."""
@@ -1403,14 +1412,36 @@ def parse_stamps(text: str):
         return total
     out = []
     for line in (text or "").splitlines():
-        line = line.strip().strip("-–— ")
-        if not line or "-" not in line.replace("–", "-").replace("—", "-"):
+        line = line.strip()
+        if not line:
             continue
-        a, b = re.split(r"\s*[-–—]\s*", line, maxsplit=1)
-        s, e = ts(a), ts(b)
-        if s is not None and e is not None and e - s >= 3:
-            out.append({"start": round(s, 1), "end": round(e, 1),
-                        "score": 100, "title": "Вручную"})
+        rngs = []
+        for a, b in _STAMP_RANGE_RE.findall(line):
+            s, e = ts(a), ts(b)
+            if s is None or e is None or e - s < 0.3:
+                continue
+            rngs.append((s, e))
+        if not rngs:
+            continue
+        # порядок в строке не важен, перекрытия склеиваем
+        rngs.sort()
+        merged = [list(rngs[0])]
+        for s, e in rngs[1:]:
+            if s <= merged[-1][1] + 0.05:
+                merged[-1][1] = max(merged[-1][1], e)
+            else:
+                merged.append([s, e])
+        merged = [(round(s, 1), round(e, 1)) for s, e in merged]
+        start, end = merged[0][0], merged[-1][1]
+        if end - start < 3:
+            continue
+        # дырки между отрезками — их и вырезаем при сборке клипа
+        cuts = [(merged[i][1], merged[i + 1][0])
+                for i in range(len(merged) - 1)
+                if merged[i + 1][0] - merged[i][1] > 0.3]
+        out.append({"start": start, "end": end, "score": 100,
+                    "title": "Вручную" + (" · склейка" if cuts else ""),
+                    "cuts": cuts})
     return out
 
 

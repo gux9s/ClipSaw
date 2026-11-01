@@ -690,6 +690,12 @@ def _story_manual_moments(stamps, kind, total_dur=0.0, segs=None):
             s, e = float(st.get("start", 0)), float(st.get("end", 0))
         except (TypeError, ValueError):
             continue
+        if st.get("cuts"):
+            # истории режут видео на части и не умеют склеивать встык:
+            # молча отдать им 0:30-3:52 вместе с дыркой — хуже, чем сказать
+            raise RuntimeError(
+                "склейка из нескольких отрезков работает только в обычной "
+                "нарезке, не в режиме историй — разбей на отдельные строки")
         if s < 0 or e <= s:
             continue
         # границы — к целым словам, иначе ручной таймкод режет полслова
@@ -820,6 +826,12 @@ def run_manual_job(job_id: str, url: str, opts: dict, stamps: list, prog) -> lis
         # (pre, pre + длина), иначе в клип попадали лишние 8 секунд до таймкода
         pre = s - max(s - 8.0, 0.0)
         clip_len = max(e - s, 1.0)
+        # несколько отрезков в одной строке: между ними дырка в исходнике —
+        # её вырезаем, оставшееся склеивается встык. Координаты переводим
+        # в шкалу слайса (он начинается с s-8).
+        slice0 = max(s - 8.0, 0.0)
+        cuts = [(float(a) - slice0, float(b) - slice0)
+                for a, b in (m.get("cuts") or [])]
         # ручной таймкод часто падает в середину слова — клип начинался
         # или заканчивался обрубком. Тянем границы к целым словам по
         # пословной транскрибации слайса (в его локальной шкале).
@@ -850,11 +862,22 @@ def run_manual_job(job_id: str, url: str, opts: dict, stamps: list, prog) -> lis
         keeps = []
         clean = os.path.join(TMP_DIR, uuid.uuid4().hex + ".mp4")
         try:
-            got = ac.remove_silence(
-                p, clean,
-                window=(pre, pre + clip_len),
-                detect=want_pauses, silences=gaps, keep_out=keeps,
-                progress=lambda q, st: _pp(q * 0.10, ))
+            if cuts:
+                # явные дырки режем ровно по таймкоду (sil_pad=0), паузы
+                # без речи — как раньше, с подушкой 0.15 по краям
+                sil = list(cuts) + [(a + 0.15, b - 0.15) for a, b in gaps]
+                got = ac.remove_silence(
+                    p, clean,
+                    window=(pre, pre + clip_len),
+                    detect=want_pauses, silences=sil, sil_pad=0.0,
+                    keep_out=keeps,
+                    progress=lambda q, st: _pp(q * 0.10, ))
+            else:
+                got = ac.remove_silence(
+                    p, clean,
+                    window=(pre, pre + clip_len),
+                    detect=want_pauses, silences=gaps, keep_out=keeps,
+                    progress=lambda q, st: _pp(q * 0.10, ))
         except Exception as ex:
             print("[manual pauses]", ex)
             try:
@@ -882,9 +905,11 @@ def run_manual_job(job_id: str, url: str, opts: dict, stamps: list, prog) -> lis
         segs_i = (ac.remap_segs(segs_p, keeps)
                   if mode != "fast" and opts.get("captions", True) else [])
         dur = ac.media_duration(stage_in) or round(clip_len, 1)
-        title_m = f"Момент {i + 1} · {_fmt_ts(s)}–{_fmt_ts(e)}"
+        title_m = f"Момент {i + 1} · {_fmt_ts(s)}–{_fmt_ts(e)}" + (
+            " · склейка" if cuts else "")
         mm = {"start": 0.0, "end": dur, "score": 100, "title": title_m,
-              "verdict": f"Вручную {_fmt_ts(s)}–{_fmt_ts(e)}",
+              "verdict": f"Вручную {_fmt_ts(s)}–{_fmt_ts(e)}" + (
+                  f" · вырезано {len(cuts)}" if cuts else ""),
               "hook": title_m[:40]}
         out = os.path.join(OUT_DIR, _clip_filename(job_id, i, opts.get("out_name", "")))
         if mode == "fast":
@@ -907,7 +932,8 @@ def run_manual_job(job_id: str, url: str, opts: dict, stamps: list, prog) -> lis
                 progress=lambda q: _pp(0.35 + max(0.0, min(1.0, q)) * 0.65))
         clips.append({
             "i": i, "title": title_m, "score": 100,
-            "verdict": f"Вручную {_fmt_ts(s)}–{_fmt_ts(e)}",
+            "verdict": f"Вручную {_fmt_ts(s)}–{_fmt_ts(e)}" + (
+                f" · вырезано {len(cuts)}" if cuts else ""),
             "hook": title_m[:40], "story": 0, "part": 0, "of": 1,
             "file": os.path.basename(out),
             "dur": ac.media_duration(out) or round(dur, 1),
@@ -951,7 +977,8 @@ def run_job(job_id: str, url: str, opts: dict):
             # текст таймкодов есть, но ничего не распарсилось — раньше такое
             # МОЛЧА уходило в авто-режим с DREX. Теперь честная ошибка.
             raise RuntimeError(
-                "таймкоды не распознались — пиши 'мм:сс-мм:сс', по одному на строку")
+                "таймкоды не распознались — пиши 'мм:сс-мм:сс'; можно "
+                "несколько отрезков в одной строке через пробел")
         if mode not in ("parts", "story") and stamps:
             # ручной путь: DREX/сцены/полное видео не нужны вообще —
             # качаем только моменты, субтитры только на эти минуты
