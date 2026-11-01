@@ -910,7 +910,8 @@ def run_manual_job(job_id: str, url: str, opts: dict, stamps: list, prog) -> lis
         mm = {"start": 0.0, "end": dur, "score": 100, "title": title_m,
               "verdict": f"Вручную {_fmt_ts(s)}–{_fmt_ts(e)}" + (
                   f" · вырезано {len(cuts)}" if cuts else ""),
-              "hook": title_m[:40]}
+              # hook пустой: название уже стоит в title, дублировать нечего
+              "hook": ""}
         out = os.path.join(OUT_DIR, _clip_filename(job_id, i, opts.get("out_name", "")))
         if mode == "fast":
             ac.fast_cut(stage_in, {"start": 0.0, "end": dur}, out)
@@ -934,7 +935,7 @@ def run_manual_job(job_id: str, url: str, opts: dict, stamps: list, prog) -> lis
             "i": i, "title": title_m, "score": 100,
             "verdict": f"Вручную {_fmt_ts(s)}–{_fmt_ts(e)}" + (
                 f" · вырезано {len(cuts)}" if cuts else ""),
-            "hook": title_m[:40], "story": 0, "part": 0, "of": 1,
+            "hook": "", "story": 0, "part": 0, "of": 1,
             "file": os.path.basename(out),
             "dur": ac.media_duration(out) or round(dur, 1),
             "size": os.path.getsize(out) if os.path.exists(out) else 0})
